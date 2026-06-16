@@ -21,7 +21,7 @@
 ## 技术栈
 
 - **桌面壳**：Tauri 2
-- **前端**：Next.js 15（SSG 模式）+ React 19 + Radix UI + Tailwind + Zustand
+- **前端**：Vite + React 19 + Radix UI + Tailwind + Zustand（桌面 SPA，无 SSR）
 - **后端**：Rust（src-tauri/）
 - **存储**：SQLite（元数据/标签）+ LanceDB（向量）+ 本地 WebP 缩略图缓存
 - **AI**：Python FastAPI Worker，PyTorch CUDA + ONNX Runtime CUDA，模型含 CLIP / RAM / PaddleOCR / InsightFace

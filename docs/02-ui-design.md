@@ -291,7 +291,7 @@ ocr_run, faces_cluster, smart_album_save, smart_album_query
 
 ## 7. 国际化
 
-i18n 走 `next-intl`：
+i18n 走 `react-i18next`（Vite 友好；Next-intl 是 Next.js 专用）：
 
 - 默认中文，准备英文（MVP3 后做）
 - 用户全局规则要求"用中文"，所以默认 zh-CN，开发期可临时切英文测渲染

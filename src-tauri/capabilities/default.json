@@ -1,0 +1,12 @@
+{
+  "$schema": "../gen/schemas/desktop-schema.json",
+  "identifier": "default",
+  "description": "MVP1 默认能力：dialog 选目录、shell 打开外部、基础 fs 读取。后续按需扩展。",
+  "windows": ["main"],
+  "permissions": [
+    "core:default",
+    "dialog:default",
+    "shell:default",
+    "fs:default"
+  ]
+}

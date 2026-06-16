@@ -105,7 +105,7 @@
 - 状态：已决（M0）
 - 时间：2026-06-15
 - 上下文：用户对前两者均不陌生，需在内存/体积与生态成熟度间权衡
-- 决定：Tauri 2 + Rust + Next.js 15
+- 决定：Tauri 2 + Rust + Vite + React 19（最初定 Next.js 15 SSG，MVP1 T1 实施时改为 Vite——桌面 SPA 不需要 SSR/SSG，Vite 启动快、依赖轻）
 - 后果：开发节奏略慢于 Electron；运行时优势明显；与同栈的 smart-search 共享经验
 
 ### ADR-002 · 选 LanceDB 而非 sqlite-vec
@@ -140,7 +140,7 @@
   - 它的 API 是"自带扫描器 + 输出报告"流程，假设你给它一组目录，并发模型自己说了算，无法插入我们的优先级队列（P0 缩略图 / P2 BLAKE3 / P3 pHash）
   - `FileEntry` 与我们的 `images.id` 表错位，要写一层 adapter，得不偿失
 - 借鉴方式：把 czkawka 当**参考实现**，从 `czkawka_core/src/tools/similar_images.rs` 学习阈值默认值、多 hash size 取舍、特殊格式（RAW/JXL/动图）跳过策略。MIT 允许直接抄代码（保留 license 头），但具体逻辑短，我们重写更清爽——抄思路不抄实现
-- 后果：MVP2 T3 工作量从"写 DCT + 测对齐 czkawka"减到"配 `HasherConfig` + 喂缩略图"；阈值与 czkawka 默认一致（pHash 8×8 + Lanczos3 + DCT），可以直接对照它的用户反馈调优
+- 后果：MVP2 T3 工作量从"写 DCT + 测对齐 czkawka"减到"配 `HasherConfig` + 喂缩略图"；默认参数与 czkawka 一致（**dHash/Gradient, hash_size=8, Lanczos3, 不启用 DCT**），可以直接对照它的用户反馈调优。具体阈值表见 `docs/04` T3 速查（czkawka 的 `SIMILAR_VALUES` 完整照搬）
 
 后续每个 MVP 完成时追加新的 ADR：
 - ADR-006 · MVP1 完成总结与遗留事项（待填）

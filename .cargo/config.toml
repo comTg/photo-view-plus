@@ -1,0 +1,12 @@
+# 项目本地 cargo 配置，覆盖全局的 tuna git 协议镜像。
+# 用 tuna 的 sparse 协议：按需拉 metadata，秒级；全局 git 协议拉整个 index 极慢。
+# 仅影响本项目。
+
+[source.crates-io]
+replace-with = "tuna-sparse"
+
+[source.tuna-sparse]
+registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
+
+[net]
+git-fetch-with-cli = true

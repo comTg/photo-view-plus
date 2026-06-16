@@ -1,0 +1,30 @@
+[package]
+name = "photo-view-plus"
+version = "0.0.1"
+description = "PhotoView+ — local photo asset manager"
+authors = ["vetoer"]
+edition = "2021"
+rust-version = "1.78"
+
+[lib]
+name = "photo_view_plus_lib"
+crate-type = ["lib", "cdylib", "staticlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = ["devtools"] }
+tauri-plugin-dialog = "2"
+tauri-plugin-shell = "2"
+tauri-plugin-fs = "2"
+
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+
+anyhow = "1"
+thiserror = "2"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# 后续 T2+ 会按需补：rusqlite / tokio / walkdir / image / image_hasher / blake3 等

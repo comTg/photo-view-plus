@@ -1,0 +1,11 @@
+{
+  "productName": "PhotoView+ (test)",
+  "identifier": "com.vetoer.photoviewplus.test",
+  "app": {
+    "windows": [
+      {
+        "title": "PhotoView+ — test"
+      }
+    ]
+  }
+}

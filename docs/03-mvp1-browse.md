@@ -42,12 +42,15 @@
 **目标**：`pnpm tauri dev` 能起一个空窗口，cargo / pnpm 命令链路畅通。
 
 具体：
-- `pnpm create tauri-app@latest` 选 React + TS + pnpm
-- 替换为 Next.js 15：`npx create-next-app@latest` 拷过来，设置 `next.config.ts: output: 'export'`
-- 三套 `tauri.conf.<profile>.json`，对应 dev / test / prod 数据库路径
-- `package.json` 加 `tauri:dev` / `tauri:test` / `tauri:prod` 三条脚本
-- Biome + ESLint + tsconfig 与 smart-search 对齐
-- 提交：仅骨架，可启动空白页
+- 手动建文件：`package.json` / `vite.config.ts` / `index.html` / `tsconfig.json` / `biome.json`
+- `src/main.tsx` + `src/App.tsx` + `src/styles/globals.css` 三栏 placeholder
+- 三套 `tauri.<profile>.json`（dev/test/prod，partial overlay 而非 extends）
+- `package.json` 加 `tauri:dev` / `tauri:test` / `tauri:prod` 三条脚本，用 `cross-env PVP_PROFILE=<x>` 注入
+- `src-tauri/Cargo.toml`：tauri 2 + tauri-plugin-{dialog,shell,fs} + serde + anyhow + thiserror + tracing
+- `src-tauri/src/{main.rs,lib.rs,config.rs,commands.rs}`：最小骨架，ping 命令返回 profile
+- `.cargo/config.toml`：sparse 镜像（项目本地，避免全局 git 协议慢）
+- Biome + tsconfig 与 smart-search 对齐
+- 提交：仅骨架，`pnpm tauri:dev` 可启动空白三栏页
 
 **验收**：`pnpm tauri:dev` 起窗口；`cargo clippy --all-targets -- -D warnings` 通过。
 

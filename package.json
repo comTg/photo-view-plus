@@ -1,0 +1,41 @@
+{
+  "name": "photo-view-plus",
+  "private": true,
+  "version": "0.0.1",
+  "description": "本地优先的 Windows 图片资产管理工具：扫描 / 浏览 / 去重 / AI 搜索",
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "lint": "biome check src/",
+    "format": "biome format --write src/",
+    "typecheck": "tsc --noEmit",
+    "tauri": "tauri",
+    "tauri:dev": "cross-env PVP_PROFILE=dev tauri dev --config src-tauri/tauri.dev.json",
+    "tauri:test": "cross-env PVP_PROFILE=test tauri dev --config src-tauri/tauri.test.json",
+    "tauri:prod": "cross-env PVP_PROFILE=prod tauri dev --config src-tauri/tauri.prod.json",
+    "tauri:build:dev": "cross-env PVP_PROFILE=dev tauri build --config src-tauri/tauri.dev.json",
+    "tauri:build:prod": "cross-env PVP_PROFILE=prod tauri build --config src-tauri/tauri.prod.json"
+  },
+  "dependencies": {
+    "@tauri-apps/api": "^2.11.0",
+    "react": "^19.2.0",
+    "react-dom": "^19.2.0"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.4",
+    "@tauri-apps/cli": "^2.11.2",
+    "@types/node": "^22.10.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "@vitejs/plugin-react": "^4.3.4",
+    "cross-env": "^7.0.3",
+    "typescript": "^5.7.0",
+    "vite": "^6.0.7"
+  },
+  "engines": {
+    "node": ">=18",
+    "pnpm": ">=9"
+  }
+}

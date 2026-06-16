@@ -1,0 +1,54 @@
+# Dependencies
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+
+# Vite / build artifacts
+dist/
+build/
+
+# Production
+*.local
+
+# Rust / Cargo
+target/
+**/*.rs.bk
+
+# Tauri
+src-tauri/target/
+src-tauri/gen/
+src-tauri/WixTools/
+
+# Generated
+*.tsbuildinfo
+
+# Logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+
+# Editor / OS
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+.idea/
+.DS_Store
+Thumbs.db
+
+# Env / secrets
+.env
+.env.local
+.env.*.local
+
+# Test artifacts
+coverage/
+.nyc_output/
+
+# Project-local app data (dev profile)
+.app-data/
+
+# Plan files etc.
+/tmp/

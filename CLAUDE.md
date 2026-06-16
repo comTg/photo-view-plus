@@ -6,7 +6,7 @@
 
 **photo-view-plus** 是本地优先的图片资产管理工具，目标平台 **Windows（RTX 5070，CUDA 本地推理）**。核心能力：目录扫描 → 缩略图缓存 → 浏览 → 去重（完全/视觉/语义三层）→ AI 标签 → 自然语言/以图搜图。
 
-技术栈：Tauri 2 + React（Next.js 15 SSG）+ Rust + SQLite + LanceDB + Python AI Worker（PyTorch CUDA / ONNX Runtime CUDA）。
+技术栈：Tauri 2 + React 19（Vite SPA）+ Rust + SQLite + LanceDB + Python AI Worker（PyTorch CUDA / ONNX Runtime CUDA）。
 
 完整设计源在仓库外：`/Volumes/HK 1/vetoer/code/mygit/my-doc/APP灵感/图片相册浏览与去重.md`。本仓库的 `docs/` 是从该设计转译出的、可分步实施的开发文档。
 
@@ -43,7 +43,7 @@ pnpm install
 cargo fetch --manifest-path src-tauri/Cargo.toml
 
 # 开发
-pnpm tauri dev                  # 启动 Tauri + Next.js dev server
+pnpm tauri dev                  # 启动 Tauri + Vite dev server
 pnpm tauri:dev                  # 用 dev profile（指向开发数据库）
 pnpm tauri:test                 # 用 test profile（临时数据库 + 测试目录）
 
@@ -71,7 +71,7 @@ pnpm ai:check                   # 检查 CUDA / 模型可用性
 
 ```
 ┌────────────────────────────────────────────────────────────┐
-│  UI 层（Next.js + React 19, SSG）                          │
+│  UI 层（Vite + React 19, 桌面 SPA）                        │
 │  - 瀑布流 / 详情 / 去重对比 / 搜索 / 设置                  │
 └────────────────────────────────────────────────────────────┘
                        │ Tauri invoke

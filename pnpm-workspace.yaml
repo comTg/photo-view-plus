@@ -1,0 +1,3 @@
+packages:
+  - .
+  # 后续 AI worker（MVP3）若独立成包，可在此追加

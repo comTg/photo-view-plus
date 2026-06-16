@@ -6,7 +6,7 @@
 
 ```
 ┌───────────────────────────────────────────────────────────────┐
-│  L1 UI 层（Next.js 15 SSG + React 19）                        │
+│  L1 UI 层（Vite + React 19 SPA）                              │
 │  ───────────────────────────────────────────────────────────  │
 │  瀑布流 · 详情面板 · 去重对比 · 搜索 · 设置 · 进度面板        │
 │  Zustand 状态 · Radix + Tailwind · react-virtuoso 虚拟列表    │
@@ -103,7 +103,7 @@ P7 人脸 embedding    ←  默认关
 | 维度 | 选定 | 备选 | 理由 |
 |------|------|------|------|
 | 桌面壳 | **Tauri 2** | Electron | 体积 10-20MB vs 100MB+；内存占用低；用户已有 smart-search 经验 |
-| 前端框架 | **Next.js 15 + SSG** | Vite + React | 与 smart-search 一致，可复用组件库与构建经验 |
+| 前端框架 | **Vite + React 19**（桌面 SPA） | Next.js 15 SSG | Tauri 桌面应用不需要 SSR/SSG/Image 优化；Vite 启动 < 1s、HMR < 50ms、依赖更轻；MVP1 单页起步，多页时再引 React Router |
 | 状态管理 | **Zustand** | Redux Toolkit | smart-search 同选；样板代码少 |
 | UI 库 | **Radix UI + Tailwind** | shadcn / MUI | 无障碍好；与 smart-search 同 |
 | 虚拟列表 | **react-virtuoso（grid）** | masonic / react-window | grid 模式直接支持瀑布流；维护活跃 |
@@ -145,7 +145,7 @@ photo-view-plus/
 ├── biome.json
 ├── tsconfig.json
 ├── src/                             # 前端
-│   ├── app/                         # Next.js App Router（SSG）
+│   ├── app/                         # 应用页面（按 docs/02 路由组织）
 │   │   ├── layout.tsx
 │   │   ├── page.tsx                 # 主浏览页（瀑布流）
 │   │   ├── dedup/page.tsx           # 去重界面（MVP2）
