@@ -69,40 +69,99 @@
 
 **验收**：所有 hash_status='ready' 的行 blake3 非空且 hex 长 64。
 
-### T3 pHash / dHash 服务
+### T3 视觉哈希服务（dHash 主选 + pHash 备选）
 
-**目标**：基于缩略图算 pHash 与 dHash。
+**目标**：基于缩略图算视觉哈希。
 
-**算法实现**：直接用 [`image_hasher`](https://crates.io/crates/image_hasher) crate，**不自己实现 DCT**。这是 czkawka（11.0.1, MIT, 2026-02 仍维护）使用的同一个 crate，pHash / dHash / aHash / Wavelet / Blockhash 全套都有，10 行代码出结果。详见 ADR-005（`docs/08-roadmap.md`）。
+**算法实现**：直接用 [`image_hasher`](https://crates.io/crates/image_hasher) crate。czkawka（11.0.1, MIT, 2026-02 仍维护）就是用它，pHash / dHash / aHash / Wavelet / Blockhash 全套都有。详见 ADR-005（`docs/08-roadmap.md`）。
 
-具体：
-- 依赖：`image_hasher = "2.x"`（运行时只依赖 `image` 与 `transpose`，无额外 GUI / 音频 / PDF 依赖）
-- 配置：
-  ```rust
-  use image_hasher::{HasherConfig, HashAlg, FilterType};
+**主选算法：dHash（Gradient）**
 
-  // pHash 8x8（64-bit），与 czkawka 默认一致
-  let phash_cfg = HasherConfig::new()
-      .hash_alg(HashAlg::Mean)            // 占位，下面覆盖
-      .hash_size(8, 8)
-      .resize_filter(FilterType::Lanczos3)
-      .preproc_dct()                       // ← 启用 DCT 即 pHash
-      .to_hasher();
+czkawka 默认 `HashAlg::Gradient`（dHash）而非 pHash——dHash 计算快 3-5 倍、对小角度旋转/裁剪更鲁棒，pHash（DCT）反而容易把"重压缩但内容一致"的图判得太严。我们沿用此默认。
 
-  let dhash_cfg = HasherConfig::new()
-      .hash_alg(HashAlg::Gradient)         // dHash
-      .hash_size(8, 8)
-      .to_hasher();
-  ```
-- 输入：从 thumbs 缓存读 256px WebP（**不要重新解原图**），喂给 `hasher.hash_image(&dyn_img)` → `ImageHash`，再 `.to_bytes()` → 8 字节 → 当 `u64` 存
-- 任务优先级 P3
-- 任务依赖：缩略图 `thumb_status='ready'` 才能跑
-- 并发：用 `rayon` 在 worker 内 batch 处理（czkawka 同方案）
-- 失败处理：解码失败 → `hash_status='failed'`，不阻塞队列
+```rust
+use image_hasher::{HasherConfig, HashAlg, FilterType};
 
-**为什么不自己写 DCT**：DCT 是数学题不是工程题，自实现没有任何业务价值；`image_hasher` 在 czkawka 上跑过百万级图库的实战验证。
+// MVP2 默认（与 czkawka 一致）
+let hasher = HasherConfig::new()
+    .hash_alg(HashAlg::Gradient)         // dHash
+    .hash_size(8, 8)                     // 64-bit 输出
+    .resize_filter(FilterType::Lanczos3)
+    .to_hasher();
 
-**验收**：用 `tests/fixtures/phash_pairs/`（10 组人工标注的"重压缩对"）计算 hamming distance（`hash_a.dist(&hash_b)`），全部 ≤ 6。
+let bytes = hasher.hash_image(&dyn_img).as_bytes().to_vec();  // 8 字节 = u64
+```
+
+**字段存储**：8 字节按 `u64` 存到 `images.dhash`。`phash` 列保留（设置里可选切换为 pHash，启用 `.preproc_dct()`）。
+
+**输入**：从 thumbs 缓存读 256px WebP（**不要重新解原图**）。
+
+**任务优先级**：P3。**依赖**：`thumb_status='ready'`。**并发**：worker 内 `rayon` batch。**失败**：单张失败标 `hash_status='failed'`，不阻塞队列。
+
+**为什么不自己写 DCT**：DCT 是数学题不是工程题；`image_hasher` 在 czkawka 上有百万级图库的实战验证。
+
+**验收**：用 `tests/fixtures/phash_pairs/`（10 组人工标注的"重压缩对"）计算 hamming distance（`hash_a.dist(&hash_b)`），全部 ≤ 7（对应 czkawka 的 Small 档）。
+
+---
+
+#### T3 速查：czkawka 默认参数与阈值表
+
+来自 `czkawka_core/src/tools/similar_images/mod.rs` 的 `SIMILAR_VALUES` 与 `SimilarityPreset`。**直接照搬到我们的设置 UI**，省去自己调参。
+
+**默认参数**（`get_default_parameters` 测试用例）：
+
+| 参数 | 值 |
+|------|----|
+| `hash_alg` | `HashAlg::Gradient`（dHash） |
+| `hash_size` | 8 |
+| `image_filter` | `FilterType::Lanczos3` |
+| `preproc_dct` | 不启用 |
+| `geometric_invariance` | `Off`（不为每张图算镜像/旋转变体） |
+| `max_difference` | 0（即 Original 档，仅查完全相同的视觉哈希） |
+
+**阈值表（hamming distance 上限）**：
+
+```
+档位         hash_size=8   16    32    64
+─────────────────────────────────────────
+Original          0         0     0     0
+VeryHigh          1         2     4     6
+High              2         5    10    20
+Medium            5        15    20    -
+Small             7        30     -    -
+VerySmall        14         -     -    -
+Minimal           -         -     -    -
+```
+
+`-` 表示该档位在该 hash_size 下无意义（czkawka 用哨兵值 40 占位）。**hash_size=8 时阈值有效区间是 0-14**。
+
+**MVP2 选用 hash_size=8 + dHash**。设置页档位映射：
+
+| 用户档位 | 内部阈值 | 推荐场景 |
+|----------|----------|----------|
+| 极严格（Original） | 0 | 字节级近似（与 BLAKE3 互补，捕获仅 metadata 差异） |
+| 严格（VeryHigh） | 1 | 重压缩 / 改 EXIF |
+| 平衡 **（默认）** | 2-3 | 重压缩 + 改尺寸（推荐起点） |
+| 宽松（High） | 5 | 轻微裁剪 / 改对比度 |
+| 很宽松（Medium） | 7 | 可能误报，仅推荐用户手动核对场景 |
+
+**几何不变性**（czkawka 有，默认 Off）：`GeometricInvariance::MirrorFlip` 或 `MirrorFlipRotate90` 会对每张图额外算 2-8 份 hash 匹配镜像/旋转。MVP2 **默认 Off**，未来作为高级选项。
+
+**BK-tree 加速**：czkawka 用 `bk_tree::Metric` + `hamming_bitwise_fast`（见 T4），同我们设计。可直接复用 `bk-tree` crate。
+
+**跳过的格式**（来自 `common/consts.rs`）：
+
+```
+✓ 检测相似：IMAGE_RS_SIMILAR_IMAGES_EXTENSIONS
+  jpg jpeg png tiff tif tga ff jif jfi bmp webp exr qoi jxl avif
+  + HEIC_EXTENSIONS（需 heif feature）：heif heifs heic heics avci avcs hif
+  + RAW_IMAGE_EXTENSIONS（需 libraw feature）：cr2 cr3 nef arw ... 共 23 种
+
+✗ 跳过：gif、ico
+  原因：gif 是动图（多帧难抽代表帧）；ico 通常是图标多分辨率打包
+```
+
+**像素上限**：单图 width × height ≤ 2,000,000,000（来自 `common/image.rs`，避免 u64 溢出）。超过的图直接标 `hash_status='unsupported'`。
 
 ### T4 BK-tree 索引（pHash 加速查询）
 
@@ -139,21 +198,21 @@
 
 ### T6 重复分组算法（视觉近似）
 
-**目标**：把 phash hamming ≤ 阈值（默认 6）的图聚成 group。
+**目标**：把 dhash hamming ≤ 阈值（默认 2，对应 czkawka 的 High 档）的图聚成 group。
 
 具体：
 - 算法（增量）：
   ```
-  对新计算 phash 的图 X：
-    1. BK-tree.find_within(X.phash, 6) → 候选 [(Y, dist)]
+  对新计算 dhash 的图 X：
+    1. BK-tree.find_within(X.dhash, threshold) → 候选 [(Y, dist)]
     2. 过滤掉与 X 已在同一个 exact group 的（已经完全重复，没必要再加近似）
     3. 候选不空 → 找候选 Y 已属于的 phash group；若有就把 X 加入；若无就建新 group
     4. 多组合并：若 X 桥接了两个原本独立的 phash group，合并两组
     5. 写 duplicate_items，similarity = 1 - dist/64
-    6. 把 X.phash 插入 BK-tree
+    6. 把 X.dhash 插入 BK-tree
   ```
 - 这个算法是"近似并查集"，BK-tree 配 union-find 实现
-- 阈值可配置（设置页"近似严格度"：3/6/10）
+- 阈值与 czkawka 档位对齐（见 T3 速查表）：默认 **High=2**；用户可在设置切 VeryHigh=1 / Medium=5 / Small=7
 
 **验收**：用 `tests/fixtures/phash_groups/` 30 组人工聚类，对比算法输出，F1 ≥ 0.92。
 
@@ -299,7 +358,8 @@ T1 ─→ T2 ─→ T5
 - **pHash 一定基于缩略图**：原图大 + 解码慢，每张图都重新解原图会让 pHash 任务慢 10 倍
 - **BK-tree 启动时构建一次**：不要每次查询都重建，但插入要增量
 - **回收站撤销在 Windows 上没有官方 Rust crate 全功能支持**：需要自己 binding `IFileOperation::MoveItem`；提前在 Windows VM 验证
-- **同组阈值合并风险**：phash 阈值放太大（>10）会把不相关的图也聚一起。默认 6 是经验值，做成可调
+- **同组阈值合并风险**：hash_size=8 时阈值有效区间 0-14（czkawka 实测），>7 误报显著升高。默认用 High=2，对应"重压缩 + 改 EXIF"场景。档位表见 T3 速查
+- **算法选 dHash 不是 pHash**：czkawka 默认 Gradient(dHash)，比 pHash 快 3-5 倍、对小角度旋转更稳，重压缩判定也更宽容
 - **Hash 与扫描的事务边界**：避免哈希计算时 image 被删除导致 NULL 写回；用 `WHERE id=? AND deleted_at IS NULL` 保护
 - **批量删除的事务**：100 张图一个事务 vs 每张一个事务 → 选每张一个事务但用 prepared statement 复用，比批量事务更利于中途暂停
 - **网络盘上的 BLAKE3 = 全文件读 = 流量爆炸**：用户可在 root 设置里"跳过此 root 哈希"或"仅本地盘哈希"
