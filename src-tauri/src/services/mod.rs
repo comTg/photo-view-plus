@@ -1,3 +1,7 @@
+pub mod dedup_service;
+pub mod hash_service;
+pub mod phash_service;
 pub mod scan_service;
 pub mod settings_service;
 pub mod thumbnail_service;
+pub mod trash_service;

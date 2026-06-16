@@ -50,10 +50,12 @@ fn test_002_idempotent_reopen() {
 
 #[test]
 fn test_003_current_version_after_init() {
-    // 单独验证：首次启动后版本号是预期值（1）
+    // 首次启动后版本号 = 已注册的最高 migration 编号。
+    // MVP1 起步是 1；MVP2 加 migration 0002 后变 2。继续往后只升不降。
     let (pool, _dir) = fresh();
     let conn = pool.get().unwrap();
-    assert_eq!(migrations::current_version(&conn).unwrap(), 1);
+    let version = migrations::current_version(&conn).unwrap();
+    assert!(version >= 2, "expected version >= 2 after MVP2, got {version}");
 }
 
 #[test]

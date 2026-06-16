@@ -1,3 +1,4 @@
+import { DedupView } from "@/components/dedup/DedupView";
 import { RootList } from "@/components/sidebar/RootList";
 import { useRoots } from "@/hooks/useRoots";
 import { useTauriEvent } from "@/lib/events";
@@ -37,7 +38,7 @@ const FORMATS = ["jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "tiff", "g
 
 type ViewMode = "grid-lg" | "grid-md" | "grid-sm" | "list";
 type GpsFilter = "any" | "yes" | "no";
-type ActiveView = "browse" | "settings";
+type ActiveView = "browse" | "dedup" | "settings";
 type LoadMode = "reset" | "more" | "refresh";
 
 export default function App() {
@@ -455,6 +456,14 @@ export default function App() {
           </button>
           <button
             type="button"
+            className={`toolbar-button${activeView === "dedup" ? " toolbar-button--active" : ""}`}
+            onClick={() => setActiveView((view) => (view === "dedup" ? "browse" : "dedup"))}
+            title="去重"
+          >
+            去重
+          </button>
+          <button
+            type="button"
             className="icon-button"
             onClick={() => setActiveView((view) => (view === "settings" ? "browse" : "settings"))}
             title="设置"
@@ -513,6 +522,8 @@ export default function App() {
       <main className={`app-main${activeView === "browse" ? " app-main--browse" : ""}`}>
         {activeView === "settings" ? (
           <SettingsView settings={settings} onPatch={handleSettingsPatch} />
+        ) : activeView === "dedup" ? (
+          <DedupView onToast={setToast} />
         ) : (
           <div className="browse-view">
             <FilterBar

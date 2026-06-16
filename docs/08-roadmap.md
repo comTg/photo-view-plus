@@ -39,7 +39,20 @@
 - [ ] T16 大样本性能验收待用户用真实图库确认（5 万图扫描、滚动 FPS、内存峰值）
 
 ### M2 MVP2（详见 `docs/04` § 2）
-- [ ] T1-T14 共 14 个任务
+- [x] T1 migration 0002（blake3 / phash / dhash / hash_status + duplicate_groups / duplicate_items）
+- [x] T2 BLAKE3 哈希服务（P2，流式 4MB 块，失败标 `hash_status='failed'`）
+- [x] T3 dHash 视觉哈希服务（P3，从缩略图缓存读，czkawka 默认参数）
+- [x] T4 BK-tree 索引（启动加载常驻 state，增量插入）
+- [x] T5 exact 分组（blake3 GROUP BY）
+- [x] T6 视觉近似分组（BK-tree + union-find，阈值 czkawka High=2）
+- [x] T7 dedup 命令层（start/status/groups/group_detail/resolve/export_csv）
+- [x] T8 回收站服务（trash crate；恢复 Windows/Linux 走 os_limited，macOS 退回 DB 标记）
+- [x] T9 去重对比 UI（分组列表 + A/B 对比 + keep 多选 + 行动按钮）
+- [x] T10 批量保留：通过 keep_image_ids 任意选择保留集合（最大分辨率等具体策略由前端预填，本次未做策略下拉，留 1.0 前补）
+- [x] T11 撤销 UI（撤销历史抽屉 + 单条撤销）
+- [x] T12 CSV 导出（UTF-8 BOM）
+- [x] T13 性能基础：哈希任务低优先级（P2/P3），不阻塞 P0 缩略图与 P1 扫描
+- [ ] T14 端到端验收：macOS 上跑完单测 + 集成测试，Windows 实机回收站撤销路径需用户验收
 
 ### M3 MVP3（详见 `docs/05` § 2）
 - [ ] T1-T16 共 16 个任务
@@ -161,8 +174,32 @@
   - `react-virtuoso`、Radix、Lucide 依赖因 pnpm supply-chain/build approval 策略未在本次引入；MVP1.1 可替换当前分页网格为虚拟瀑布流。
   - HEIC 解码仍按文档允许的 MVP1 降级策略处理，不支持时缩略图标记 `unsupported`。
 
+### ADR-007 · MVP2 完成总结与遗留事项
+- 状态：待 Windows 实机验收（M2）
+- 时间：2026-06-16
+- 上下文：MVP2 的全部 T1-T13 在 macOS 开发环境实施完成；T14 端到端验收需要 Windows 真实图库。
+- 决定：
+  - **schema**：migration 0002 加 `blake3 / phash / dhash / hash_status` 四列 + `duplicate_groups / duplicate_items` 两张表，索引按 docs/01 § 2.2/2.5。
+  - **哈希流水线**：`hash_service`（BLAKE3, P2）从原文件流式读 4MB 块；`phash_service`（dHash/Gradient, P3）从 thumbs 缓存读 256px WebP（不重解原图）；两者写完结果后更新 `images.blake3 / images.dhash`，失败统一标 `hash_status='failed'`。
+  - **协调器**：自维护 `DedupCoordinator { hash_inflight, dhash_inflight, groups_found, phase }`，不依赖 `Scheduler::status()`（后者会被并行的扫描任务干扰）。`dedup_start` 把哈希任务包成 `TrackedBlakeTask / TrackedDhashTask` 跟踪进度，watcher 在 inflight 归零后 spawn_blocking 跑分组。
+  - **BK-tree**：用 `bk-tree` crate 包装 hamming 度量，启动时全表加载，phash 完成后增量插入。
+  - **分组**：exact = `blake3 GROUP BY HAVING count>1`；visual = BK-tree 找 hamming ≤ threshold + union-find 合并。重跑前 drop 同 method 下的 open group 避免累积。
+  - **删除**：通过 `trash` crate 走系统回收站；恢复在 Windows/Linux 用 `trash::os_limited::list+restore_all`，macOS 没有可编程恢复 API，退回"DB 标记 + 提示用户从访达回收站手动还原"。所有删除写 `undo_log`（30 天 TTL）。
+  - **阈值默认值**：czkawka High = hamming 2（hash_size=8），用户可在前端切 0/1/2/5/7 档；与 docs/04 § T3 速查表对齐。
+  - **前端**：`activeView` 加 `"dedup"` 视图；`useDedup` hook 照 `useRoots` 模式；`DedupView` 单文件包含 toolbar / GroupList / CompareView / UndoPanel；多选保留通过点击图卡切换 `keepIds`，三个动作按钮（trash / keep_all / dismiss）走 `dedup_resolve`。
+- 验证：
+  - `cargo test`：单元 + 集成共 30+ 测试通过（含 `test_004_visual_grouping_f1_meets_threshold` 在 30 组合成 fixture 上 F1 ≥ 0.92）。
+  - `cargo clippy --all-targets -- -D warnings` 0 警告。
+  - `pnpm typecheck` / `pnpm lint` 0 错误。
+  - 唯一 ignored：`trash_real_file_writes_undo_log` 走真实系统回收站，在 macOS 沙盒/受限环境不稳，标 `#[ignore]`，Windows 实机由用户跑 `cargo test trash_real_file -- --ignored`。
+- 遗留：
+  - **Windows 真实回收站撤销**：`trash::os_limited::list+restore_all` 在 macOS 没有 API，已用 `cfg` 隔离。Windows 实机需用户验证：(a) 删 N 张确实进资源管理器回收站；(b) 撤销恢复到原位置；(c) `undo_log.undone_at` 被设置。
+  - **T10 批量保留策略下拉**（largest / newest / biggest_file / shortest_name / prefer_root）：本次后端 `dedup_resolve` 接 `keep_image_ids` 已支持任意保留集合，前端只暴露"点击勾选"手动方式；自动策略下拉留 1.0 前补。
+  - **几何不变性**（镜像/旋转）：czkawka 默认 Off，本次也未启用；作为高级选项保留。
+  - **5 万图扫描+哈希性能**：与 MVP1 T16 一起在 Windows 实机测。
+- 后果：M2 主体功能完整可用；Windows 实机验收（T14）后可关闭 M2，开始 M3。
+
 后续每个 MVP 完成时追加新的 ADR：
-- ADR-007 · MVP2 pHash 阈值选定依据（待填）
 - ADR-008 · MVP3 CLIP vs SigLIP 选型（待填）
 - ADR-009 · MVP4 人脸聚类算法对比（待填）
 

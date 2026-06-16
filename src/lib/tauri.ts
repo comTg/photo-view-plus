@@ -4,6 +4,15 @@ import type {
   AppSettings,
   AppSettingsPatch,
   DbStatus,
+  DedupExportArgs,
+  DedupGroupDetail,
+  DedupGroupsArgs,
+  DedupResolveArgs,
+  DedupResolveResult,
+  DedupStartArgs,
+  DedupStartResult,
+  DedupStatus,
+  DuplicateGroupPage,
   ImagePage,
   ImageQueryParams,
   ImageRecord,
@@ -13,6 +22,8 @@ import type {
   Root,
   ScanStartResult,
   ScanTaskStatus,
+  UndoEntry,
+  UndoOutcome,
   UpdateRootArgs,
 } from "./tauri-types";
 
@@ -99,4 +110,38 @@ export async function settingsGet(): Promise<AppSettings> {
 
 export async function settingsUpdate(patch: AppSettingsPatch): Promise<AppSettings> {
   return invoke<AppSettings>("settings_update", { patch });
+}
+
+// Dedup
+export async function dedupStart(args: DedupStartArgs): Promise<DedupStartResult> {
+  return invoke<DedupStartResult>("dedup_start", { args });
+}
+
+export async function dedupStatus(): Promise<DedupStatus> {
+  return invoke<DedupStatus>("dedup_status");
+}
+
+export async function dedupGroups(args: DedupGroupsArgs = {}): Promise<DuplicateGroupPage> {
+  return invoke<DuplicateGroupPage>("dedup_groups", { args });
+}
+
+export async function dedupGroupDetail(groupId: number): Promise<DedupGroupDetail | null> {
+  return invoke<DedupGroupDetail | null>("dedup_group_detail", { groupId });
+}
+
+export async function dedupResolve(args: DedupResolveArgs): Promise<DedupResolveResult> {
+  return invoke<DedupResolveResult>("dedup_resolve", { args });
+}
+
+export async function dedupExportCsv(args: DedupExportArgs): Promise<number> {
+  return invoke<number>("dedup_export_csv", { args });
+}
+
+// Trash
+export async function trashHistory(limit?: number): Promise<UndoEntry[]> {
+  return invoke<UndoEntry[]>("trash_history", { limit });
+}
+
+export async function trashUndo(undoId: number): Promise<UndoOutcome> {
+  return invoke<UndoOutcome>("trash_undo", { undoId });
 }

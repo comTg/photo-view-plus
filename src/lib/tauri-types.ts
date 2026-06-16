@@ -175,3 +175,124 @@ export interface AppSettingsPatch {
   localScanConcurrency?: number;
   networkScanConcurrency?: number;
 }
+
+// ===== MVP2 去重 =====
+//
+// 对应 src-tauri/src/commands/dedup.rs / services/dedup_service.rs / trash_service.rs。
+
+export type DedupMethod = "exact" | "phash" | "both";
+export type DedupAction = "trash" | "keep_all" | "dismiss";
+export type DedupGroupMethod = "exact" | "phash";
+export type DedupGroupStatus = "open" | "resolved" | "dismissed";
+export type DedupPhase = "idle" | "hashing" | "grouping" | "done" | string;
+
+export interface DedupStatus {
+  running: boolean;
+  hashPending: number;
+  dhashPending: number;
+  groupsFound: number;
+  phase: DedupPhase;
+}
+
+export interface DedupStartArgs {
+  method: DedupMethod;
+  threshold?: number;
+}
+
+export interface DedupStartResult {
+  started: boolean;
+  status: DedupStatus;
+}
+
+export interface DuplicateGroup {
+  id: number;
+  method: DedupGroupMethod;
+  threshold: number | null;
+  keepImageId: number | null;
+  status: DedupGroupStatus;
+  createdAt: number;
+  resolvedAt: number | null;
+  itemCount: number;
+}
+
+export interface DuplicateGroupPage {
+  items: DuplicateGroup[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export interface DedupItemDetail {
+  image: ImageRecord;
+  similarity: number | null;
+}
+
+export interface DedupGroupDetail {
+  group: DuplicateGroup;
+  items: DedupItemDetail[];
+}
+
+export interface DedupGroupsArgs {
+  method?: DedupGroupMethod;
+  status?: DedupGroupStatus;
+  offset?: number;
+  limit?: number;
+}
+
+export interface DedupResolveArgs {
+  groupId: number;
+  keepImageIds: number[];
+  action: DedupAction;
+}
+
+export interface TrashFailure {
+  imageId: number;
+  error: string;
+}
+
+export interface DedupResolveResult {
+  groupId: number;
+  trashed: number[];
+  trashFailures: TrashFailure[];
+  undoId: number | null;
+}
+
+export interface DedupExportArgs {
+  savePath: string;
+  method?: DedupGroupMethod;
+  status?: DedupGroupStatus;
+}
+
+export interface UndoEntry {
+  id: number;
+  action: string;
+  payloadJson: string;
+  canUndoUntil: number;
+  undoneAt: number | null;
+  createdAt: number;
+}
+
+export interface UndoOutcome {
+  restored: number[];
+  manualRecoveryRequired: boolean;
+  note: string | null;
+}
+
+export interface DedupProgressEvent {
+  running: boolean;
+  hashPending: number;
+  dhashPending: number;
+  groupsFound: number;
+  phase: DedupPhase;
+}
+
+export interface DedupNewGroupEvent {
+  groupId: number;
+  method: DedupGroupMethod;
+}
+
+export interface DedupDoneEvent {
+  exactGroups: number;
+  visualGroups: number;
+  error: string | null;
+}

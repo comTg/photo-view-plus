@@ -45,5 +45,11 @@ sha1 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
 http = "1"
 
+# MVP2: dedup（去重）
+blake3 = "1"
+image_hasher = "2"
+bk-tree = "0.5"
+trash = "5"
+
 [dev-dependencies]
 tempfile = "3"

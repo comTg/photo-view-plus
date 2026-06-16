@@ -10,11 +10,18 @@ use rusqlite::Connection;
 use crate::error::{AppError, AppResult};
 
 /// 把所有 migration 在编译时嵌入二进制。新增 migration 在此 list 追加。
-const MIGRATIONS: &[Migration] = &[Migration {
-    version: 1,
-    name: "init",
-    sql: include_str!("../../migrations/0001_init.sql"),
-}];
+const MIGRATIONS: &[Migration] = &[
+    Migration {
+        version: 1,
+        name: "init",
+        sql: include_str!("../../migrations/0001_init.sql"),
+    },
+    Migration {
+        version: 2,
+        name: "hash_columns",
+        sql: include_str!("../../migrations/0002_hash_columns.sql"),
+    },
+];
 
 struct Migration {
     version: u32,

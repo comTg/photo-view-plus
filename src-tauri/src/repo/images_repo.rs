@@ -10,7 +10,8 @@ const IMAGE_SELECT: &str = "\
     SELECT i.id, i.root_id, i.rel_path, i.filename, i.extension, i.size_bytes, i.mtime,
            i.width, i.height, i.orientation, i.taken_at, i.gps_lat, i.gps_lng,
            i.camera_make, i.camera_model, i.thumb_status, i.thumb_hash, i.thumb_error,
-           i.indexed_at, i.deleted_at, r.path
+           i.indexed_at, i.deleted_at, r.path,
+           i.blake3, i.phash, i.dhash, i.hash_status
     FROM images i
     JOIN roots r ON r.id = i.root_id";
 
@@ -39,6 +40,12 @@ pub struct ImageRecord {
     pub deleted_at: Option<i64>,
     pub root_path: String,
     pub full_path: String,
+    pub blake3: Option<String>,
+    /// pHash/dHash 在 SQLite 用 INTEGER（i64）存，Rust 端做 hamming 时按 u64 处理。
+    /// 用 `as i64` 跨边界保位模式即可。
+    pub phash: Option<i64>,
+    pub dhash: Option<i64>,
+    pub hash_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -295,6 +302,196 @@ pub fn mark_deleted(conn: &Connection, root_id: i64, rel_path: &str, now: i64) -
     Ok(())
 }
 
+pub fn mark_deleted_by_id(conn: &Connection, id: i64, now: i64) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET deleted_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
+    Ok(())
+}
+
+pub fn restore_by_id(conn: &Connection, id: i64) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET deleted_at = NULL WHERE id = ?1",
+        [id],
+    )?;
+    Ok(())
+}
+
+/// 列出最近的撤销日志（未撤销的）。供 `历史` 面板。
+pub fn list_undo_entries(conn: &Connection, limit: i64) -> AppResult<Vec<UndoEntry>> {
+    let limit = limit.clamp(1, 200);
+    let mut stmt = conn.prepare(
+        "SELECT id, action, payload_json, can_undo_until, undone_at, created_at
+         FROM undo_log
+         WHERE undone_at IS NULL
+         ORDER BY created_at DESC, id DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit], |row| {
+        Ok(UndoEntry {
+            id: row.get(0)?,
+            action: row.get(1)?,
+            payload_json: row.get(2)?,
+            can_undo_until: row.get(3)?,
+            undone_at: row.get(4)?,
+            created_at: row.get(5)?,
+        })
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn get_undo_entry(conn: &Connection, id: i64) -> AppResult<Option<UndoEntry>> {
+    Ok(conn
+        .query_row(
+            "SELECT id, action, payload_json, can_undo_until, undone_at, created_at
+             FROM undo_log WHERE id = ?1",
+            [id],
+            |row| {
+                Ok(UndoEntry {
+                    id: row.get(0)?,
+                    action: row.get(1)?,
+                    payload_json: row.get(2)?,
+                    can_undo_until: row.get(3)?,
+                    undone_at: row.get(4)?,
+                    created_at: row.get(5)?,
+                })
+            },
+        )
+        .optional()?)
+}
+
+pub fn mark_undo_done(conn: &Connection, id: i64, now: i64) -> AppResult<()> {
+    conn.execute(
+        "UPDATE undo_log SET undone_at = ?1 WHERE id = ?2",
+        params![now, id],
+    )?;
+    Ok(())
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct UndoEntry {
+    pub id: i64,
+    pub action: String,
+    pub payload_json: String,
+    pub can_undo_until: i64,
+    pub undone_at: Option<i64>,
+    pub created_at: i64,
+}
+
+/// 写 blake3。`hash_status` 是流水线整体状态（pending/ready/failed），
+/// 由 hash_service 显式调 `set_hash_status` 维护，这里不动。
+pub fn set_blake3(conn: &Connection, id: i64, blake3: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET blake3 = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![blake3, id],
+    )?;
+    Ok(())
+}
+
+/// 存 dHash/pHash 时把 u64 按位转 i64（SQLite INTEGER 容量 = i64）。读出时反向 `as u64`。
+pub fn set_dhash(conn: &Connection, id: i64, dhash: u64) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET dhash = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![dhash as i64, id],
+    )?;
+    Ok(())
+}
+
+pub fn set_phash(conn: &Connection, id: i64, phash: u64) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET phash = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![phash as i64, id],
+    )?;
+    Ok(())
+}
+
+pub fn set_hash_status(conn: &Connection, id: i64, status: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET hash_status = ?1 WHERE id = ?2",
+        params![status, id],
+    )?;
+    Ok(())
+}
+
+/// 还没算 BLAKE3 的图（未删除）。
+pub fn pending_blake3_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
+    let sql = format!(
+        "{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.blake3 IS NULL AND i.hash_status != 'failed'"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 缩略图已就绪但还没算 dHash 的图（视觉哈希依赖 thumb）。
+pub fn pending_dhash_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
+    let sql = format!(
+        "{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.dhash IS NULL \
+         AND i.thumb_status = 'ready' AND i.hash_status != 'failed'"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 启动时全量取 (image_id, dhash) 用于建 BK-tree。
+pub fn all_dhashes(conn: &Connection) -> AppResult<Vec<(i64, u64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, dhash FROM images WHERE dhash IS NOT NULL AND deleted_at IS NULL",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let id: i64 = row.get(0)?;
+        let dhash: i64 = row.get(1)?;
+        Ok((id, dhash as u64))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// blake3 完全相同的分组（仅 count >= 2）。
+pub fn find_blake3_duplicates(conn: &Connection) -> AppResult<Vec<(String, Vec<i64>)>> {
+    let mut stmt = conn.prepare(
+        "SELECT blake3, id FROM images
+         WHERE blake3 IS NOT NULL AND deleted_at IS NULL
+         ORDER BY blake3, id",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let hash: String = row.get(0)?;
+        let id: i64 = row.get(1)?;
+        Ok((hash, id))
+    })?;
+    let mut groups: Vec<(String, Vec<i64>)> = Vec::new();
+    for row in rows {
+        let (hash, id) = row?;
+        if let Some(last) = groups.last_mut() {
+            if last.0 == hash {
+                last.1.push(id);
+                continue;
+            }
+        }
+        groups.push((hash, vec![id]));
+    }
+    groups.retain(|(_, ids)| ids.len() > 1);
+    Ok(groups)
+}
+
 pub fn rename_record(
     conn: &Connection,
     id: i64,
@@ -506,6 +703,10 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
         deleted_at: row.get(19)?,
         root_path,
         full_path,
+        blake3: row.get(21)?,
+        phash: row.get(22)?,
+        dhash: row.get(23)?,
+        hash_status: row.get(24)?,
     })
 }
 

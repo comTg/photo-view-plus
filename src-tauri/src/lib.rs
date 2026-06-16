@@ -1,5 +1,5 @@
 use std::path::PathBuf;
-use std::sync::OnceLock;
+use std::sync::{Arc, OnceLock};
 
 use http::header;
 use tauri::{Emitter, Manager};
@@ -19,6 +19,9 @@ pub mod services;
 pub mod utils;
 
 pub use error::{AppError, AppResult};
+
+use services::dedup_service::DedupCoordinator;
+use utils::bk_tree::DhashIndex;
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
@@ -49,9 +52,31 @@ pub fn run() {
             scheduler.spawn_status_loop(move |status| {
                 let _ = queue_app.emit("queue:status", status);
             });
+
+            // MVP2 状态：BK-tree（视觉哈希索引） + dedup 协调器
+            let dhash_index = Arc::new(DhashIndex::new());
+            match pool.get() {
+                Ok(conn) => match repo::images_repo::all_dhashes(&conn) {
+                    Ok(entries) => {
+                        let count = entries.len();
+                        dhash_index.rebuild_from(entries);
+                        tracing::info!(loaded = count, "dhash BK-tree loaded");
+                    }
+                    Err(error) => {
+                        tracing::warn!(%error, "failed to load dhash BK-tree on startup");
+                    }
+                },
+                Err(error) => {
+                    tracing::warn!(%error, "failed to get conn for BK-tree init");
+                }
+            }
+            let dedup_coord = Arc::new(DedupCoordinator::new());
+
             app.manage(paths);
             app.manage(pool);
             app.manage(scheduler);
+            app.manage(dhash_index);
+            app.manage(dedup_coord);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -74,6 +99,14 @@ pub fn run() {
             commands::images::thumbs_path,
             commands::settings::settings_get,
             commands::settings::settings_update,
+            commands::dedup::dedup_start,
+            commands::dedup::dedup_status,
+            commands::dedup::dedup_groups,
+            commands::dedup::dedup_group_detail,
+            commands::dedup::dedup_resolve,
+            commands::dedup::dedup_export_csv,
+            commands::trash::trash_history,
+            commands::trash::trash_undo,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| eprintln!("error while running tauri application: {error}"));
