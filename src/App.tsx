@@ -28,14 +28,17 @@ import type {
   SortField,
 } from "@/lib/tauri-types";
 import { open } from "@tauri-apps/plugin-dialog";
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { VirtuosoGrid } from "react-virtuoso";
 
 const PAGE_SIZE = 200;
+const SCAN_REFRESH_MS = 1500;
 const FORMATS = ["jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "tiff", "gif"];
 
 type ViewMode = "grid-lg" | "grid-md" | "grid-sm" | "list";
 type GpsFilter = "any" | "yes" | "no";
 type ActiveView = "browse" | "settings";
+type LoadMode = "reset" | "more" | "refresh";
 
 export default function App() {
   const [profile, setProfile] = useState<string | null>(null);
@@ -71,6 +74,7 @@ export default function App() {
 
   const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress>>({});
   const [queue, setQueue] = useState<QueueStatus | null>(null);
+  const gridScrollerRef = useRef<HTMLElement | null>(null);
   const refreshTimer = useRef<number | null>(null);
   const imageLoadingRef = useRef(false);
   const lastQueryKeyRef = useRef("");
@@ -107,7 +111,7 @@ export default function App() {
   }, [searchDraft]);
 
   const buildQuery = useCallback(
-    (offset: number): ImageQueryParams => {
+    (offset: number, limit = PAGE_SIZE): ImageQueryParams => {
       const sizeMin = mbToBytes(sizeMinMb);
       const sizeMax = mbToBytes(sizeMaxMb);
       return {
@@ -121,7 +125,7 @@ export default function App() {
         hasGps: gpsFilter === "any" ? undefined : gpsFilter === "yes",
         sort: { field: sortField, dir: sortDir },
         offset,
-        limit: PAGE_SIZE,
+        limit,
         includeDeleted: false,
       };
     },
@@ -139,8 +143,19 @@ export default function App() {
     ],
   );
 
+  const restoreGridScroll = useCallback((scrollTop: number) => {
+    window.requestAnimationFrame(() => {
+      window.requestAnimationFrame(() => {
+        const el = gridScrollerRef.current;
+        if (!el) return;
+        const maxScrollTop = Math.max(0, el.scrollHeight - el.clientHeight);
+        el.scrollTop = Math.min(scrollTop, maxScrollTop);
+      });
+    });
+  }, []);
+
   const loadImages = useCallback(
-    async (mode: "reset" | "more" = "reset") => {
+    async (mode: LoadMode = "reset") => {
       if (selectedRootId === null) {
         requestSeqRef.current += 1;
         imageLoadingRef.current = false;
@@ -149,29 +164,42 @@ export default function App() {
         setTotal(0);
         return;
       }
-      if (mode === "more" && imageLoadingRef.current) return;
+      if ((mode === "more" || mode === "refresh") && imageLoadingRef.current) return;
+      const showLoading = mode !== "refresh";
+      const scrollTop = mode === "refresh" ? (gridScrollerRef.current?.scrollTop ?? 0) : 0;
       imageLoadingRef.current = true;
-      setImageLoading(true);
+      if (showLoading) {
+        setImageLoading(true);
+      }
       setImageError(null);
       const seq = requestSeqRef.current + 1;
       requestSeqRef.current = seq;
       try {
         const offset = mode === "more" ? imagesRef.current.length : 0;
-        const page = await imagesQuery(buildQuery(offset));
+        const limit =
+          mode === "refresh" ? Math.max(PAGE_SIZE, imagesRef.current.length) : PAGE_SIZE;
+        const page = await imagesQuery(buildQuery(offset, limit));
         if (seq !== requestSeqRef.current) return;
         setTotal(page.total);
         setImages((prev) => (mode === "more" ? mergeImages(prev, page.items) : page.items));
+        if (mode === "refresh") {
+          restoreGridScroll(scrollTop);
+        } else if (mode === "reset") {
+          gridScrollerRef.current?.scrollTo({ top: 0 });
+        }
       } catch (error) {
         if (seq !== requestSeqRef.current) return;
         setImageError(String(error));
       } finally {
         if (seq === requestSeqRef.current) {
           imageLoadingRef.current = false;
-          setImageLoading(false);
+          if (showLoading) {
+            setImageLoading(false);
+          }
         }
       }
     },
-    [buildQuery, selectedRootId],
+    [buildQuery, restoreGridScroll, selectedRootId],
   );
 
   useEffect(() => {
@@ -187,29 +215,29 @@ export default function App() {
     if (refreshTimer.current !== null) return;
     refreshTimer.current = window.setTimeout(() => {
       refreshTimer.current = null;
-      void loadImages("reset");
-    }, 800);
+      void loadImages("refresh");
+    }, SCAN_REFRESH_MS);
   }, [loadImages]);
 
   const handleScanProgress = useCallback(
     (payload: ScanProgress) => {
       setScanProgress((prev) => ({ ...prev, [payload.rootId]: payload }));
-      if (payload.rootId === roots.selectedId) {
+      if (payload.rootId === selectedRootId && activeView === "browse") {
         scheduleRefresh();
       }
     },
-    [roots.selectedId, scheduleRefresh],
+    [activeView, scheduleRefresh, selectedRootId],
   );
 
   const handleScanDone = useCallback(
     (payload: ScanDone) => {
       setToast(`扫描完成：新增 ${payload.added}，更新 ${payload.updated}，移除 ${payload.removed}`);
       void rootsReloadRef.current();
-      if (payload.rootId === roots.selectedId) {
-        void loadImages("reset");
+      if (payload.rootId === selectedRootId) {
+        void loadImages("refresh");
       }
     },
-    [loadImages, roots.selectedId],
+    [loadImages, selectedRootId],
   );
 
   const handleScanError = useCallback((payload: ScanErrorEvent) => {
@@ -340,16 +368,15 @@ export default function App() {
     }
   }, []);
 
-  const handleMainScroll = useCallback(
-    (event: React.UIEvent<HTMLElement>) => {
-      const el = event.currentTarget;
-      const nearEnd = el.scrollTop + el.clientHeight > el.scrollHeight - 480;
-      if (nearEnd && images.length < total && !imageLoading) {
-        void loadImages("more");
-      }
-    },
-    [imageLoading, images.length, loadImages, total],
-  );
+  const handleGridEndReached = useCallback(() => {
+    if (imagesRef.current.length < total && !imageLoadingRef.current) {
+      void loadImages("more");
+    }
+  }, [loadImages, total]);
+
+  const handleGridScrollerRef = useCallback((ref: HTMLElement | null) => {
+    gridScrollerRef.current = ref;
+  }, []);
 
   const selectedProgress = selectedRoot ? scanProgress[selectedRoot.id] : undefined;
   const selectedCount = selectedIds.length;
@@ -483,11 +510,11 @@ export default function App() {
         </nav>
       </aside>
 
-      <main className="app-main" onScroll={handleMainScroll}>
+      <main className={`app-main${activeView === "browse" ? " app-main--browse" : ""}`}>
         {activeView === "settings" ? (
           <SettingsView settings={settings} onPatch={handleSettingsPatch} />
         ) : (
-          <>
+          <div className="browse-view">
             <FilterBar
               formats={formats}
               setFormats={setFormats}
@@ -530,15 +557,26 @@ export default function App() {
                 selectedIds={selectedIds}
                 selectionMode={selectionMode}
                 onClickImage={handleImageClick}
+                onEndReached={handleGridEndReached}
+                scrollerRef={handleGridScrollerRef}
               />
             )}
-            {imageLoading && <div className="loading-row">正在加载图片…</div>}
-            {!imageLoading && images.length < total && (
-              <button type="button" className="load-more" onClick={() => void loadImages("more")}>
-                加载更多（{images.length}/{total}）
-              </button>
+            {selectedRoot && (
+              <div className="browse-footer" aria-live="polite">
+                {imageLoading ? (
+                  <div className="loading-row">正在加载图片…</div>
+                ) : images.length < total ? (
+                  <button
+                    type="button"
+                    className="load-more"
+                    onClick={() => void loadImages("more")}
+                  >
+                    加载更多（{images.length}/{total}）
+                  </button>
+                ) : null}
+              </div>
             )}
-          </>
+          </div>
         )}
       </main>
 
@@ -674,41 +712,79 @@ interface ImageGridProps {
   selectedIds: number[];
   selectionMode: boolean;
   onClickImage: (image: ImageRecord, event: React.MouseEvent) => void;
+  onEndReached: () => void;
+  scrollerRef: (ref: HTMLElement | null) => void;
 }
 
-function ImageGrid({ images, viewMode, selectedIds, selectionMode, onClickImage }: ImageGridProps) {
+const ImageGrid = memo(function ImageGrid({
+  images,
+  viewMode,
+  selectedIds,
+  selectionMode,
+  onClickImage,
+  onEndReached,
+  scrollerRef,
+}: ImageGridProps) {
+  const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
   return (
-    <section className={`image-grid image-grid--${viewMode}`}>
-      {images.map((image) => {
-        const selected = selectedIds.includes(image.id);
-        return (
-          <button
-            type="button"
-            key={image.id}
-            className={`image-card${selected ? " image-card--selected" : ""}`}
-            onClick={(event) => onClickImage(image, event)}
-            title={image.fullPath}
-          >
-            {selectionMode && <span className="image-card__check">{selected ? "✓" : ""}</span>}
-            <span className="image-card__thumb">
-              {image.thumbStatus === "ready" ? (
-                <img src={thumbUrl(image.id)} alt={image.filename} loading="lazy" />
-              ) : (
-                <span className="image-card__placeholder">
-                  {thumbStatusText(image.thumbStatus)}
-                </span>
-              )}
-            </span>
-            <span className="image-card__name">{image.filename}</span>
-            <span className="image-card__meta">
-              {image.extension.toUpperCase()} · {formatBytes(image.sizeBytes)}
-            </span>
-          </button>
-        );
-      })}
-    </section>
+    <VirtuosoGrid
+      className="virtual-image-grid"
+      computeItemKey={(_index, image) => image.id}
+      data={images}
+      endReached={onEndReached}
+      increaseViewportBy={{ top: 640, bottom: 1280 }}
+      itemClassName="image-grid__item"
+      itemContent={(_index, image) => (
+        <ImageCard
+          image={image}
+          selected={selectedIdSet.has(image.id)}
+          selectionMode={selectionMode}
+          onClickImage={onClickImage}
+        />
+      )}
+      listClassName={`image-grid image-grid--${viewMode}`}
+      scrollerRef={scrollerRef}
+      style={{ height: "100%" }}
+    />
   );
+});
+
+interface ImageCardProps {
+  image: ImageRecord;
+  selected: boolean;
+  selectionMode: boolean;
+  onClickImage: (image: ImageRecord, event: React.MouseEvent) => void;
 }
+
+const ImageCard = memo(function ImageCard({
+  image,
+  selected,
+  selectionMode,
+  onClickImage,
+}: ImageCardProps) {
+  return (
+    <button
+      type="button"
+      className={`image-card${selected ? " image-card--selected" : ""}`}
+      onClick={(event) => onClickImage(image, event)}
+      title={image.fullPath}
+      data-image-id={image.id}
+    >
+      {selectionMode && <span className="image-card__check">{selected ? "✓" : ""}</span>}
+      <span className="image-card__thumb">
+        {image.thumbStatus === "ready" ? (
+          <img src={thumbUrl(image.id)} alt={image.filename} loading="lazy" />
+        ) : (
+          <span className="image-card__placeholder">{thumbStatusText(image.thumbStatus)}</span>
+        )}
+      </span>
+      <span className="image-card__name">{image.filename}</span>
+      <span className="image-card__meta">
+        {image.extension.toUpperCase()} · {formatBytes(image.sizeBytes)}
+      </span>
+    </button>
+  );
+});
 
 interface DetailPaneProps {
   image: ImageRecord | null;
@@ -941,7 +1017,13 @@ function EmptyState({
   );
 }
 
-function TaskStatus({ queue, progress }: { queue: QueueStatus | null; progress?: ScanProgress }) {
+const TaskStatus = memo(function TaskStatus({
+  queue,
+  progress,
+}: {
+  queue: QueueStatus | null;
+  progress?: ScanProgress;
+}) {
   const progressText = progress
     ? `扫描 ${progress.processed.toLocaleString("zh-CN")}/${progress.total.toLocaleString("zh-CN")}`
     : "扫描空闲";
@@ -953,7 +1035,7 @@ function TaskStatus({ queue, progress }: { queue: QueueStatus | null; progress?:
       {progressText} · {queueText}
     </span>
   );
-}
+});
 
 function mergeImages(prev: ImageRecord[], next: ImageRecord[]) {
   const seen = new Set(prev.map((image) => image.id));
