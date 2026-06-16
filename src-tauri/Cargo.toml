@@ -27,4 +27,12 @@ thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 
-# 后续 T2+ 会按需补：rusqlite / tokio / walkdir / image / image_hasher / blake3 等
+# T2: SQLite + 连接池
+rusqlite = { version = "0.39", features = ["bundled"] }
+r2d2 = "0.8"
+r2d2_sqlite = "0.34"
+
+# 后续 T4+ 会按需补：tokio / walkdir / image / image_hasher / blake3 等
+
+[dev-dependencies]
+tempfile = "3"
