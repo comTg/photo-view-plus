@@ -6,6 +6,8 @@ mod config;
 pub mod db;
 pub mod error;
 pub mod migrations;
+pub mod repo;
+pub mod utils;
 
 pub use error::{AppError, AppResult};
 
@@ -27,8 +29,12 @@ pub fn run() {
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
-            commands::ping,
-            commands::db_status,
+            commands::system::ping,
+            commands::system::db_status,
+            commands::roots::roots_add,
+            commands::roots::roots_list,
+            commands::roots::roots_remove,
+            commands::roots::roots_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");
