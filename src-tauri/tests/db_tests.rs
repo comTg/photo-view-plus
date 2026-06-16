@@ -19,8 +19,17 @@ fn fresh() -> (db::Pool, TempDir) {
 fn test_001_tables_created() {
     let (pool, _dir) = fresh();
     let conn = pool.get().unwrap();
-    for table in ["schema_version", "roots", "images", "scan_tasks", "undo_log"] {
-        assert!(db::table_exists(&conn, table).unwrap(), "table {table} should exist");
+    for table in [
+        "schema_version",
+        "roots",
+        "images",
+        "scan_tasks",
+        "undo_log",
+    ] {
+        assert!(
+            db::table_exists(&conn, table).unwrap(),
+            "table {table} should exist"
+        );
     }
 }
 
@@ -68,12 +77,17 @@ fn test_004_foreign_key_cascade() {
     )
     .unwrap();
 
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0)).unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(n, 1);
 
     // 删 root → images 级联删
-    conn.execute("DELETE FROM roots WHERE id=?1", params![root_id]).unwrap();
-    let n: i64 = conn.query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0)).unwrap();
+    conn.execute("DELETE FROM roots WHERE id=?1", params![root_id])
+        .unwrap();
+    let n: i64 = conn
+        .query_row("SELECT COUNT(*) FROM images", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(n, 0, "image should be cascade-deleted with its root");
 }
 
@@ -87,7 +101,9 @@ fn test_005_wal_and_pragmas_applied() {
         .unwrap();
     assert_eq!(mode.to_lowercase(), "wal");
 
-    let fk: i64 = conn.query_row("PRAGMA foreign_keys", [], |r| r.get(0)).unwrap();
+    let fk: i64 = conn
+        .query_row("PRAGMA foreign_keys", [], |r| r.get(0))
+        .unwrap();
     assert_eq!(fk, 1);
 
     let busy: i64 = conn
@@ -111,5 +127,8 @@ fn test_006_unique_root_path() {
         "INSERT INTO roots(path, type, created_at) VALUES (?1, 'local', 0)",
         params!["/tmp/photos"],
     );
-    assert!(err.is_err(), "duplicate root path should fail UNIQUE constraint");
+    assert!(
+        err.is_err(),
+        "duplicate root path should fail UNIQUE constraint"
+    );
 }

@@ -94,7 +94,7 @@ fn update_partial_fields() {
 fn update_empty_patch_is_noop() {
     let (pool, _d) = fresh();
     let c = pool.get().unwrap();
-    let r = roots_repo::insert(&c, &local("/tmp/np", Some("k"), ), 0).unwrap();
+    let r = roots_repo::insert(&c, &local("/tmp/np", Some("k")), 0).unwrap();
     let same = roots_repo::update(&c, r.id, &RootPatch::default()).unwrap();
     assert_eq!(same.map(|x| x.label), Some(Some("k".to_string())));
 }

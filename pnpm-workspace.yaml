@@ -1,3 +1,6 @@
 packages:
   - .
   # 后续 AI worker（MVP3）若独立成包，可在此追加
+allowBuilds:
+  '@biomejs/biome': true
+  esbuild: true

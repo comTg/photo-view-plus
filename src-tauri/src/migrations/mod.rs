@@ -39,10 +39,9 @@ pub fn run(conn: &mut Connection) -> AppResult<()> {
 
 /// 当前最高已应用版本（0 表示从未运行过）
 pub fn current_version(conn: &Connection) -> AppResult<u32> {
-    let v: Option<u32> = conn
-        .query_row("SELECT MAX(version) FROM schema_version", [], |r| {
-            r.get::<_, Option<u32>>(0)
-        })?;
+    let v: Option<u32> = conn.query_row("SELECT MAX(version) FROM schema_version", [], |r| {
+        r.get::<_, Option<u32>>(0)
+    })?;
     Ok(v.unwrap_or(0))
 }
 
@@ -70,10 +69,15 @@ fn apply_one(conn: &mut Connection, m: &Migration) -> AppResult<()> {
         }
     }
 
-    tx.execute_batch(m.sql)
-        .map_err(|e| AppError::Migration { version: m.version, source: e })?;
+    tx.execute_batch(m.sql).map_err(|e| AppError::Migration {
+        version: m.version,
+        source: e,
+    })?;
 
-    let now = SystemTime::now().duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0) as i64;
     tx.execute(
         "INSERT OR REPLACE INTO schema_version(version, applied_at) VALUES (?1, ?2)",
         rusqlite::params![m.version, now],

@@ -11,6 +11,12 @@ pub enum AppError {
     #[error("pool: {0}")]
     Pool(#[from] r2d2::Error),
 
+    #[error("image: {0}")]
+    Image(#[from] image::ImageError),
+
+    #[error("join: {0}")]
+    Join(#[from] tokio::task::JoinError),
+
     #[error("migration {version} failed: {source}")]
     Migration {
         version: u32,

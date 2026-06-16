@@ -40,6 +40,7 @@ export function useRoots(): UseRoots {
     async (path: string, label?: string | null) => {
       const created = await rootsAdd({ path, label });
       await reload();
+      setSelectedId(created.id);
       return created;
     },
     [reload],

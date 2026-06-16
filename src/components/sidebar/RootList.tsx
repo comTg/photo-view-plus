@@ -8,10 +8,20 @@ interface Props {
   selectedId: number | null;
   onSelect: (id: number | null) => void;
   onRemove: (id: number) => void;
+  onScan: (id: number) => void;
   onAdd: () => void;
 }
 
-export function RootList({ roots, loading, error, selectedId, onSelect, onRemove, onAdd }: Props) {
+export function RootList({
+  roots,
+  loading,
+  error,
+  selectedId,
+  onSelect,
+  onRemove,
+  onScan,
+  onAdd,
+}: Props) {
   const handleRemove = useCallback(
     (e: React.MouseEvent, id: number, label: string) => {
       e.stopPropagation();
@@ -25,7 +35,7 @@ export function RootList({ roots, loading, error, selectedId, onSelect, onRemove
   return (
     <div className="rootlist">
       <div className="rootlist__header">
-        <span className="placeholder-label">文件夹</span>
+        <span className="section-label">文件夹</span>
         <button type="button" className="rootlist__add" onClick={onAdd}>
           + 添加
         </button>
@@ -52,8 +62,20 @@ export function RootList({ roots, loading, error, selectedId, onSelect, onRemove
                 onClick={() => onSelect(isSelected ? null : r.id)}
                 title={r.path}
               >
-                <span className="rootlist__icon">{r.rootType === "network" ? "🌐" : "📁"}</span>
+                <span className="rootlist__icon">{r.rootType === "network" ? "NET" : "DIR"}</span>
                 <span className="rootlist__label">{display}</span>
+              </button>
+              <button
+                type="button"
+                className="rootlist__action"
+                onClick={(e) => {
+                  e.stopPropagation();
+                  onScan(r.id);
+                }}
+                aria-label={`扫描 ${display}`}
+                title="扫描"
+              >
+                ↻
               </button>
               <button
                 type="button"

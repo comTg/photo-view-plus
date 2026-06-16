@@ -9,6 +9,7 @@ rust-version = "1.78"
 [lib]
 name = "photo_view_plus_lib"
 crate-type = ["lib", "cdylib", "staticlib"]
+test = false
 
 [build-dependencies]
 tauri-build = { version = "2", features = [] }
@@ -26,13 +27,22 @@ anyhow = "1"
 thiserror = "2"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "sync", "time", "fs", "process"] }
+tokio-util = "0.7"
+async-trait = "0.1"
 
 # T2: SQLite + 连接池
 rusqlite = { version = "0.39", features = ["bundled"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.34"
 
-# 后续 T4+ 会按需补：tokio / walkdir / image / image_hasher / blake3 等
+# MVP1: scan / EXIF / thumbnails
+walkdir = "2"
+image = "0.25"
+kamadak-exif = "0.6"
+sha1 = "0.10"
+chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }
+http = "1"
 
 [dev-dependencies]
 tempfile = "3"

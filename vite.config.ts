@@ -20,6 +20,10 @@ export default defineConfig(async () => ({
     open: false,
     // 防止 HMR 在 Tauri 内嵌环境下尝试连不存在的 ws
     hmr: { host: "127.0.0.1" },
+    // Windows 上 Rust 编译会短暂锁住 target/deps/*.dll；Vite watcher 盯到它会 EBUSY 崩溃。
+    watch: {
+      ignored: ["**/src-tauri/target/**"],
+    },
   },
   // build 输出由 tauri.conf 的 frontendDist 指向
   build: {

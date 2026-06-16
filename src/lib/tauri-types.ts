@@ -41,3 +41,137 @@ export interface DbStatus {
   schemaVersion: number;
   poolSize: number;
 }
+
+export type ThumbStatus = "pending" | "ready" | "failed" | "unsupported";
+
+export interface ImageRecord {
+  id: number;
+  rootId: number;
+  relPath: string;
+  filename: string;
+  extension: string;
+  sizeBytes: number;
+  mtime: number;
+  width: number | null;
+  height: number | null;
+  orientation: number | null;
+  takenAt: number | null;
+  gpsLat: number | null;
+  gpsLng: number | null;
+  cameraMake: string | null;
+  cameraModel: string | null;
+  thumbStatus: ThumbStatus;
+  thumbHash: string | null;
+  thumbError: string | null;
+  indexedAt: number;
+  deletedAt: number | null;
+  rootPath: string;
+  fullPath: string;
+}
+
+export interface ImagePage {
+  items: ImageRecord[];
+  total: number;
+  offset: number;
+  limit: number;
+}
+
+export type SortField = "taken_at" | "mtime" | "filename" | "size";
+export type SortDir = "asc" | "desc";
+
+export interface ImageSort {
+  field: SortField;
+  dir: SortDir;
+}
+
+export interface ImageQueryParams {
+  rootIds?: number[];
+  formats?: string[];
+  q?: string;
+  sizeMin?: number;
+  sizeMax?: number;
+  takenFrom?: number;
+  takenTo?: number;
+  hasGps?: boolean;
+  sort?: ImageSort;
+  offset?: number;
+  limit?: number;
+  includeDeleted?: boolean;
+}
+
+export interface RenameImageArgs {
+  id: number;
+  newFilename: string;
+}
+
+export interface ScanStartResult {
+  taskId: number;
+  rootId: number;
+  status: string;
+}
+
+export interface ScanTaskStatus {
+  id: number;
+  rootId: number;
+  status: string;
+  totalFiles: number | null;
+  processed: number;
+  startedAt: number | null;
+  finishedAt: number | null;
+  error: string | null;
+}
+
+export interface ScanProgress {
+  rootId: number;
+  taskId: number;
+  processed: number;
+  total: number;
+  currentFile: string | null;
+  etaSec: number | null;
+}
+
+export interface ScanDone {
+  rootId: number;
+  taskId: number;
+  added: number;
+  updated: number;
+  removed: number;
+}
+
+export interface ScanErrorEvent {
+  rootId: number;
+  taskId: number;
+  error: string;
+  file: string | null;
+}
+
+export interface QueueStatus {
+  p0: number;
+  p1: number;
+  p2: number;
+  p3: number;
+  p4: number;
+  p5: number;
+  p6: number;
+  p7: number;
+  running: number;
+  completed: number;
+  failed: number;
+  paused: boolean;
+}
+
+export interface AppSettings {
+  locale: string;
+  theme: "system" | "light" | "dark" | string;
+  thumbCacheGb: number;
+  localScanConcurrency: number;
+  networkScanConcurrency: number;
+}
+
+export interface AppSettingsPatch {
+  locale?: string;
+  theme?: "system" | "light" | "dark" | string;
+  thumbCacheGb?: number;
+  localScanConcurrency?: number;
+  networkScanConcurrency?: number;
+}

@@ -129,13 +129,22 @@ mod tests {
     fn unc_path_preserved() {
         assert_eq!(normalize_str("\\\\nas\\share"), "\\\\nas\\share");
         assert_eq!(normalize_str("\\\\nas\\share\\"), "\\\\nas\\share");
-        assert_eq!(normalize_str("\\\\nas\\share\\photos"), "\\\\nas\\share\\photos");
+        assert_eq!(
+            normalize_str("\\\\nas\\share\\photos"),
+            "\\\\nas\\share\\photos"
+        );
     }
 
     #[test]
     fn posix_strips_trailing_slash() {
-        assert_eq!(normalize_str("/Users/admin/Pictures/"), "/Users/admin/Pictures");
-        assert_eq!(normalize_str("/Users/admin/Pictures"), "/Users/admin/Pictures");
+        assert_eq!(
+            normalize_str("/Users/admin/Pictures/"),
+            "/Users/admin/Pictures"
+        );
+        assert_eq!(
+            normalize_str("/Users/admin/Pictures"),
+            "/Users/admin/Pictures"
+        );
     }
 
     #[test]

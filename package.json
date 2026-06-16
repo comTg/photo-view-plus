@@ -11,6 +11,7 @@
     "lint": "biome check src/",
     "format": "biome format --write src/",
     "typecheck": "tsc --noEmit",
+    "test": "tsc --noEmit",
     "tauri": "tauri",
     "tauri:dev": "cross-env PVP_PROFILE=dev tauri dev --config src-tauri/tauri.dev.json",
     "tauri:test": "cross-env PVP_PROFILE=test tauri dev --config src-tauri/tauri.test.json",

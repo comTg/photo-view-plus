@@ -7,7 +7,7 @@
 | 里程碑 | 范围 | 发布判据 | 状态 | 计划周 |
 |--------|------|---------|------|--------|
 | **M0** | 文档与规则（本批 10 份） | 全部 docs 写完并审过 | 进行中 | 2026-W24 |
-| **M1** | MVP1 基础浏览 | `docs/03` § 0 全部验收过 | 待开始 | W24-W26（约 2-3 周） |
+| **M1** | MVP1 基础浏览 | `docs/03` § 0 全部验收过 | 待验收 | W24-W26（约 2-3 周） |
 | **M2** | MVP2 去重 | `docs/04` § 0 全部验收过 | 待开始 | W27-W28（约 2 周） |
 | **M3** | MVP3 AI 与搜索 | `docs/05` § 0 全部验收过 | 待开始 | W29-W33（约 4-5 周） |
 | **M4** | MVP4 高级管理 | `docs/06` § 0 全部验收过 | 待开始 | W34-W37（约 3-4 周） |
@@ -35,7 +35,8 @@
 > 完成后由用户复查，全部签字才进入 M1。
 
 ### M1 MVP1（详见 `docs/03` § 2）
-- [ ] T1-T16 共 16 个任务
+- [x] T1-T16 实现闭环已完成（队列 / 扫描 / EXIF / 缩略图 / 查询 / 三栏浏览 / 筛选 / 多选 / 详情 / 设置）
+- [ ] T16 大样本性能验收待用户用真实图库确认（5 万图扫描、滚动 FPS、内存峰值）
 
 ### M2 MVP2（详见 `docs/04` § 2）
 - [ ] T1-T14 共 14 个任务
@@ -142,8 +143,25 @@
 - 借鉴方式：把 czkawka 当**参考实现**，从 `czkawka_core/src/tools/similar_images.rs` 学习阈值默认值、多 hash size 取舍、特殊格式（RAW/JXL/动图）跳过策略。MIT 允许直接抄代码（保留 license 头），但具体逻辑短，我们重写更清爽——抄思路不抄实现
 - 后果：MVP2 T3 工作量从"写 DCT + 测对齐 czkawka"减到"配 `HasherConfig` + 喂缩略图"；默认参数与 czkawka 一致（**dHash/Gradient, hash_size=8, Lanczos3, 不启用 DCT**），可以直接对照它的用户反馈调优。具体阈值表见 `docs/04` T3 速查（czkawka 的 `SIMILAR_VALUES` 完整照搬）
 
+### ADR-006 · MVP1 完成总结与遗留事项
+- 状态：待验收（M1）
+- 时间：2026-06-16
+- 上下文：MVP1 T3 已完成 roots 管理，本次继续实现 T4-T16 的基础浏览闭环。
+- 决定：
+  - Rust 端新增纯业务任务队列，扫描任务为 P1，缩略图任务为 P0；队列状态由启动层转发为 Tauri event，队列模块本身不依赖 Tauri runtime。
+  - 扫描采用 `walkdir` 递归发现 MVP1 图片格式，写 `images` 表，二次扫描按 `mtime + size` 增量更新，未再出现的文件标记 `deleted_at`。
+  - EXIF 读取使用 `kamadak-exif`，失败不阻塞扫描；缩略图使用 `image` crate 生成 256px WebP，并通过 `thumb` 自定义协议给前端读取。
+  - 前端在 pnpm 依赖策略临时阻止新增 UI 包的情况下，用 React + CSS 完成三栏、网格、筛选、多选、详情和设置；暂未引入 `react-virtuoso`。
+- 验证：
+  - `cargo test` / `cargo clippy --all-targets -- -D warnings` / `cargo fmt --check` 通过。
+  - `pnpm lint` / `pnpm typecheck` / `pnpm test` / `pnpm build` 通过。
+  - Browser 烟测：1280px 三栏布局正常；900px 断点右侧详情隐藏，主区不溢出。
+- 遗留：
+  - 真实 5 万图性能、FPS、内存峰值待用户验收环境补测。
+  - `react-virtuoso`、Radix、Lucide 依赖因 pnpm supply-chain/build approval 策略未在本次引入；MVP1.1 可替换当前分页网格为虚拟瀑布流。
+  - HEIC 解码仍按文档允许的 MVP1 降级策略处理，不支持时缩略图标记 `unsupported`。
+
 后续每个 MVP 完成时追加新的 ADR：
-- ADR-006 · MVP1 完成总结与遗留事项（待填）
 - ADR-007 · MVP2 pHash 阈值选定依据（待填）
 - ADR-008 · MVP3 CLIP vs SigLIP 选型（待填）
 - ADR-009 · MVP4 人脸聚类算法对比（待填）

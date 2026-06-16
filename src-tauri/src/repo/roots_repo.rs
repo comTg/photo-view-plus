@@ -1,6 +1,6 @@
 //! Roots 表的 CRUD。`docs/01-data-model.md` § 2.1 定义。
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{params, Connection, OptionalExtension};
 use serde::{Deserialize, Serialize};
 
 use crate::error::AppResult;
@@ -41,7 +41,8 @@ pub fn insert(conn: &Connection, new_root: &NewRoot, now: i64) -> AppResult<Root
         params![new_root.path, new_root.label, new_root.root_type, now],
     )?;
     let id = conn.last_insert_rowid();
-    get(conn, id).map(|r| r.expect("just-inserted row must exist"))
+    get(conn, id)?
+        .ok_or_else(|| crate::error::AppError::Other("刚插入的目录记录不存在".to_string()))
 }
 
 pub fn get(conn: &Connection, id: i64) -> AppResult<Option<Root>> {
