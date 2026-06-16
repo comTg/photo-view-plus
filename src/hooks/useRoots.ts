@@ -2,12 +2,16 @@ import { rootsAdd, rootsList, rootsRemove } from "@/lib/tauri";
 import type { Root } from "@/lib/tauri-types";
 import { useCallback, useEffect, useState } from "react";
 
+// "all" = 浏览全部目录（查询时不带 rootIds，后端返回所有目录的图片）；
+// number = 只看某一个目录。
+export type RootSelection = "all" | number;
+
 export interface UseRoots {
   roots: Root[];
   loading: boolean;
   error: string | null;
-  selectedId: number | null;
-  setSelectedId: (id: number | null) => void;
+  selection: RootSelection;
+  setSelection: (selection: RootSelection) => void;
   reload: () => Promise<void>;
   addRoot: (path: string, label?: string | null) => Promise<Root>;
   removeRoot: (id: number) => Promise<void>;
@@ -17,7 +21,7 @@ export function useRoots(): UseRoots {
   const [roots, setRoots] = useState<Root[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [selectedId, setSelectedId] = useState<number | null>(null);
+  const [selection, setSelection] = useState<RootSelection>("all");
 
   const reload = useCallback(async () => {
     setLoading(true);
@@ -36,11 +40,11 @@ export function useRoots(): UseRoots {
     void reload();
   }, [reload]);
 
+  // 选中的具体目录被删除后回退到"全部"。
   useEffect(() => {
-    setSelectedId((current) => {
-      if (roots.length === 0) return null;
-      if (current !== null && roots.some((root) => root.id === current)) return current;
-      return roots[0]?.id ?? null;
+    setSelection((current) => {
+      if (current === "all") return current;
+      return roots.some((r) => r.id === current) ? current : "all";
     });
   }, [roots]);
 
@@ -48,7 +52,8 @@ export function useRoots(): UseRoots {
     async (path: string, label?: string | null) => {
       const created = await rootsAdd({ path, label });
       await reload();
-      setSelectedId(created.id);
+      // 新增目录后回到"全部"，让新目录的图片直接并入合并视图。
+      setSelection("all");
       return created;
     },
     [reload],
@@ -57,18 +62,18 @@ export function useRoots(): UseRoots {
   const removeRoot = useCallback(
     async (id: number) => {
       await rootsRemove(id);
-      if (selectedId === id) setSelectedId(null);
+      setSelection((current) => (current === id ? "all" : current));
       await reload();
     },
-    [reload, selectedId],
+    [reload],
   );
 
   return {
     roots,
     loading,
     error,
-    selectedId,
-    setSelectedId,
+    selection,
+    setSelection,
     reload,
     addRoot,
     removeRoot,

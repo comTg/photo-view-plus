@@ -1,3 +1,4 @@
+import type { RootSelection } from "@/hooks/useRoots";
 import type { Root } from "@/lib/tauri-types";
 import { useCallback } from "react";
 
@@ -5,8 +6,8 @@ interface Props {
   roots: Root[];
   loading: boolean;
   error: string | null;
-  selectedId: number | null;
-  onSelect: (id: number | null) => void;
+  selection: RootSelection;
+  onSelect: (selection: RootSelection) => void;
   onRemove: (id: number) => void;
   onScan: (id: number) => void;
   onAdd: () => void;
@@ -16,7 +17,7 @@ export function RootList({
   roots,
   loading,
   error,
-  selectedId,
+  selection,
   onSelect,
   onRemove,
   onScan,
@@ -48,9 +49,22 @@ export function RootList({
       )}
 
       <ul className="rootlist__items">
+        {roots.length > 0 && (
+          <li className={`rootlist__item${selection === "all" ? " rootlist__item--selected" : ""}`}>
+            <button
+              type="button"
+              className="rootlist__main"
+              onClick={() => onSelect("all")}
+              title="浏览全部目录"
+            >
+              <span className="rootlist__icon">ALL</span>
+              <span className="rootlist__label">全部（{roots.length}）</span>
+            </button>
+          </li>
+        )}
         {roots.map((r) => {
           const display = r.label ?? shortenPath(r.path);
-          const isSelected = r.id === selectedId;
+          const isSelected = selection === r.id;
           return (
             <li
               key={r.id}
@@ -59,7 +73,7 @@ export function RootList({
               <button
                 type="button"
                 className="rootlist__main"
-                onClick={() => onSelect(isSelected ? null : r.id)}
+                onClick={() => onSelect(r.id)}
                 title={r.path}
               >
                 <span className="rootlist__icon">{r.rootType === "network" ? "NET" : "DIR"}</span>

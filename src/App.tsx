@@ -49,7 +49,17 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
 
   const roots = useRoots();
-  const selectedRoot = roots.roots.find((r) => r.id === roots.selectedId) ?? roots.roots[0] ?? null;
+  const selection = roots.selection;
+  const allSelected = selection === "all";
+  const hasRoots = roots.roots.length > 0;
+  const selectedRoot =
+    typeof selection === "number" ? (roots.roots.find((r) => r.id === selection) ?? null) : null;
+  // 工具栏/空态"扫描"按钮要扫的目录：全部 → 所有目录；单选 → 当前目录。
+  const scanTargets = allSelected
+    ? roots.roots.map((r) => r.id)
+    : selectedRoot
+      ? [selectedRoot.id]
+      : [];
 
   const [searchDraft, setSearchDraft] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -81,7 +91,6 @@ export default function App() {
   const lastQueryKeyRef = useRef("");
   const requestSeqRef = useRef(0);
   const rootsReloadRef = useRef(roots.reload);
-  const selectedRootId = selectedRoot?.id ?? null;
 
   useEffect(() => {
     imagesRef.current = images;
@@ -116,7 +125,8 @@ export default function App() {
       const sizeMin = mbToBytes(sizeMinMb);
       const sizeMax = mbToBytes(sizeMaxMb);
       return {
-        rootIds: selectedRootId !== null ? [selectedRootId] : undefined,
+        // "全部" → 不带 rootIds（后端返回所有目录）；单选 → 只查该目录。
+        rootIds: typeof selection === "number" ? [selection] : undefined,
         formats: formats.length > 0 ? formats : undefined,
         q: searchQuery || undefined,
         sizeMin,
@@ -134,7 +144,7 @@ export default function App() {
       formats,
       gpsFilter,
       searchQuery,
-      selectedRootId,
+      selection,
       sizeMaxMb,
       sizeMinMb,
       sortDir,
@@ -157,7 +167,7 @@ export default function App() {
 
   const loadImages = useCallback(
     async (mode: LoadMode = "reset") => {
-      if (selectedRootId === null) {
+      if (!hasRoots) {
         requestSeqRef.current += 1;
         imageLoadingRef.current = false;
         setImageLoading(false);
@@ -200,17 +210,19 @@ export default function App() {
         }
       }
     },
-    [buildQuery, restoreGridScroll, selectedRootId],
+    [buildQuery, hasRoots, restoreGridScroll],
   );
 
   useEffect(() => {
     setSelectedIds([]);
     setDetail(null);
-    const queryKey = JSON.stringify(buildQuery(0));
+    // 把"是否已有目录"并入 key：选"全部"时 buildQuery 在 0→N 个目录的过程中
+    // 不会变化，靠 hasRoots 翻转来触发首次加载。
+    const queryKey = JSON.stringify({ ready: hasRoots, query: buildQuery(0) });
     if (queryKey === lastQueryKeyRef.current) return;
     lastQueryKeyRef.current = queryKey;
     void loadImages("reset");
-  }, [buildQuery, loadImages]);
+  }, [buildQuery, hasRoots, loadImages]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimer.current !== null) return;
@@ -223,22 +235,22 @@ export default function App() {
   const handleScanProgress = useCallback(
     (payload: ScanProgress) => {
       setScanProgress((prev) => ({ ...prev, [payload.rootId]: payload }));
-      if (payload.rootId === selectedRootId && activeView === "browse") {
+      if ((allSelected || payload.rootId === selection) && activeView === "browse") {
         scheduleRefresh();
       }
     },
-    [activeView, scheduleRefresh, selectedRootId],
+    [activeView, allSelected, scheduleRefresh, selection],
   );
 
   const handleScanDone = useCallback(
     (payload: ScanDone) => {
       setToast(`扫描完成：新增 ${payload.added}，更新 ${payload.updated}，移除 ${payload.removed}`);
       void rootsReloadRef.current();
-      if (payload.rootId === selectedRootId) {
+      if (allSelected || payload.rootId === selection) {
         void loadImages("refresh");
       }
     },
-    [loadImages, selectedRootId],
+    [allSelected, loadImages, selection],
   );
 
   const handleScanError = useCallback((payload: ScanErrorEvent) => {
@@ -379,7 +391,13 @@ export default function App() {
     gridScrollerRef.current = ref;
   }, []);
 
-  const selectedProgress = selectedRoot ? scanProgress[selectedRoot.id] : undefined;
+  // 全部模式下：优先显示仍在进行中的扫描，否则显示最近一条进度。
+  const allProgress = Object.values(scanProgress);
+  const selectedProgress = allSelected
+    ? (allProgress.find((p) => p.processed < p.total) ?? allProgress[allProgress.length - 1])
+    : typeof selection === "number"
+      ? scanProgress[selection]
+      : undefined;
   const selectedCount = selectedIds.length;
   const selectedRecords = useMemo(
     () => images.filter((image) => selectedIds.includes(image.id)),
@@ -408,9 +426,9 @@ export default function App() {
           <button
             type="button"
             className="icon-button"
-            disabled={!selectedRoot}
-            onClick={() => selectedRoot && void handleScan(selectedRoot.id)}
-            title="扫描当前目录"
+            disabled={scanTargets.length === 0}
+            onClick={() => scanTargets.forEach((id) => void handleScan(id))}
+            title={allSelected ? "扫描全部目录" : "扫描当前目录"}
           >
             ↻
           </button>
@@ -490,9 +508,9 @@ export default function App() {
           roots={roots.roots}
           loading={roots.loading}
           error={roots.error}
-          selectedId={roots.selectedId}
-          onSelect={(id) => {
-            roots.setSelectedId(id);
+          selection={roots.selection}
+          onSelect={(sel) => {
+            roots.setSelection(sel);
             setActiveView("browse");
           }}
           onRemove={(id) => {
@@ -540,9 +558,9 @@ export default function App() {
               gpsFilter={gpsFilter}
               setGpsFilter={setGpsFilter}
             />
-            {!selectedRoot ? (
+            {!hasRoots ? (
               <EmptyState
-                title={roots.roots.length === 0 ? "添加图片目录开始" : "选择左侧目录"}
+                title="添加图片目录开始"
                 body="MVP1 会扫描目录、生成缩略图，并在这里显示可筛选的图片网格。"
                 actionLabel="添加目录"
                 onAction={handleAdd}
@@ -556,10 +574,10 @@ export default function App() {
               />
             ) : images.length === 0 && !imageLoading ? (
               <EmptyState
-                title="当前目录还没有图片"
+                title={allSelected ? "还没有图片" : "当前目录还没有图片"}
                 body="点击扫描后，图片会随着后台任务逐步出现在这里。"
-                actionLabel="扫描目录"
-                onAction={() => void handleScan(selectedRoot.id)}
+                actionLabel={allSelected ? "扫描全部目录" : "扫描目录"}
+                onAction={() => scanTargets.forEach((id) => void handleScan(id))}
               />
             ) : (
               <ImageGrid
@@ -572,7 +590,7 @@ export default function App() {
                 scrollerRef={handleGridScrollerRef}
               />
             )}
-            {selectedRoot && (
+            {hasRoots && (
               <div className="browse-footer" aria-live="polite">
                 {imageLoading ? (
                   <div className="loading-row">正在加载图片…</div>
@@ -608,9 +626,13 @@ export default function App() {
           {bootError ? ` · ${bootError}` : ""}
         </span>
         <span>
-          {selectedRoot
-            ? `${selectedRoot.path} · ${total.toLocaleString("zh-CN")} 张`
-            : `${roots.roots.length} 个目录`}
+          {!hasRoots
+            ? `${roots.roots.length} 个目录`
+            : allSelected
+              ? `全部 ${roots.roots.length} 个目录 · ${total.toLocaleString("zh-CN")} 张`
+              : selectedRoot
+                ? `${selectedRoot.path} · ${total.toLocaleString("zh-CN")} 张`
+                : `${roots.roots.length} 个目录`}
         </span>
         <TaskStatus queue={queue} progress={selectedProgress} />
       </footer>
