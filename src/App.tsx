@@ -45,7 +45,7 @@ export default function App() {
   const [settings, setSettings] = useState<AppSettings | null>(null);
 
   const roots = useRoots();
-  const selectedRoot = roots.roots.find((r) => r.id === roots.selectedId) ?? null;
+  const selectedRoot = roots.roots.find((r) => r.id === roots.selectedId) ?? roots.roots[0] ?? null;
 
   const [searchDraft, setSearchDraft] = useState("");
   const [searchQuery, setSearchQuery] = useState("");
@@ -72,10 +72,19 @@ export default function App() {
   const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress>>({});
   const [queue, setQueue] = useState<QueueStatus | null>(null);
   const refreshTimer = useRef<number | null>(null);
+  const imageLoadingRef = useRef(false);
+  const lastQueryKeyRef = useRef("");
+  const requestSeqRef = useRef(0);
+  const rootsReloadRef = useRef(roots.reload);
+  const selectedRootId = selectedRoot?.id ?? null;
 
   useEffect(() => {
     imagesRef.current = images;
   }, [images]);
+
+  useEffect(() => {
+    rootsReloadRef.current = roots.reload;
+  }, [roots.reload]);
 
   useEffect(() => {
     ping()
@@ -102,7 +111,7 @@ export default function App() {
       const sizeMin = mbToBytes(sizeMinMb);
       const sizeMax = mbToBytes(sizeMaxMb);
       return {
-        rootIds: selectedRoot ? [selectedRoot.id] : undefined,
+        rootIds: selectedRootId !== null ? [selectedRootId] : undefined,
         formats: formats.length > 0 ? formats : undefined,
         q: searchQuery || undefined,
         sizeMin,
@@ -120,7 +129,7 @@ export default function App() {
       formats,
       gpsFilter,
       searchQuery,
-      selectedRoot,
+      selectedRootId,
       sizeMaxMb,
       sizeMinMb,
       sortDir,
@@ -132,33 +141,47 @@ export default function App() {
 
   const loadImages = useCallback(
     async (mode: "reset" | "more" = "reset") => {
-      if (!selectedRoot) {
+      if (selectedRootId === null) {
+        requestSeqRef.current += 1;
+        imageLoadingRef.current = false;
+        setImageLoading(false);
         setImages([]);
         setTotal(0);
         return;
       }
-      if (imageLoading) return;
+      if (mode === "more" && imageLoadingRef.current) return;
+      imageLoadingRef.current = true;
       setImageLoading(true);
       setImageError(null);
+      const seq = requestSeqRef.current + 1;
+      requestSeqRef.current = seq;
       try {
         const offset = mode === "more" ? imagesRef.current.length : 0;
         const page = await imagesQuery(buildQuery(offset));
+        if (seq !== requestSeqRef.current) return;
         setTotal(page.total);
         setImages((prev) => (mode === "more" ? mergeImages(prev, page.items) : page.items));
       } catch (error) {
+        if (seq !== requestSeqRef.current) return;
         setImageError(String(error));
       } finally {
-        setImageLoading(false);
+        if (seq === requestSeqRef.current) {
+          imageLoadingRef.current = false;
+          setImageLoading(false);
+        }
       }
     },
-    [buildQuery, imageLoading, selectedRoot],
+    [buildQuery, selectedRootId],
   );
 
   useEffect(() => {
     setSelectedIds([]);
     setDetail(null);
+    const queryKey = JSON.stringify(buildQuery(0));
+    if (queryKey === lastQueryKeyRef.current) return;
+    lastQueryKeyRef.current = queryKey;
     void loadImages("reset");
-  }, [loadImages]);
+  }, [buildQuery, loadImages]);
 
   const scheduleRefresh = useCallback(() => {
     if (refreshTimer.current !== null) return;
@@ -181,12 +204,12 @@ export default function App() {
   const handleScanDone = useCallback(
     (payload: ScanDone) => {
       setToast(`扫描完成：新增 ${payload.added}，更新 ${payload.updated}，移除 ${payload.removed}`);
-      void roots.reload();
+      void rootsReloadRef.current();
       if (payload.rootId === roots.selectedId) {
         void loadImages("reset");
       }
     },
-    [loadImages, roots],
+    [loadImages, roots.selectedId],
   );
 
   const handleScanError = useCallback((payload: ScanErrorEvent) => {
@@ -228,17 +251,6 @@ export default function App() {
     return () => window.removeEventListener("keydown", onKeyDown);
   }, [selectionMode]);
 
-  const handleAdd = useCallback(async () => {
-    try {
-      const picked = await open({ directory: true, multiple: false });
-      if (!picked || typeof picked !== "string") return;
-      await roots.addRoot(picked);
-      setToast("目录已添加");
-    } catch (error) {
-      setToast(`添加目录失败：${String(error)}`);
-    }
-  }, [roots]);
-
   const handleScan = useCallback(async (rootId: number) => {
     try {
       const result = await scanStart(rootId);
@@ -247,6 +259,19 @@ export default function App() {
       setToast(`启动扫描失败：${String(error)}`);
     }
   }, []);
+
+  const handleAdd = useCallback(async () => {
+    try {
+      const picked = await open({ directory: true, multiple: false });
+      if (!picked || typeof picked !== "string") return;
+      const created = await roots.addRoot(picked);
+      setActiveView("browse");
+      setToast("目录已添加，已开始扫描");
+      await handleScan(created.id);
+    } catch (error) {
+      setToast(`添加目录失败：${String(error)}`);
+    }
+  }, [handleScan, roots]);
 
   const handleImageClick = useCallback(
     (image: ImageRecord, event: React.MouseEvent) => {

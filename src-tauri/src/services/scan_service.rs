@@ -184,6 +184,23 @@ pub fn list_scan_status(pool: &Pool) -> AppResult<Vec<ScanTaskStatus>> {
     Ok(out)
 }
 
+pub fn recover_interrupted_tasks(pool: &Pool) -> AppResult<usize> {
+    let conn = pool.get()?;
+    let now = now_unix();
+    let updated = conn.execute(
+        "UPDATE scan_tasks
+         SET status = 'failed',
+             finished_at = ?1,
+             error = '应用退出，扫描任务已中断，请重新扫描'
+         WHERE status IN ('queued', 'running')",
+        params![now],
+    )?;
+    if updated > 0 {
+        tracing::warn!(updated, "recovered interrupted scan tasks");
+    }
+    Ok(updated)
+}
+
 pub fn image_extensions() -> &'static [&'static str] {
     IMAGE_EXTENSIONS
 }
@@ -195,41 +212,61 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
     let root_path = PathBuf::from(&root.path);
     let now = now_unix();
 
+    tracing::info!(
+        root_id = task.root_id,
+        task_id = task.task_id,
+        path = ?root_path,
+        "scan started"
+    );
     set_scan_status(&conn, task.task_id, "running", Some(now), None, None, None)?;
 
-    let files = match collect_image_files(&root_path) {
-        Ok(files) => files,
-        Err(error) => {
-            set_scan_status(
-                &conn,
-                task.task_id,
-                "failed",
-                None,
-                Some(now_unix()),
-                None,
-                Some(error.to_string()),
-            )?;
-            emit_scan_error(&task, error.to_string(), None);
-            return Err(error);
-        }
-    };
+    if !root_path.exists() {
+        let error = AppError::Other(format!("目录不存在：{}", root_path.display()));
+        set_scan_status(
+            &conn,
+            task.task_id,
+            "failed",
+            None,
+            Some(now_unix()),
+            None,
+            Some(error.to_string()),
+        )?;
+        emit_scan_error(&task, error.to_string(), None);
+        return Err(error);
+    }
 
-    let total = i64::try_from(files.len()).unwrap_or(i64::MAX);
-    conn.execute(
-        "UPDATE scan_tasks SET total_files = ?1 WHERE id = ?2",
-        params![total, task.task_id],
-    )?;
+    tracing::info!(
+        root_id = task.root_id,
+        task_id = task.task_id,
+        "scan walking directory"
+    );
 
     let mut done = ScanDone {
         root_id: task.root_id,
         task_id: task.task_id,
         ..ScanDone::default()
     };
-    let mut visited = HashSet::with_capacity(files.len());
+    let mut visited = HashSet::new();
     let started = Instant::now();
     let mut last_emit = Instant::now();
+    let mut processed: usize = 0;
 
-    for (index, path) in files.iter().enumerate() {
+    emit_progress(&task, processed, 0, None, started);
+
+    for entry in WalkDir::new(&root_path).follow_links(false).into_iter() {
+        let entry = match entry {
+            Ok(entry) => entry,
+            Err(error) => {
+                tracing::warn!(root_id = task.root_id, task_id = task.task_id, %error, "walkdir entry failed");
+                emit_scan_error(&task, error.to_string(), None);
+                continue;
+            }
+        };
+
+        if !entry.file_type().is_file() {
+            continue;
+        }
+
         if cancellation.is_cancelled() {
             set_scan_status(
                 &conn,
@@ -237,11 +274,22 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
                 "paused",
                 None,
                 None,
-                Some(i64::try_from(index).unwrap_or(i64::MAX)),
+                Some(i64::try_from(processed).unwrap_or(i64::MAX)),
                 None,
             )?;
-            emit_progress(&task, index, total, Some(path), started);
+            emit_progress(
+                &task,
+                processed,
+                i64::try_from(processed).unwrap_or(i64::MAX),
+                None,
+                started,
+            );
             return Ok(());
+        }
+
+        let path = entry.path();
+        if !is_supported_image(path) {
+            continue;
         }
 
         let rel_path = match rel_path_string(&root_path, path) {
@@ -249,6 +297,7 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
             None => continue,
         };
         visited.insert(rel_path.clone());
+        processed += 1;
 
         match scan_one_file(&conn, &task, &root, path, &rel_path) {
             Ok(outcome) => match outcome {
@@ -266,30 +315,40 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
             }
         }
 
-        let processed = i64::try_from(index + 1).unwrap_or(i64::MAX);
-        if processed % 50 == 0 {
+        let processed_i64 = i64::try_from(processed).unwrap_or(i64::MAX);
+        if processed_i64 % 50 == 0 {
             conn.execute(
                 "UPDATE scan_tasks SET processed = ?1 WHERE id = ?2",
-                params![processed, task.task_id],
+                params![processed_i64, task.task_id],
             )?;
         }
 
         if last_emit.elapsed().as_secs() >= 1 {
-            emit_progress(&task, index + 1, total, Some(path), started);
+            emit_progress(&task, processed, processed_i64, Some(path), started);
             last_emit = Instant::now();
         }
     }
 
     done.removed = mark_missing_deleted(&conn, task.root_id, &visited)?;
     let finished = now_unix();
+    let total = i64::try_from(processed).unwrap_or(i64::MAX);
+    tracing::info!(
+        root_id = task.root_id,
+        task_id = task.task_id,
+        total,
+        added = done.added,
+        updated = done.updated,
+        removed = done.removed,
+        "scan completed"
+    );
     roots_repo::touch_last_scan(&conn, task.root_id, finished)?;
     conn.execute(
         "UPDATE scan_tasks
-         SET status = 'done', processed = ?1, finished_at = ?2, error = NULL
+         SET status = 'done', total_files = ?1, processed = ?1, finished_at = ?2, error = NULL
          WHERE id = ?3",
         params![total, finished, task.task_id],
     )?;
-    emit_progress(&task, files.len(), total, None, started);
+    emit_progress(&task, processed, total, None, started);
     let _ = task.app.emit("scan:done", done);
     Ok(())
 }
@@ -348,34 +407,6 @@ fn scan_one_file(
         ))?;
     }
     Ok(outcome)
-}
-
-fn collect_image_files(root_path: &Path) -> AppResult<Vec<PathBuf>> {
-    if !root_path.exists() {
-        return Err(AppError::Other(format!(
-            "目录不存在：{}",
-            root_path.display()
-        )));
-    }
-
-    let mut files = Vec::new();
-    for entry in WalkDir::new(root_path).follow_links(false).into_iter() {
-        let entry = match entry {
-            Ok(entry) => entry,
-            Err(error) => {
-                tracing::warn!(%error, "walkdir entry failed");
-                continue;
-            }
-        };
-        if !entry.file_type().is_file() {
-            continue;
-        }
-        let path = entry.path();
-        if is_supported_image(path) {
-            files.push(path.to_path_buf());
-        }
-    }
-    Ok(files)
 }
 
 fn is_supported_image(path: &Path) -> bool {

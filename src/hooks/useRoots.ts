@@ -36,6 +36,14 @@ export function useRoots(): UseRoots {
     void reload();
   }, [reload]);
 
+  useEffect(() => {
+    setSelectedId((current) => {
+      if (roots.length === 0) return null;
+      if (current !== null && roots.some((root) => root.id === current)) return current;
+      return roots[0]?.id ?? null;
+    });
+  }, [roots]);
+
   const addRoot = useCallback(
     async (path: string, label?: string | null) => {
       const created = await rootsAdd({ path, label });

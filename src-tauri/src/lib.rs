@@ -1,5 +1,11 @@
+use std::path::PathBuf;
+use std::sync::OnceLock;
+
 use http::header;
 use tauri::{Emitter, Manager};
+use tracing_appender::non_blocking::WorkerGuard;
+use tracing_subscriber::layer::SubscriberExt;
+use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 mod commands;
@@ -14,9 +20,11 @@ pub mod utils;
 
 pub use error::{AppError, AppResult};
 
+static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
+
 pub fn run() {
-    init_tracing();
     let profile = config::Profile::from_env();
+    init_tracing(profile);
     tracing::info!(?profile, "PhotoView+ starting");
 
     tauri::Builder::default()
@@ -34,6 +42,8 @@ pub fn run() {
             tracing::info!(path = ?paths.db_path, "opening database");
             let pool =
                 db::open(&paths.db_path).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            services::scan_service::recover_interrupted_tasks(&pool)
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             let scheduler = queue::Scheduler::start(16);
             let queue_app = app.handle().clone();
             scheduler.spawn_status_loop(move |status| {
@@ -125,7 +135,41 @@ fn text_response(status: http::StatusCode, text: &str) -> http::Response<Vec<u8>
         .unwrap_or_else(|_| http::Response::new(Vec::new()))
 }
 
-fn init_tracing() {
+fn init_tracing(profile: config::Profile) {
     let filter = EnvFilter::try_from_env("PVP_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
-    let _ = tracing_subscriber::fmt().with_env_filter(filter).try_init();
+    let stdout_layer = tracing_subscriber::fmt::layer();
+
+    if let Some(log_dir) = log_dir_for(profile) {
+        if let Err(error) = std::fs::create_dir_all(&log_dir) {
+            eprintln!("failed to create log dir {}: {error}", log_dir.display());
+        } else {
+            let file_appender = tracing_appender::rolling::daily(&log_dir, "photo-view-plus.log");
+            let (file_writer, guard) = tracing_appender::non_blocking(file_appender);
+            let _ = LOG_GUARD.set(guard);
+            let file_layer = tracing_subscriber::fmt::layer()
+                .with_ansi(false)
+                .with_writer(file_writer);
+            let _ = tracing_subscriber::registry()
+                .with(filter)
+                .with(stdout_layer)
+                .with(file_layer)
+                .try_init();
+            return;
+        }
+    }
+
+    let _ = tracing_subscriber::registry()
+        .with(filter)
+        .with(stdout_layer)
+        .try_init();
+}
+
+fn log_dir_for(profile: config::Profile) -> Option<PathBuf> {
+    let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
+    let identifier = match profile {
+        config::Profile::Dev => "com.vetoer.photoviewplus.dev",
+        config::Profile::Test => "com.vetoer.photoviewplus.test",
+        config::Profile::Prod => "com.vetoer.photoviewplus",
+    };
+    Some(base.join(identifier).join("logs"))
 }
