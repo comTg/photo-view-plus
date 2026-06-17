@@ -47,7 +47,12 @@ pub fn run() {
                 db::open(&paths.db_path).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             services::scan_service::recover_interrupted_tasks(&pool)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
-            let scheduler = queue::Scheduler::start(16);
+            // 给缩略图（P0）设并发上限 = 缩略图 CPU 限额，避免一大批待生成缩略图占满全部
+            // 并发槽、饿死扫描（P1）和去重哈希（P2/P3）。缩略图本就受 CPU 限流，不会因此变慢。
+            let mut task_caps = [usize::MAX; 8];
+            task_caps[queue::Priority::P0 as usize] =
+                services::thumbnail_service::thumbnail_cpu_limit();
+            let scheduler = queue::Scheduler::start_with_caps(16, task_caps);
             let queue_app = app.handle().clone();
             scheduler.spawn_status_loop(move |status| {
                 let _ = queue_app.emit("queue:status", status);

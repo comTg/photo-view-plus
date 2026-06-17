@@ -76,6 +76,11 @@ pub struct Scheduler {
 struct SchedulerInner {
     senders: Vec<mpsc::UnboundedSender<BoxTask>>,
     queued: [AtomicUsize; 8],
+    /// 每个优先级当前"已派发且未完成"的任务数，用于配合 `caps` 做单优先级并发上限。
+    running_by_priority: [AtomicUsize; 8],
+    /// 每个优先级的最大同时运行数。默认 `usize::MAX`（不限，仅受全局并发约束）。
+    /// 用来防止高优先级任务（如缩略图 P0）占满全部并发槽、饿死低优先级任务（去重哈希 P2/P3）。
+    caps: [usize; 8],
     running: AtomicUsize,
     completed: AtomicUsize,
     failed: AtomicUsize,
@@ -103,6 +108,12 @@ pub struct QueueStatus {
 
 impl Scheduler {
     pub fn start(max_concurrency: usize) -> Self {
+        Self::start_with_caps(max_concurrency, [usize::MAX; 8])
+    }
+
+    /// 同 [`Scheduler::start`]，但可为每个优先级设置"最多同时运行数"上限（按 `Priority` 序号索引）。
+    /// 不设上限的优先级传 `usize::MAX`。用于防止某一优先级占满全部并发槽饿死其他优先级。
+    pub fn start_with_caps(max_concurrency: usize, caps: [usize; 8]) -> Self {
         let mut senders = Vec::new();
         let mut receivers = Vec::new();
 
@@ -116,6 +127,8 @@ impl Scheduler {
             inner: Arc::new(SchedulerInner {
                 senders,
                 queued: std::array::from_fn(|_| AtomicUsize::new(0)),
+                running_by_priority: std::array::from_fn(|_| AtomicUsize::new(0)),
+                caps,
                 running: AtomicUsize::new(0),
                 completed: AtomicUsize::new(0),
                 failed: AtomicUsize::new(0),
@@ -228,11 +241,19 @@ async fn dispatch_loop(
             continue;
         }
 
-        if let Some((priority, task)) = recv_highest_priority(&mut receivers) {
-            inner.queued[priority.index()].fetch_sub(1, Ordering::Relaxed);
+        // 按优先级取一个"未达到本优先级并发上限"的任务。先占住该优先级的运行计数，
+        // 再去抢全局并发槽——这样高优先级达到上限后，dispatcher 会顺延到低优先级，
+        // 不会把所有全局槽都消耗在排队等待的高优先级任务上。
+        if let Some((priority, task)) = recv_dispatchable(&mut receivers, &inner) {
+            let idx = priority.index();
+            inner.queued[idx].fetch_sub(1, Ordering::Relaxed);
+            inner.running_by_priority[idx].fetch_add(1, Ordering::Relaxed);
             let permit = match inner.semaphore.clone().acquire_owned().await {
                 Ok(permit) => permit,
-                Err(_) => break,
+                Err(_) => {
+                    inner.running_by_priority[idx].fetch_sub(1, Ordering::Relaxed);
+                    break;
+                }
             };
             let inner_for_task = inner.clone();
             let token = inner
@@ -251,6 +272,7 @@ async fn dispatch_loop(
                     })
                     .await;
                 inner_for_task.running.fetch_sub(1, Ordering::Relaxed);
+                inner_for_task.running_by_priority[idx].fetch_sub(1, Ordering::Relaxed);
                 match result {
                     Ok(()) => {
                         inner_for_task.completed.fetch_add(1, Ordering::Relaxed);
@@ -269,11 +291,17 @@ async fn dispatch_loop(
     }
 }
 
-fn recv_highest_priority(
+/// 取一个可调度的任务：跳过已达到 `caps` 上限的优先级，按优先级从高到低返回第一个有任务的。
+fn recv_dispatchable(
     receivers: &mut [mpsc::UnboundedReceiver<BoxTask>],
+    inner: &SchedulerInner,
 ) -> Option<(Priority, BoxTask)> {
     for priority in Priority::all() {
-        if let Ok(task) = receivers[priority.index()].try_recv() {
+        let idx = priority.index();
+        if inner.running_by_priority[idx].load(Ordering::Relaxed) >= inner.caps[idx] {
+            continue;
+        }
+        if let Ok(task) = receivers[idx].try_recv() {
             return Some((priority, task));
         }
     }
@@ -348,6 +376,47 @@ mod tests {
         scheduler.resume();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(*order.lock().expect("order"), vec![0, 1, 3]);
+    }
+
+    #[tokio::test]
+    async fn priority_cap_prevents_starvation() {
+        // P0 上限设为 1：即使塞满一堆长时间 P0 任务，低优先级 P2 也应能拿到剩下的并发槽运行。
+        let mut caps = [usize::MAX; 8];
+        caps[Priority::P0.index()] = 1;
+        let scheduler = Scheduler::start_with_caps(2, caps);
+        scheduler.pause();
+
+        for i in 0..6 {
+            scheduler
+                .enqueue(FnTask::new(Priority::P0, format!("p0-{i}"), move |_| {
+                    Box::pin(async move {
+                        tokio::time::sleep(Duration::from_millis(200)).await;
+                        Ok(())
+                    })
+                }))
+                .expect("enqueue p0");
+        }
+
+        let p2_done = Arc::new(AtomicBool::new(false));
+        let flag = p2_done.clone();
+        scheduler
+            .enqueue(FnTask::new(Priority::P2, "p2", move |_| {
+                let flag = flag.clone();
+                Box::pin(async move {
+                    flag.store(true, Ordering::Relaxed);
+                    Ok(())
+                })
+            }))
+            .expect("enqueue p2");
+
+        scheduler.resume();
+        // P0 受限于 cap=1 只能跑 1 个，剩下 1 个全局槽留给 P2 → P2 应很快完成。
+        // 若没有 cap（严格优先级），P2 要等全部 6 个 P0 跑完（约 600ms）。
+        tokio::time::sleep(Duration::from_millis(120)).await;
+        assert!(
+            p2_done.load(Ordering::Relaxed),
+            "P2 task should run alongside capped P0 backlog, not be starved"
+        );
     }
 
     #[tokio::test]
