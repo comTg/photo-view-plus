@@ -60,6 +60,7 @@ async fn thumbnail_task_generates_webp_and_updates_db() {
             image_path,
             None,
             thumbs_dir.clone(),
+            false,
         ))
         .expect("enqueue thumbnail");
 

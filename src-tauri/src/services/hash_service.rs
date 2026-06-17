@@ -17,6 +17,7 @@ use crate::db::Pool;
 use crate::error::AppResult;
 use crate::queue::{Priority, Task, TaskContext};
 use crate::repo::images_repo;
+use crate::utils::read_gate;
 
 const READ_BUFFER: usize = 4 * 1024 * 1024;
 
@@ -25,14 +26,16 @@ pub struct BlakeHashTask {
     pool: Pool,
     image_id: i64,
     full_path: PathBuf,
+    is_network: bool,
 }
 
 impl BlakeHashTask {
-    pub fn new(pool: Pool, image_id: i64, full_path: PathBuf) -> Self {
+    pub fn new(pool: Pool, image_id: i64, full_path: PathBuf, is_network: bool) -> Self {
         Self {
             pool,
             image_id,
             full_path,
+            is_network,
         }
     }
 }
@@ -51,8 +54,15 @@ impl Task for BlakeHashTask {
         if ctx.is_cancelled() {
             return Ok(());
         }
+        // 读原图前先过限流闸门：网络盘并发读过高会拖死 NAS（红线 6）。
+        // permit 持有到 spawn_blocking 里的文件读取结束。
+        let permit = read_gate::acquire_read(self.is_network).await?;
         let task = self.clone();
-        tokio::task::spawn_blocking(move || compute(task, ctx)).await?
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            compute(task, ctx)
+        })
+        .await?
     }
 }
 

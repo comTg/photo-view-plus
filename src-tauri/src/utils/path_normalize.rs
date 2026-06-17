@@ -87,14 +87,73 @@ fn normalize_posix(s: &str) -> String {
     s.trim_end_matches('/').to_string()
 }
 
-/// 根据路径形式推断 root 类型（local / network）。
+/// 根据路径推断 root 类型（local / network）。
 pub fn detect_root_type(input: &Path) -> &'static str {
-    let s = input.to_string_lossy();
-    if s.starts_with("\\\\") || s.starts_with("//") {
+    if is_network_path(input) {
         "network"
     } else {
         "local"
     }
+}
+
+/// 判断路径是否位于网络位置（UNC 或映射网络盘）。
+///
+/// UNC（`\\server\share`、`//server/share`）仅凭语法即可判定。
+/// **映射盘**（如 `Z:\` 指向 NAS）从盘符语法上和本地盘无异，必须在 Windows 上用
+/// `GetDriveType` 查询，返回 `DRIVE_REMOTE` 才算网络盘——这是限流能对映射盘生效的关键。
+/// 非 Windows（开发机）只认 UNC。
+pub fn is_network_path(input: &Path) -> bool {
+    let s = input.to_string_lossy();
+    if s.starts_with("\\\\") || s.starts_with("//") {
+        return true;
+    }
+    let bytes = s.as_bytes();
+    if bytes.len() >= 2 && bytes[1] == b':' && (bytes[0] as char).is_ascii_alphabetic() {
+        return drive_is_remote((bytes[0] as char).to_ascii_uppercase());
+    }
+    false
+}
+
+#[cfg(windows)]
+fn drive_is_remote(drive: char) -> bool {
+    use std::collections::HashMap;
+    use std::ffi::OsStr;
+    use std::os::windows::ffi::OsStrExt;
+    use std::sync::{Mutex, OnceLock};
+
+    // GetDriveTypeW 的返回值。kernel32 在 Windows 上默认链接。
+    const DRIVE_REMOTE: u32 = 4;
+    #[link(name = "kernel32")]
+    extern "system" {
+        fn GetDriveTypeW(lp_root_path_name: *const u16) -> u32;
+    }
+
+    // 盘符→是否网络盘 缓存，避免对每个文件都做一次系统调用。
+    static CACHE: OnceLock<Mutex<HashMap<char, bool>>> = OnceLock::new();
+    let cache = CACHE.get_or_init(|| Mutex::new(HashMap::new()));
+    if let Ok(map) = cache.lock() {
+        if let Some(&value) = map.get(&drive) {
+            return value;
+        }
+    }
+
+    let root: Vec<u16> = OsStr::new(&format!("{drive}:\\"))
+        .encode_wide()
+        .chain(std::iter::once(0))
+        .collect();
+    // SAFETY: root 是以 NUL 结尾的合法宽字符串指针；GetDriveTypeW 只读取它。
+    let is_remote = unsafe { GetDriveTypeW(root.as_ptr()) } == DRIVE_REMOTE;
+
+    if let Ok(mut map) = cache.lock() {
+        map.insert(drive, is_remote);
+    }
+    is_remote
+}
+
+#[cfg(not(windows))]
+fn drive_is_remote(_drive: char) -> bool {
+    // 开发机（macOS/Linux）没有盘符映射概念，盘符路径一律按本地处理。
+    false
 }
 
 #[cfg(test)]
@@ -169,6 +228,16 @@ mod tests {
     fn detect_type_network() {
         assert_eq!(detect_root_type(Path::new("\\\\nas\\share")), "network");
         assert_eq!(detect_root_type(Path::new("//nas/share")), "network");
+    }
+
+    #[test]
+    fn is_network_path_detects_unc() {
+        assert!(is_network_path(Path::new("\\\\nas\\share\\a.jpg")));
+        assert!(is_network_path(Path::new("//nas/share")));
+        // 盘符是否网络盘需 Windows GetDriveType 判定；非 Windows 一律 local。
+        // 映射盘（如 Z:）在 Windows 上由 GetDriveType 返回 DRIVE_REMOTE 识别。
+        #[cfg(not(windows))]
+        assert!(!is_network_path(Path::new("D:\\photos")));
     }
 
     #[test]

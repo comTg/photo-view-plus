@@ -27,6 +27,7 @@ use crate::repo::{duplicates_repo, images_repo};
 use crate::services::hash_service::BlakeHashTask;
 use crate::services::phash_service::{self, DhashTask};
 use crate::utils::bk_tree::DhashIndex;
+use crate::utils::path_normalize;
 
 /// czkawka 的 "High" 档：hash_size=8 时阈值 2。MVP2 默认。
 pub const VISUAL_THRESHOLD_DEFAULT: u32 = 2;
@@ -200,8 +201,14 @@ pub fn start_dedup(
         let conn = pool.get()?;
         for img in images_repo::pending_blake3_images(&conn)? {
             coord.hash_inflight.fetch_add(1, Ordering::Relaxed);
+            let is_network = path_normalize::is_network_path(std::path::Path::new(&img.root_path));
             let wrap = TrackedBlakeTask {
-                inner: BlakeHashTask::new(pool.clone(), img.id, PathBuf::from(img.full_path)),
+                inner: BlakeHashTask::new(
+                    pool.clone(),
+                    img.id,
+                    PathBuf::from(img.full_path),
+                    is_network,
+                ),
                 coord: coord.clone(),
             };
             if let Err(error) = scheduler.enqueue(wrap) {

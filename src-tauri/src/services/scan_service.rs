@@ -423,6 +423,7 @@ fn scan_one_file(
 
     let outcome = images_repo::upsert_scanned_image(conn, &image, now_unix())?;
     if matches!(outcome, UpsertOutcome::Added(_) | UpsertOutcome::Updated(_)) {
+        let is_network = crate::utils::path_normalize::is_network_path(Path::new(&root.path));
         task.scheduler.enqueue(ThumbnailTask::new(
             task.pool.clone(),
             outcome.image_id(),
@@ -431,6 +432,7 @@ fn scan_one_file(
             path.to_path_buf(),
             image.orientation,
             task.paths.thumbs_dir.clone(),
+            is_network,
         ))?;
     }
     Ok(outcome)

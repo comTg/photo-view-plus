@@ -13,6 +13,7 @@ use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Scheduler, Task, TaskContext};
 use crate::repo::images_repo;
+use crate::utils::read_gate;
 
 const THUMB_SIZE: u32 = 256;
 const MAX_THUMBNAIL_CPU_WORKERS: usize = 6;
@@ -28,9 +29,11 @@ pub struct ThumbnailTask {
     full_path: PathBuf,
     orientation: Option<i64>,
     thumbs_dir: PathBuf,
+    is_network: bool,
 }
 
 impl ThumbnailTask {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         pool: Pool,
         image_id: i64,
@@ -39,6 +42,7 @@ impl ThumbnailTask {
         full_path: PathBuf,
         orientation: Option<i64>,
         thumbs_dir: PathBuf,
+        is_network: bool,
     ) -> Self {
         Self {
             pool,
@@ -48,6 +52,7 @@ impl ThumbnailTask {
             full_path,
             orientation,
             thumbs_dir,
+            is_network,
         }
     }
 }
@@ -75,9 +80,16 @@ impl Task for ThumbnailTask {
             }
             _ = cancellation.cancelled() => return Ok(()),
         };
+        // 读原图前再过一道原图读取闸门：网络盘并发读过高会拖死 NAS（红线 6）。
+        // 与 BLAKE3 共用同一组闸门，约束的是"读原图"的总并发。
+        let read_permit = tokio::select! {
+            permit = read_gate::acquire_read(self.is_network) => permit?,
+            _ = cancellation.cancelled() => return Ok(()),
+        };
         let task = self.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
+            let _read_permit = read_permit;
             generate(task, ctx)
         })
         .await?
@@ -121,6 +133,8 @@ pub fn requeue_pending_thumbnails(
 
     let mut count = 0usize;
     for img in pending {
+        let is_network =
+            crate::utils::path_normalize::is_network_path(Path::new(&img.root_path));
         scheduler.enqueue(ThumbnailTask::new(
             pool.clone(),
             img.id,
@@ -129,6 +143,7 @@ pub fn requeue_pending_thumbnails(
             PathBuf::from(img.full_path),
             img.orientation,
             thumbs_dir.to_path_buf(),
+            is_network,
         ))?;
         count += 1;
     }
