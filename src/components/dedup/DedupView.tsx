@@ -1,5 +1,13 @@
+import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useDedup } from "@/hooks/useDedup";
-import { dedupExportCsv, dedupGroupDetail, thumbUrl, trashHistory, trashUndo } from "@/lib/tauri";
+import {
+  dedupExportCsv,
+  dedupGroupDetail,
+  imagesRevealInDir,
+  thumbUrl,
+  trashHistory,
+  trashUndo,
+} from "@/lib/tauri";
 import type {
   DedupAction,
   DedupGroupDetail,
@@ -237,6 +245,11 @@ const DedupGroupRow = memo(function DedupGroupRow({
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [resolving, setResolving] = useState(false);
+  const [imageMenu, setImageMenu] = useState<{
+    x: number;
+    y: number;
+    image: DedupGroupDetail["items"][number]["image"];
+  } | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -282,6 +295,25 @@ const DedupGroupRow = memo(function DedupGroupRow({
       return next;
     });
   }, []);
+
+  const revealImage = useCallback(
+    async (imageId: number) => {
+      try {
+        await imagesRevealInDir(imageId);
+      } catch (e) {
+        onToast(`打开所在文件夹失败：${String(e)}`);
+      }
+    },
+    [onToast],
+  );
+
+  const copyImagePath = useCallback(
+    async (path: string) => {
+      await navigator.clipboard.writeText(path);
+      onToast("已复制图片路径");
+    },
+    [onToast],
+  );
 
   const handleResolve = useCallback(
     async (action: DedupAction) => {
@@ -373,6 +405,11 @@ const DedupGroupRow = memo(function DedupGroupRow({
                 key={item.image.id}
                 className={`dedup-image-row${isKeep ? " dedup-image-row--keep" : ""}`}
                 onClick={() => toggleKeep(item.image.id)}
+                onContextMenu={(event) => {
+                  event.preventDefault();
+                  event.stopPropagation();
+                  setImageMenu({ ...menuPosition(event), image: item.image });
+                }}
                 title={item.image.fullPath}
               >
                 <span className="dedup-image-keep">
@@ -402,6 +439,26 @@ const DedupGroupRow = memo(function DedupGroupRow({
           })}
         </div>
       )}
+      <ContextMenu
+        menu={imageMenu}
+        onClose={() => setImageMenu(null)}
+        items={
+          imageMenu
+            ? [
+                {
+                  id: "reveal",
+                  label: "在文件夹中显示",
+                  onSelect: () => void revealImage(imageMenu.image.id),
+                },
+                {
+                  id: "copy-path",
+                  label: "复制完整路径",
+                  onSelect: () => void copyImagePath(imageMenu.image.fullPath),
+                },
+              ]
+            : []
+        }
+      />
     </article>
   );
 });

@@ -142,10 +142,19 @@ fn validate_filename(filename: &str) -> AppResult<()> {
 }
 
 fn reveal_path(path: &Path) -> AppResult<()> {
+    if !path.exists() {
+        return Err(AppError::Other(format!(
+            "文件不存在或不可访问：{}",
+            path.display()
+        )));
+    }
+
     #[cfg(target_os = "windows")]
     {
-        Command::new("explorer")
-            .arg(format!("/select,{}", path.to_string_lossy()))
+        use std::os::windows::process::CommandExt;
+
+        Command::new("explorer.exe")
+            .raw_arg(format!("/select,\"{}\"", path.display()))
             .spawn()?;
     }
 

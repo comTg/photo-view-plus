@@ -1,6 +1,7 @@
 import { ImagePreviewLightbox } from "@/components/browse/ImagePreviewLightbox";
 import { DedupView } from "@/components/dedup/DedupView";
 import { RootList } from "@/components/sidebar/RootList";
+import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useRoots } from "@/hooks/useRoots";
 import { useTauriEvent } from "@/lib/events";
 import {
@@ -108,6 +109,11 @@ export default function App() {
   const lastSelectedId = useRef<number | null>(null);
   const [detail, setDetail] = useState<ImageRecord | null>(null);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
+  const [imageMenu, setImageMenu] = useState<{
+    x: number;
+    y: number;
+    image: ImageRecord;
+  } | null>(null);
 
   const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress>>({});
   const [queue, setQueue] = useState<QueueStatus | null>(null);
@@ -405,6 +411,27 @@ export default function App() {
     }
   }, [primarySelectedId]);
 
+  const handleRevealImage = useCallback(async (image: ImageRecord) => {
+    try {
+      await imagesRevealInDir(image.id);
+    } catch (error) {
+      setToast(`打开所在文件夹失败：${String(error)}`);
+    }
+  }, []);
+
+  const handleOpenImageMenu = useCallback((image: ImageRecord, event: React.MouseEvent) => {
+    event.preventDefault();
+    event.stopPropagation();
+    setSelectedIds((prev) => (prev.includes(image.id) ? prev : [image.id]));
+    lastSelectedId.current = image.id;
+    setImageMenu({ ...menuPosition(event), image });
+  }, []);
+
+  const handleCopyImagePath = useCallback(async (image: ImageRecord) => {
+    await navigator.clipboard.writeText(image.fullPath);
+    setToast("已复制图片路径");
+  }, []);
+
   const handleRename = useCallback(
     async (newFilename: string) => {
       if (primarySelectedId === null) return;
@@ -454,9 +481,10 @@ export default function App() {
     () => images.filter((image) => selectedIds.includes(image.id)),
     [images, selectedIds],
   );
+  const showDetailPane = activeView === "browse";
 
   return (
-    <div className="app-shell">
+    <div className={`app-shell${showDetailPane ? "" : " app-shell--no-detail"}`}>
       <header className="app-header">
         <div className="brand" title={bootError ?? undefined}>
           <span className="brand__mark">PV</span>
@@ -650,6 +678,7 @@ export default function App() {
                 selectionMode={selectionMode}
                 onClickImage={handleImageClick}
                 onPreviewImage={(image) => openPreviewById(image.id)}
+                onOpenContextMenu={handleOpenImageMenu}
                 onEndReached={handleGridEndReached}
                 scrollerRef={handleGridScrollerRef}
               />
@@ -673,19 +702,21 @@ export default function App() {
         )}
       </main>
 
-      <aside className="app-detail">
-        <DetailPane
-          image={detail}
-          selectedCount={selectedCount}
-          selectedRecords={selectedRecords}
-          onRename={handleRename}
-          onReveal={handleReveal}
-          onCopyPaths={handleCopyPaths}
-          onPreview={() => {
-            if (primarySelectedId !== null) openPreviewById(primarySelectedId);
-          }}
-        />
-      </aside>
+      {showDetailPane && (
+        <aside className="app-detail">
+          <DetailPane
+            image={detail}
+            selectedCount={selectedCount}
+            selectedRecords={selectedRecords}
+            onRename={handleRename}
+            onReveal={handleReveal}
+            onCopyPaths={handleCopyPaths}
+            onPreview={() => {
+              if (primarySelectedId !== null) openPreviewById(primarySelectedId);
+            }}
+          />
+        </aside>
+      )}
 
       <footer className="app-footer">
         <span>
@@ -708,6 +739,26 @@ export default function App() {
           {toast}
         </button>
       )}
+      <ContextMenu
+        menu={imageMenu}
+        onClose={() => setImageMenu(null)}
+        items={
+          imageMenu
+            ? [
+                {
+                  id: "reveal",
+                  label: "在文件夹中显示",
+                  onSelect: () => void handleRevealImage(imageMenu.image),
+                },
+                {
+                  id: "copy-path",
+                  label: "复制完整路径",
+                  onSelect: () => void handleCopyImagePath(imageMenu.image),
+                },
+              ]
+            : []
+        }
+      />
       <div className="task-controls">
         <button type="button" onClick={() => void scanPause()} title="暂停队列">
           <CirclePause aria-hidden="true" />
@@ -827,6 +878,7 @@ interface ImageGridProps {
   selectionMode: boolean;
   onClickImage: (image: ImageRecord, event: React.MouseEvent) => void;
   onPreviewImage: (image: ImageRecord) => void;
+  onOpenContextMenu: (image: ImageRecord, event: React.MouseEvent) => void;
   onEndReached: () => void;
   scrollerRef: (ref: HTMLElement | null) => void;
 }
@@ -838,6 +890,7 @@ const ImageGrid = memo(function ImageGrid({
   selectionMode,
   onClickImage,
   onPreviewImage,
+  onOpenContextMenu,
   onEndReached,
   scrollerRef,
 }: ImageGridProps) {
@@ -857,6 +910,7 @@ const ImageGrid = memo(function ImageGrid({
           selectionMode={selectionMode}
           onClickImage={onClickImage}
           onPreviewImage={onPreviewImage}
+          onOpenContextMenu={onOpenContextMenu}
         />
       )}
       listClassName={`image-grid image-grid--${viewMode}`}
@@ -872,6 +926,7 @@ interface ImageCardProps {
   selectionMode: boolean;
   onClickImage: (image: ImageRecord, event: React.MouseEvent) => void;
   onPreviewImage: (image: ImageRecord) => void;
+  onOpenContextMenu: (image: ImageRecord, event: React.MouseEvent) => void;
 }
 
 const ImageCard = memo(function ImageCard({
@@ -880,12 +935,14 @@ const ImageCard = memo(function ImageCard({
   selectionMode,
   onClickImage,
   onPreviewImage,
+  onOpenContextMenu,
 }: ImageCardProps) {
   return (
     <button
       type="button"
       className={`image-card${selected ? " image-card--selected" : ""}`}
       onClick={(event) => onClickImage(image, event)}
+      onContextMenu={(event) => onOpenContextMenu(image, event)}
       onDoubleClick={() => onPreviewImage(image)}
       title={image.fullPath}
       data-image-id={image.id}

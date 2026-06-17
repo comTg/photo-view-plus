@@ -763,6 +763,42 @@ button {
   cursor: pointer;
 }
 
+.context-menu {
+  position: fixed;
+  z-index: 1000;
+  display: flex;
+  min-width: 188px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: var(--shadow);
+}
+
+.context-menu button {
+  display: flex;
+  align-items: center;
+  min-height: 30px;
+  padding: 0 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  cursor: pointer;
+  text-align: left;
+}
+
+.context-menu button:hover {
+  background: var(--panel-soft);
+}
+
+.context-menu button:disabled {
+  color: var(--text-muted);
+  cursor: default;
+}
+
 .task-controls {
   position: fixed;
   left: 50%;
@@ -1612,6 +1648,22 @@ body {
 
   .filter-bar .field-compact {
     flex: 1 1 120px;
+  }
+}
+
+.app-shell.app-shell--no-detail {
+  grid-template-columns: 220px minmax(0, 1fr);
+}
+
+@media (max-width: 1180px) {
+  .app-shell.app-shell--no-detail {
+    grid-template-columns: 210px minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 920px) {
+  .app-shell.app-shell--no-detail {
+    grid-template-columns: 200px minmax(0, 1fr);
   }
 }
 
