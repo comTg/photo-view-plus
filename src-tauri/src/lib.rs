@@ -72,6 +72,20 @@ pub fn run() {
             }
             let dedup_coord = Arc::new(DedupCoordinator::new());
 
+            // 重排上次未完成的缩略图：扫描中断会留下 thumb_status='pending' 的图，
+            // 而重复扫描不会再触碰未改动文件，必须在这里主动恢复，否则它们永远停在"生成中"。
+            match services::thumbnail_service::requeue_pending_thumbnails(
+                &pool,
+                &scheduler,
+                &paths.thumbs_dir,
+            ) {
+                Ok(count) if count > 0 => {
+                    tracing::info!(count, "requeued pending thumbnails")
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "failed to requeue pending thumbnails"),
+            }
+
             app.manage(paths);
             app.manage(pool);
             app.manage(scheduler);

@@ -240,7 +240,11 @@ pub fn start_dedup(
     let pool_watch = pool.clone();
     let index_watch = index.clone();
 
-    tokio::spawn(async move {
+    // 必须用 Tauri 托管的 async runtime：`start_dedup` 由同步命令 `dedup_start` 调用，
+    // 而同步命令跑在主线程，主线程没有进入 tokio runtime 上下文。直接 `tokio::spawn`
+    // 会 panic（no reactor running），导致整个应用闪退。`async_runtime::spawn` 不依赖
+    // 当前线程的 runtime 上下文，且其内部就是 tokio，future 里的 sleep/spawn_blocking 照常可用。
+    tauri::async_runtime::spawn(async move {
         // 1. 等所有哈希任务完成（轮询自己的 inflight 计数）
         loop {
             tokio::time::sleep(Duration::from_millis(500)).await;

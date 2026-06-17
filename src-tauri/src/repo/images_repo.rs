@@ -469,6 +469,20 @@ pub fn pending_blake3_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
     Ok(out)
 }
 
+/// 缩略图仍处于 pending 的图。扫描中断（应用退出）会留下一批 thumb_status='pending'
+/// 的记录，而重复扫描会跳过未改动文件、不再为它们排缩略图，所以需要在启动时主动重排，
+/// 否则这些图会永远停在"生成中"。
+pub fn pending_thumbnail_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
+    let sql = format!("{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.thumb_status = 'pending'");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
 /// 缩略图已就绪但还没算 dHash 的图（视觉哈希依赖 thumb）。
 pub fn pending_dhash_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
     let sql = format!(

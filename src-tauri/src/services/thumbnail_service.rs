@@ -11,7 +11,7 @@ use tokio::sync::Semaphore;
 
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
-use crate::queue::{Priority, Task, TaskContext};
+use crate::queue::{Priority, Scheduler, Task, TaskContext};
 use crate::repo::images_repo;
 
 const THUMB_SIZE: u32 = 256;
@@ -106,6 +106,36 @@ fn thumbnail_cpu_semaphore() -> Arc<Semaphore> {
             Arc::new(Semaphore::new(limit))
         })
         .clone()
+}
+
+/// 启动时把仍处于 pending 的缩略图重新入队（P0）。覆盖"扫描被中断后缩略图卡在生成中"
+/// 的场景——这些图不会被随后的重复扫描重新触发（未改动文件会被跳过）。
+pub fn requeue_pending_thumbnails(
+    pool: &Pool,
+    scheduler: &Scheduler,
+    thumbs_dir: &Path,
+) -> AppResult<usize> {
+    let conn = pool.get()?;
+    let pending = images_repo::pending_thumbnail_images(&conn)?;
+    drop(conn);
+
+    let mut count = 0usize;
+    for img in pending {
+        scheduler.enqueue(ThumbnailTask::new(
+            pool.clone(),
+            img.id,
+            img.root_id,
+            img.rel_path,
+            PathBuf::from(img.full_path),
+            img.orientation,
+            thumbs_dir.to_path_buf(),
+        ))?;
+        count += 1;
+    }
+    if count > 0 {
+        tracing::info!(count, "requeued pending thumbnails on startup");
+    }
+    Ok(count)
 }
 
 pub fn thumb_hash_for(root_id: i64, rel_path: &str) -> String {
