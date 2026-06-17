@@ -37,7 +37,9 @@ pub fn run() {
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
         .manage(profile)
-        .setup(|app| {
+        .setup(move |app| {
+            set_profile_window_title(app.handle(), profile);
+
             let data_dir = app.path().app_local_data_dir()?;
             let paths = config::AppPaths::from_data_dir(data_dir);
             std::fs::create_dir_all(&paths.data_dir)?;
@@ -124,12 +126,30 @@ pub fn run() {
             commands::dedup::dedup_groups,
             commands::dedup::dedup_group_detail,
             commands::dedup::dedup_resolve,
+            commands::dedup::dedup_batch_resolve,
             commands::dedup::dedup_export_csv,
             commands::trash::trash_history,
             commands::trash::trash_undo,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| eprintln!("error while running tauri application: {error}"));
+}
+
+fn set_profile_window_title(app: &tauri::AppHandle<tauri::Wry>, profile: config::Profile) {
+    let title = match profile {
+        config::Profile::Dev => "PhotoView+ — dev",
+        config::Profile::Test => "PhotoView+ — test",
+        config::Profile::Prod => "PhotoView+",
+    };
+
+    match app.get_webview_window("main") {
+        Some(window) => {
+            if let Err(error) = window.set_title(title) {
+                tracing::warn!(%error, "failed to set profile window title");
+            }
+        }
+        None => tracing::warn!("main window not found while setting profile title"),
+    }
 }
 
 fn thumb_protocol(

@@ -170,7 +170,10 @@ pub fn trash_images(pool: &Pool, image_ids: &[i64], now: i64) -> AppResult<Trash
                         permanently_deleted.push(id);
                     }
                 }
-                Err(error) => failed.push(TrashFailure { image_id: id, error }),
+                Err(error) => failed.push(TrashFailure {
+                    image_id: id,
+                    error,
+                }),
             }
         }
     }

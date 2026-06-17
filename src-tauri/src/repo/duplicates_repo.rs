@@ -152,6 +152,37 @@ pub fn list_groups(conn: &Connection, params: &GroupQueryParams) -> AppResult<Gr
     })
 }
 
+pub fn list_group_ids(
+    conn: &Connection,
+    method: Option<&str>,
+    status: Option<&str>,
+) -> AppResult<Vec<i64>> {
+    let mut clauses: Vec<&str> = Vec::new();
+    let mut binds: Vec<Value> = Vec::new();
+    if let Some(method) = method.filter(|s| !s.is_empty()) {
+        clauses.push("g.method = ?");
+        binds.push(Value::Text(method.to_string()));
+    }
+    if let Some(status) = status.filter(|s| !s.is_empty()) {
+        clauses.push("g.status = ?");
+        binds.push(Value::Text(status.to_string()));
+    }
+    let where_sql = if clauses.is_empty() {
+        String::new()
+    } else {
+        format!("WHERE {}", clauses.join(" AND "))
+    };
+
+    let sql = format!("SELECT g.id FROM duplicate_groups g {where_sql} ORDER BY g.id DESC");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(binds.iter()), |row| row.get::<_, i64>(0))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row?);
+    }
+    Ok(ids)
+}
+
 pub fn items_for_group(conn: &Connection, group_id: i64) -> AppResult<Vec<DuplicateItem>> {
     let mut stmt = conn.prepare(
         "SELECT group_id, image_id, similarity

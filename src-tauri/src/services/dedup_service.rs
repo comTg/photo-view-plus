@@ -9,7 +9,8 @@
 //! 不依赖 `Scheduler::status()`——后者会被并行的扫描任务干扰。`DedupCoordinator`
 //! 只跟踪本次 dedup 自己入队的哈希任务。
 
-use std::collections::HashMap;
+use std::cmp::Reverse;
+use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
@@ -21,11 +22,12 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter};
 
 use crate::db::Pool;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Scheduler, Task, TaskContext};
 use crate::repo::{duplicates_repo, images_repo};
 use crate::services::hash_service::BlakeHashTask;
 use crate::services::phash_service::{self, DhashTask};
+use crate::services::trash_service;
 use crate::utils::bk_tree::DhashIndex;
 use crate::utils::path_normalize;
 
@@ -47,6 +49,62 @@ impl DedupMethod {
     pub fn includes_visual(self) -> bool {
         matches!(self, Self::Phash | Self::Both)
     }
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DedupAction {
+    /// 删除 group 中除 keep 之外的所有图（走回收站）
+    Trash,
+    /// 标记 group 已"keep all"，不删任何文件
+    KeepAll,
+    /// 标记 group "不是重复"（dismissed）
+    Dismiss,
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum DedupKeepRule {
+    Largest,
+    Newest,
+    BiggestFile,
+    ShortestName,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupBatchResolveArgs {
+    /// None / "all" 只允许 keep_all / dismiss；批量删除必须明确 exact 或 phash。
+    pub method: Option<String>,
+    pub action: DedupAction,
+    pub keep_rule: Option<DedupKeepRule>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupBatchGroupFailure {
+    pub group_id: i64,
+    pub error: String,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DedupBatchResolveResult {
+    pub matched_groups: usize,
+    pub resolved_groups: Vec<i64>,
+    pub failed_groups: Vec<DedupBatchGroupFailure>,
+    pub trashed: Vec<i64>,
+    /// `trashed` 的子集：网络盘无回收站，已永久删除（不可撤销恢复）。
+    pub permanently_deleted: Vec<i64>,
+    pub trash_failures: Vec<trash_service::TrashFailure>,
+    pub undo_id: Option<i64>,
+}
+
+#[derive(Debug)]
+struct BatchTrashPlan {
+    group_id: i64,
+    keep_image_id: i64,
+    to_trash: Vec<i64>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -309,6 +367,221 @@ pub fn start_dedup(
     });
 
     Ok(())
+}
+
+pub fn batch_resolve(
+    pool: &Pool,
+    args: DedupBatchResolveArgs,
+    now: i64,
+) -> AppResult<DedupBatchResolveResult> {
+    let method = normalize_batch_method(args.method.as_deref())?;
+    if args.action == DedupAction::Trash && method.is_none() {
+        return Err(AppError::Other(
+            "批量删除必须先选择一种分组类型（完全重复或视觉近似）".to_string(),
+        ));
+    }
+    let keep_rule = match (args.action, args.keep_rule) {
+        (DedupAction::Trash, Some(rule)) => Some(rule),
+        (DedupAction::Trash, None) => {
+            return Err(AppError::Other("批量删除缺少保留规则".to_string()))
+        }
+        _ => None,
+    };
+
+    let conn = pool.get()?;
+    let group_ids = duplicates_repo::list_group_ids(&conn, method.as_deref(), Some("open"))?;
+    let matched_groups = group_ids.len();
+    if group_ids.is_empty() {
+        return Ok(empty_batch_result(matched_groups));
+    }
+
+    if args.action != DedupAction::Trash {
+        let status_after = match args.action {
+            DedupAction::KeepAll => "resolved",
+            DedupAction::Dismiss => "dismissed",
+            DedupAction::Trash => unreachable!(),
+        };
+        let mut resolved_groups = Vec::with_capacity(group_ids.len());
+        for group_id in group_ids {
+            duplicates_repo::update_group_status(&conn, group_id, status_after, None, Some(now))?;
+            resolved_groups.push(group_id);
+        }
+        return Ok(DedupBatchResolveResult {
+            matched_groups,
+            resolved_groups,
+            failed_groups: Vec::new(),
+            trashed: Vec::new(),
+            permanently_deleted: Vec::new(),
+            trash_failures: Vec::new(),
+            undo_id: None,
+        });
+    }
+
+    let rule = keep_rule.expect("trash branch checked keep_rule");
+    let mut plans = Vec::new();
+    let mut failed_groups = Vec::new();
+    for group_id in group_ids {
+        let items = duplicates_repo::items_for_group(&conn, group_id)?;
+        let mut images = Vec::new();
+        for item in items {
+            match images_repo::get_detail(&conn, item.image_id)? {
+                Some(image) if image.deleted_at.is_none() => images.push(image),
+                Some(_) => {}
+                None => failed_groups.push(DedupBatchGroupFailure {
+                    group_id,
+                    error: format!("图片不存在：{}", item.image_id),
+                }),
+            }
+        }
+
+        if images.len() < 2 {
+            failed_groups.push(DedupBatchGroupFailure {
+                group_id,
+                error: "分组中可处理图片少于 2 张".to_string(),
+            });
+            continue;
+        }
+
+        let Some(keep_image_id) = choose_keep_image_id(&images, rule) else {
+            failed_groups.push(DedupBatchGroupFailure {
+                group_id,
+                error: "无法根据规则选择保留图片".to_string(),
+            });
+            continue;
+        };
+        let to_trash = images
+            .iter()
+            .map(|image| image.id)
+            .filter(|id| *id != keep_image_id)
+            .collect();
+        plans.push(BatchTrashPlan {
+            group_id,
+            keep_image_id,
+            to_trash,
+        });
+    }
+    drop(conn);
+
+    let mut trash_ids = Vec::new();
+    let mut seen = HashSet::new();
+    for plan in &plans {
+        for image_id in &plan.to_trash {
+            if seen.insert(*image_id) {
+                trash_ids.push(*image_id);
+            }
+        }
+    }
+
+    let outcome = if trash_ids.is_empty() {
+        empty_trash_outcome()
+    } else {
+        trash_service::trash_images(pool, &trash_ids, now)?
+    };
+
+    let succeeded: HashSet<i64> = outcome.succeeded.iter().copied().collect();
+    let conn = pool.get()?;
+    let mut resolved_groups = Vec::new();
+    for plan in plans {
+        if plan
+            .to_trash
+            .iter()
+            .all(|image_id| succeeded.contains(image_id))
+        {
+            duplicates_repo::update_group_status(
+                &conn,
+                plan.group_id,
+                "resolved",
+                Some(plan.keep_image_id),
+                Some(now),
+            )?;
+            resolved_groups.push(plan.group_id);
+        } else {
+            let succeeded_in_group: Vec<i64> = plan
+                .to_trash
+                .iter()
+                .copied()
+                .filter(|image_id| succeeded.contains(image_id))
+                .collect();
+            if !succeeded_in_group.is_empty() {
+                duplicates_repo::remove_items(&conn, plan.group_id, &succeeded_in_group)?;
+            }
+            failed_groups.push(DedupBatchGroupFailure {
+                group_id: plan.group_id,
+                error: "部分图片删除失败，分组保持未处理".to_string(),
+            });
+        }
+    }
+
+    Ok(DedupBatchResolveResult {
+        matched_groups,
+        resolved_groups,
+        failed_groups,
+        trashed: outcome.succeeded,
+        permanently_deleted: outcome.permanently_deleted,
+        trash_failures: outcome.failed,
+        undo_id: outcome.undo_id,
+    })
+}
+
+fn normalize_batch_method(method: Option<&str>) -> AppResult<Option<String>> {
+    match method.map(str::trim).filter(|s| !s.is_empty()) {
+        None | Some("all") => Ok(None),
+        Some("exact") => Ok(Some("exact".to_string())),
+        Some("phash") => Ok(Some("phash".to_string())),
+        Some(other) => Err(AppError::Other(format!("未知分组类型：{other}"))),
+    }
+}
+
+pub fn choose_keep_image_id(
+    images: &[images_repo::ImageRecord],
+    rule: DedupKeepRule,
+) -> Option<i64> {
+    let image = match rule {
+        DedupKeepRule::Largest => images
+            .iter()
+            .max_by_key(|image| (pixel_count(image), image.size_bytes, image.mtime, image.id)),
+        DedupKeepRule::Newest => images
+            .iter()
+            .max_by_key(|image| (image.mtime, pixel_count(image), image.size_bytes, image.id)),
+        DedupKeepRule::BiggestFile => images
+            .iter()
+            .max_by_key(|image| (image.size_bytes, pixel_count(image), image.mtime, image.id)),
+        DedupKeepRule::ShortestName => images.iter().min_by_key(|image| {
+            (
+                image.filename.chars().count(),
+                Reverse(pixel_count(image)),
+                Reverse(image.size_bytes),
+                Reverse(image.mtime),
+                image.id,
+            )
+        }),
+    }?;
+    Some(image.id)
+}
+
+fn pixel_count(image: &images_repo::ImageRecord) -> i128 {
+    i128::from(image.width.unwrap_or(0).max(0)) * i128::from(image.height.unwrap_or(0).max(0))
+}
+
+fn empty_batch_result(matched_groups: usize) -> DedupBatchResolveResult {
+    DedupBatchResolveResult {
+        matched_groups,
+        resolved_groups: Vec::new(),
+        failed_groups: Vec::new(),
+        trashed: Vec::new(),
+        permanently_deleted: Vec::new(),
+        trash_failures: Vec::new(),
+        undo_id: None,
+    }
+}
+
+fn empty_trash_outcome() -> trash_service::TrashOutcome {
+    trash_service::TrashOutcome {
+        succeeded: Vec::new(),
+        permanently_deleted: Vec::new(),
+        failed: Vec::new(),
+        undo_id: None,
+    }
 }
 
 fn emit_progress(app: &AppHandle, status: &DedupStatus) {

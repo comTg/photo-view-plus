@@ -4,6 +4,8 @@ import type {
   AppSettings,
   AppSettingsPatch,
   DbStatus,
+  DedupBatchResolveArgs,
+  DedupBatchResolveResult,
   DedupExportArgs,
   DedupGroupDetail,
   DedupGroupsArgs,
@@ -135,6 +137,12 @@ export async function dedupGroupDetail(groupId: number): Promise<DedupGroupDetai
 
 export async function dedupResolve(args: DedupResolveArgs): Promise<DedupResolveResult> {
   return invoke<DedupResolveResult>("dedup_resolve", { args });
+}
+
+export async function dedupBatchResolve(
+  args: DedupBatchResolveArgs,
+): Promise<DedupBatchResolveResult> {
+  return invoke<DedupBatchResolveResult>("dedup_batch_resolve", { args });
 }
 
 export async function dedupExportCsv(args: DedupExportArgs): Promise<number> {

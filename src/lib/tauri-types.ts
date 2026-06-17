@@ -185,6 +185,7 @@ export type DedupAction = "trash" | "keep_all" | "dismiss";
 export type DedupGroupMethod = "exact" | "phash";
 export type DedupGroupStatus = "open" | "resolved" | "dismissed";
 export type DedupPhase = "idle" | "hashing" | "grouping" | "done" | string;
+export type DedupBatchKeepRule = "largest" | "newest" | "biggest_file" | "shortest_name";
 
 export interface DedupStatus {
   running: boolean;
@@ -252,6 +253,28 @@ export interface TrashFailure {
 
 export interface DedupResolveResult {
   groupId: number;
+  trashed: number[];
+  /** trashed 的子集：网络盘无回收站，已永久删除（不可撤销恢复）。 */
+  permanentlyDeleted: number[];
+  trashFailures: TrashFailure[];
+  undoId: number | null;
+}
+
+export interface DedupBatchResolveArgs {
+  method?: DedupGroupMethod | "all";
+  action: DedupAction;
+  keepRule?: DedupBatchKeepRule;
+}
+
+export interface DedupBatchGroupFailure {
+  groupId: number;
+  error: string;
+}
+
+export interface DedupBatchResolveResult {
+  matchedGroups: number;
+  resolvedGroups: number[];
+  failedGroups: DedupBatchGroupFailure[];
   trashed: number[];
   /** trashed 的子集：网络盘无回收站，已永久删除（不可撤销恢复）。 */
   permanentlyDeleted: number[];

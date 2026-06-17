@@ -1694,6 +1694,26 @@ body {
   color: var(--muted);
 }
 
+.dedup-batch-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding: 8px 10px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.dedup-batch-title {
+  font-size: 13px;
+}
+
+.dedup-batch-summary {
+  color: var(--muted);
+  font-size: 12px;
+}
+
 .dedup-group-status {
   font-size: 11px;
   padding: 2px 6px;
@@ -1790,6 +1810,11 @@ body {
 .dedup-action-button svg {
   width: 14px;
   height: 14px;
+}
+
+.dedup-action-button--danger {
+  color: #b42318;
+  border-color: color-mix(in srgb, #b42318 45%, var(--border));
 }
 
 .dedup-row-state {

@@ -13,7 +13,8 @@ use photo_view_plus_lib::repo::images_repo::{self, NewImageMetadata};
 use photo_view_plus_lib::repo::roots_repo::{self, NewRoot};
 use photo_view_plus_lib::repo::{duplicates_repo, images_repo as ir};
 use photo_view_plus_lib::services::dedup_service::{
-    self, DedupCoordinator, VISUAL_THRESHOLD_DEFAULT,
+    self, DedupAction, DedupBatchResolveArgs, DedupCoordinator, DedupKeepRule,
+    VISUAL_THRESHOLD_DEFAULT,
 };
 use photo_view_plus_lib::utils::bk_tree::DhashIndex;
 use photo_view_plus_lib::*;
@@ -50,6 +51,40 @@ fn add_image(conn: &rusqlite::Connection, root_id: i64, name: &str) -> i64 {
             mtime: 1,
             width: None,
             height: None,
+            orientation: None,
+            taken_at: None,
+            gps_lat: None,
+            gps_lng: None,
+            camera_make: None,
+            camera_model: None,
+        },
+        1,
+    )
+    .unwrap();
+    outcome.image_id()
+}
+
+#[allow(clippy::too_many_arguments)]
+fn add_image_with_shape(
+    conn: &rusqlite::Connection,
+    root_id: i64,
+    name: &str,
+    size_bytes: i64,
+    mtime: i64,
+    width: i64,
+    height: i64,
+) -> i64 {
+    let outcome = images_repo::upsert_scanned_image(
+        conn,
+        &NewImageMetadata {
+            root_id,
+            rel_path: name.to_string(),
+            filename: name.to_string(),
+            extension: "jpg".to_string(),
+            size_bytes,
+            mtime,
+            width: Some(width),
+            height: Some(height),
             orientation: None,
             taken_at: None,
             gps_lat: None,
@@ -366,4 +401,82 @@ fn test_006_remove_items_keeps_group_open_with_remaining_items() {
         .map(|item| item.image_id)
         .collect();
     assert_eq!(remaining, vec![a, c]);
+}
+
+#[test]
+fn test_007_batch_trash_keeps_largest_and_resolves_group() {
+    let (pool, dir) = fresh();
+    let conn = pool.get().unwrap();
+    let root = make_root(&conn, dir.path().to_string_lossy().as_ref());
+
+    let small = add_image_with_shape(&conn, root, "small.jpg", 10, 10, 100, 100);
+    let largest = add_image_with_shape(&conn, root, "largest.jpg", 20, 20, 1000, 1000);
+    let newest = add_image_with_shape(&conn, root, "newest.jpg", 30, 30, 200, 200);
+    let group = duplicates_repo::insert_group(&conn, duplicates_repo::METHOD_EXACT, None, 100)
+        .expect("group");
+    duplicates_repo::insert_items(
+        &conn,
+        group,
+        &[
+            (small, Some(1.0)),
+            (largest, Some(1.0)),
+            (newest, Some(1.0)),
+        ],
+    )
+    .expect("items");
+    drop(conn);
+
+    let result = dedup_service::batch_resolve(
+        &pool,
+        DedupBatchResolveArgs {
+            method: Some("exact".to_string()),
+            action: DedupAction::Trash,
+            keep_rule: Some(DedupKeepRule::Largest),
+        },
+        200,
+    )
+    .expect("batch resolve");
+
+    assert_eq!(result.matched_groups, 1);
+    assert_eq!(result.resolved_groups, vec![group]);
+    let mut trashed = result.trashed;
+    trashed.sort();
+    assert_eq!(trashed, vec![small, newest]);
+    assert!(result.trash_failures.is_empty());
+
+    let conn = pool.get().unwrap();
+    let fetched = duplicates_repo::get_group(&conn, group)
+        .expect("get group")
+        .expect("group");
+    assert_eq!(fetched.status, "resolved");
+    assert_eq!(fetched.keep_image_id, Some(largest));
+    assert_eq!(
+        ir::get_detail(&conn, largest).unwrap().unwrap().deleted_at,
+        None
+    );
+    assert_eq!(
+        ir::get_detail(&conn, small).unwrap().unwrap().deleted_at,
+        Some(200)
+    );
+    assert_eq!(
+        ir::get_detail(&conn, newest).unwrap().unwrap().deleted_at,
+        Some(200)
+    );
+}
+
+#[test]
+fn test_008_batch_trash_requires_specific_method() {
+    let (pool, _dir) = fresh();
+    let err = dedup_service::batch_resolve(
+        &pool,
+        DedupBatchResolveArgs {
+            method: Some("all".to_string()),
+            action: DedupAction::Trash,
+            keep_rule: Some(DedupKeepRule::Largest),
+        },
+        200,
+    )
+    .expect_err("all-method trash should be rejected")
+    .to_string();
+    assert!(err.contains("批量删除必须先选择一种分组类型"));
 }

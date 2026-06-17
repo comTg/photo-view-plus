@@ -1,8 +1,10 @@
 import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useDedup } from "@/hooks/useDedup";
 import {
+  dedupBatchResolve,
   dedupExportCsv,
   dedupGroupDetail,
+  dedupGroups,
   imagesRevealInDir,
   originalUrl,
   thumbUrl,
@@ -11,6 +13,8 @@ import {
 } from "@/lib/tauri";
 import type {
   DedupAction,
+  DedupBatchKeepRule,
+  DedupBatchResolveResult,
   DedupGroupDetail,
   DedupGroupMethod,
   DedupGroupStatus,
@@ -33,6 +37,13 @@ const THRESHOLD_PRESETS = [
   { label: "很宽松 (Medium)", value: 7 },
 ];
 
+const BATCH_RULES: Array<{ label: string; value: DedupBatchKeepRule }> = [
+  { label: "保留最大分辨率", value: "largest" },
+  { label: "保留最新文件", value: "newest" },
+  { label: "保留最大体积", value: "biggest_file" },
+  { label: "保留文件名最短", value: "shortest_name" },
+];
+
 export interface DedupViewProps {
   onToast: (message: string) => void;
 }
@@ -42,6 +53,15 @@ export function DedupView({ onToast }: DedupViewProps) {
   const [method, setMethod] = useState<DedupMethod>("both");
   const [threshold, setThreshold] = useState(2);
   const [historyOpen, setHistoryOpen] = useState(false);
+  const [batchMethod, setBatchMethod] = useState<DedupGroupMethod>("exact");
+  const [batchRule, setBatchRule] = useState<DedupBatchKeepRule>("largest");
+  const [batchRunning, setBatchRunning] = useState(false);
+
+  useEffect(() => {
+    if (dedup.filter.method !== "all") {
+      setBatchMethod(dedup.filter.method);
+    }
+  }, [dedup.filter.method]);
 
   const handleStart = useCallback(async () => {
     try {
@@ -69,6 +89,42 @@ export function DedupView({ onToast }: DedupViewProps) {
       onToast(`导出失败：${String(e)}`);
     }
   }, [dedup.filter.method, dedup.filter.status, onToast]);
+
+  const handleBatchTrash = useCallback(async () => {
+    if (dedup.status.running || batchRunning) return;
+    setBatchRunning(true);
+    try {
+      const preview = await dedupGroups({
+        method: batchMethod,
+        status: "open",
+        offset: 0,
+        limit: 1,
+      });
+      if (preview.total === 0) {
+        onToast("没有可批量处理的未处理分组");
+        return;
+      }
+
+      const methodText = groupMethodLabel(batchMethod);
+      const ruleText = batchRuleLabel(batchRule);
+      const ok = window.confirm(
+        `将按“${ruleText}”处理 ${preview.total} 个${methodText}未处理分组。\n\n每组保留 1 张，其余图片移到回收站。继续？`,
+      );
+      if (!ok) return;
+
+      const result = await dedupBatchResolve({
+        method: batchMethod,
+        action: "trash",
+        keepRule: batchRule,
+      });
+      await dedup.reloadGroups({ preserveLoaded: true });
+      showBatchResolveToast(result, onToast);
+    } catch (e) {
+      onToast(`批量处理失败：${String(e)}`);
+    } finally {
+      setBatchRunning(false);
+    }
+  }, [batchMethod, batchRule, batchRunning, dedup, onToast]);
 
   return (
     <section className="dedup-view">
@@ -148,6 +204,41 @@ export function DedupView({ onToast }: DedupViewProps) {
           {historyOpen ? "关闭历史" : "撤销历史"}
         </button>
       </header>
+
+      <div className="dedup-batch-bar">
+        <strong className="dedup-batch-title">批量处理</strong>
+        <select
+          className="control-select"
+          value={batchMethod}
+          disabled={dedup.status.running || batchRunning}
+          onChange={(event) => setBatchMethod(event.target.value as DedupGroupMethod)}
+        >
+          <option value="exact">完全重复</option>
+          <option value="phash">视觉近似</option>
+        </select>
+        <select
+          className="control-select"
+          value={batchRule}
+          disabled={dedup.status.running || batchRunning}
+          onChange={(event) => setBatchRule(event.target.value as DedupBatchKeepRule)}
+        >
+          {BATCH_RULES.map((rule) => (
+            <option key={rule.value} value={rule.value}>
+              {rule.label}
+            </option>
+          ))}
+        </select>
+        <button
+          type="button"
+          className="primary-action dedup-action-button"
+          disabled={dedup.status.running || batchRunning}
+          onClick={() => void handleBatchTrash()}
+        >
+          {batchRunning ? <Loader2 aria-hidden="true" /> : <Trash2 aria-hidden="true" />}
+          {batchRunning ? "处理中..." : "批量应用"}
+        </button>
+        <span className="dedup-batch-summary">仅处理未处理分组，执行前会二次确认。</span>
+      </div>
 
       {historyOpen && <UndoPanel onToast={onToast} onClose={() => setHistoryOpen(false)} />}
 
@@ -357,6 +448,33 @@ const DedupGroupRow = memo(function DedupGroupRow({
     [detail, group.id, keepIds, loadDetail, onResolve, onToast, resolving, selectedDeleteCount],
   );
 
+  const handleTrashAll = useCallback(async () => {
+    if (!detail || resolving) return;
+    const count = detail.items.length;
+    if (count === 0) return;
+    const ok = window.confirm(
+      `将把当前分组的 ${count} 张图片全部移到回收站。\n\n此操作不会保留任何一张作为代表图。继续？`,
+    );
+    if (!ok) return;
+
+    setResolving(true);
+    try {
+      const result = await onResolve({
+        groupId: group.id,
+        keepImageIds: [],
+        action: "trash",
+      });
+      if (result.trashFailures.length > 0) {
+        await loadDetail();
+      }
+      showResolveToast("trash", result, onToast);
+    } catch (e) {
+      onToast(`处理失败：${String(e)}`);
+    } finally {
+      setResolving(false);
+    }
+  }, [detail, group.id, loadDetail, onResolve, onToast, resolving]);
+
   return (
     <article className="dedup-group-row">
       <header className="dedup-row-header">
@@ -380,6 +498,16 @@ const DedupGroupRow = memo(function DedupGroupRow({
           >
             {resolving ? <Loader2 aria-hidden="true" /> : <Trash2 aria-hidden="true" />}
             删除 {selectedDeleteCount}
+          </button>
+          <button
+            type="button"
+            className="toolbar-button dedup-action-button dedup-action-button--danger"
+            disabled={!canResolve || !detail || detail.items.length === 0}
+            onClick={() => void handleTrashAll()}
+            title="当前分组全部移到回收站"
+          >
+            <Trash2 aria-hidden="true" />
+            全部删除
           </button>
           <button
             type="button"
@@ -574,6 +702,37 @@ function showResolveToast(
     return;
   }
   onToast("已忽略此组");
+}
+
+function showBatchResolveToast(
+  result: DedupBatchResolveResult,
+  onToast: (message: string) => void,
+) {
+  const failures = result.trashFailures.length;
+  const failedGroups = result.failedGroups.length;
+  const permanent = result.permanentlyDeleted.length;
+  const permanentNote =
+    permanent > 0 ? `（其中 ${permanent} 张网络盘文件已永久删除，不可恢复）` : "";
+  const undoNote = result.undoId === null ? "" : `，撤销 ID #${result.undoId}`;
+  if (failures === 0 && failedGroups === 0) {
+    onToast(
+      `批量处理完成：${result.resolvedGroups.length}/${result.matchedGroups} 组，删除 ${result.trashed.length} 张${undoNote}${permanentNote}`,
+    );
+    return;
+  }
+  onToast(
+    `批量处理部分完成：${result.resolvedGroups.length}/${result.matchedGroups} 组，删除 ${result.trashed.length} 张，失败 ${failures} 张 / ${failedGroups} 组${undoNote}${permanentNote}`,
+  );
+}
+
+function batchRuleLabel(rule: DedupBatchKeepRule): string {
+  return BATCH_RULES.find((item) => item.value === rule)?.label ?? rule;
+}
+
+function groupMethodLabel(method: DedupGroupMethod): string {
+  if (method === "exact") return "完全重复";
+  if (method === "phash") return "视觉近似";
+  return method;
 }
 
 function suggestKeepId(detail: DedupGroupDetail): number | null {

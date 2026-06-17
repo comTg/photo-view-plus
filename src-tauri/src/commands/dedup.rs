@@ -10,7 +10,8 @@ use crate::db::Pool;
 use crate::queue::Scheduler;
 use crate::repo::{duplicates_repo, images_repo};
 use crate::services::dedup_service::{
-    self, DedupCoordinator, DedupMethod, DedupStatus, VISUAL_THRESHOLD_DEFAULT,
+    self, DedupAction, DedupBatchResolveArgs, DedupBatchResolveResult, DedupCoordinator,
+    DedupMethod, DedupStatus, VISUAL_THRESHOLD_DEFAULT,
 };
 use crate::services::trash_service;
 use crate::utils::bk_tree::DhashIndex;
@@ -133,17 +134,6 @@ pub fn dedup_group_detail(
     Ok(Some(DedupGroupDetail { group, items }))
 }
 
-#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "snake_case")]
-pub enum DedupAction {
-    /// 删除 group 中除 keep 之外的所有图（走回收站）
-    Trash,
-    /// 标记 group 已"keep all"，不删任何文件
-    KeepAll,
-    /// 标记 group "不是重复"（dismissed）
-    Dismiss,
-}
-
 #[derive(Debug, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DedupResolveArgs {
@@ -195,12 +185,7 @@ pub fn dedup_resolve(
     drop(conn);
 
     let outcome = if to_trash.is_empty() {
-        trash_service::TrashOutcome {
-            succeeded: Vec::new(),
-            permanently_deleted: Vec::new(),
-            failed: Vec::new(),
-            undo_id: None,
-        }
+        empty_trash_outcome()
     } else {
         trash_service::trash_images(&pool, &to_trash, now).map_err(|e| e.to_string())?
     };
@@ -229,6 +214,23 @@ pub fn dedup_resolve(
         trash_failures: outcome.failed,
         undo_id: outcome.undo_id,
     })
+}
+
+#[tauri::command]
+pub fn dedup_batch_resolve(
+    pool: State<'_, Pool>,
+    args: DedupBatchResolveArgs,
+) -> Result<DedupBatchResolveResult, String> {
+    dedup_service::batch_resolve(pool.inner(), args, now_unix()).map_err(|e| e.to_string())
+}
+
+fn empty_trash_outcome() -> trash_service::TrashOutcome {
+    trash_service::TrashOutcome {
+        succeeded: Vec::new(),
+        permanently_deleted: Vec::new(),
+        failed: Vec::new(),
+        undo_id: None,
+    }
 }
 
 #[derive(Debug, Deserialize)]
