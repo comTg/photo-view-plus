@@ -332,3 +332,38 @@ fn test_005_rerun_exact_replaces_open_groups() {
         .unwrap();
     assert_eq!(total, 1, "should not accumulate duplicate exact groups");
 }
+
+#[test]
+fn test_006_remove_items_keeps_group_open_with_remaining_items() {
+    let (pool, _dir) = fresh();
+    let conn = pool.get().unwrap();
+    let root = make_root(&conn, "/tmp/remove-items");
+    let a = add_image(&conn, root, "a.jpg");
+    let b = add_image(&conn, root, "b.jpg");
+    let c = add_image(&conn, root, "c.jpg");
+
+    let group = duplicates_repo::insert_group(&conn, duplicates_repo::METHOD_EXACT, None, 100)
+        .expect("group");
+    duplicates_repo::insert_items(
+        &conn,
+        group,
+        &[(a, Some(1.0)), (b, Some(1.0)), (c, Some(1.0))],
+    )
+    .expect("items");
+
+    let removed = duplicates_repo::remove_items(&conn, group, &[b, 999]).expect("remove");
+    assert_eq!(removed, 1);
+
+    let fetched = duplicates_repo::get_group(&conn, group)
+        .expect("get group")
+        .expect("group exists");
+    assert_eq!(fetched.status, "open");
+    assert_eq!(fetched.item_count, 2);
+
+    let remaining: Vec<i64> = duplicates_repo::items_for_group(&conn, group)
+        .expect("items")
+        .into_iter()
+        .map(|item| item.image_id)
+        .collect();
+    assert_eq!(remaining, vec![a, c]);
+}

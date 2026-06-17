@@ -24,6 +24,10 @@ const UNDO_TTL_SECS: i64 = 30 * 24 * 60 * 60;
 pub struct TrashedItem {
     pub image_id: i64,
     pub original_path: String,
+    /// 是否为永久删除：网络盘无回收站时回退 `fs::remove_file`，此项不可撤销恢复。
+    /// `#[serde(default)]` 兼容旧 undo_log（旧记录全是回收站删除，默认 false）。
+    #[serde(default)]
+    pub permanent: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,6 +40,8 @@ pub struct TrashPayload {
 #[serde(rename_all = "camelCase")]
 pub struct TrashOutcome {
     pub succeeded: Vec<i64>,
+    /// `succeeded` 的子集：位于网络盘、无回收站，已回退为永久删除（不可恢复）。
+    pub permanently_deleted: Vec<i64>,
     pub failed: Vec<TrashFailure>,
     pub undo_id: Option<i64>,
 }
@@ -55,12 +61,60 @@ pub struct UndoOutcome {
     pub note: Option<String>,
 }
 
+/// 在独立后台线程执行 `trash` crate 调用并阻塞等待结果。
+///
+/// 为什么必须这样：`trash` 在 Windows 通过 COM（Shell `IFileOperation`）工作。
+/// Tauri 的**同步** `#[tauri::command]` 跑在主 UI 线程上，而该线程已被 wry/tao
+/// 用 `OleInitialize` 初始化为 COM STA（供窗口拖拽）。开启 `coinit_multithreaded`
+/// 后 `trash` 会请求 MTA，在 STA 线程上 `CoInitializeEx` 返回
+/// `RPC_E_CHANGED_MODE (0x80010106)` 并直接 panic——panic 跨过 WebView2 的 C++
+/// 回调边界无法 unwind，最终 abort 整个进程。
+///
+/// 全新线程的 COM 尚未初始化，可干净地按 MTA 初始化；`IFileOperation` 在 MTA
+/// 下无需消息泵即可同步完成删除/恢复。
+fn run_on_worker<T, F>(f: F) -> AppResult<T>
+where
+    F: FnOnce() -> T + Send + 'static,
+    T: Send + 'static,
+{
+    std::thread::spawn(f)
+        .join()
+        .map_err(|_| AppError::Other("回收站操作线程异常退出（panic）".to_string()))
+}
+
+/// 删除单个文件。优先进系统回收站；若失败且文件位于**网络盘**（无回收站），
+/// 回退为永久删除（`fs::remove_file`）。
+///
+/// 返回 `Ok(true)` = 永久删除（不可恢复），`Ok(false)` = 已进回收站（可撤销）。
+///
+/// 仅对网络盘回退永久删除：本地盘删除失败（文件被占用等）**绝不**永久删，
+/// 直接报错——CLAUDE.md 红线 2（不直接永久删本地图片）对本地路径仍然成立。
+fn delete_one(full_path: &str) -> Result<bool, String> {
+    let path = std::path::Path::new(full_path);
+    match trash::delete(path) {
+        Ok(()) => Ok(false),
+        Err(recycle_err) => {
+            if !crate::utils::path_normalize::is_network_path(path) {
+                return Err(recycle_err.to_string());
+            }
+            // 网络盘无回收站：回退永久删除。
+            std::fs::remove_file(path).map(|()| true).map_err(|fs_err| {
+                format!("回收站删除失败（{recycle_err}），网络盘永久删除也失败（{fs_err}）")
+            })
+        }
+    }
+}
+
 pub fn trash_images(pool: &Pool, image_ids: &[i64], now: i64) -> AppResult<TrashOutcome> {
     let conn = pool.get()?;
     let mut succeeded = Vec::new();
+    let mut permanently_deleted = Vec::new();
     let mut failed = Vec::new();
     let mut payload_items = Vec::new();
 
+    // 第一步（调用线程，持 DB 连接）：解析记录，区分"文件已不在磁盘（直接软删）"
+    // 与"需进系统回收站"。回收站调用本身不碰 DB，单独收集后批量交给后台线程。
+    let mut to_delete: Vec<(i64, String)> = Vec::new();
     for &id in image_ids {
         let record = match images_repo::get_detail(&conn, id)? {
             Some(record) => record,
@@ -73,32 +127,50 @@ pub fn trash_images(pool: &Pool, image_ids: &[i64], now: i64) -> AppResult<Trash
             }
         };
 
-        let path = PathBuf::from(&record.full_path);
-        if !path.exists() {
+        if !PathBuf::from(&record.full_path).exists() {
             // 文件已不在磁盘但 DB 仍有：直接软删 + 跳过 trash 调用
             images_repo::mark_deleted_by_id(&conn, id, now)?;
             payload_items.push(TrashedItem {
                 image_id: id,
                 original_path: record.full_path,
+                permanent: false,
             });
             succeeded.push(id);
             continue;
         }
 
-        match trash::delete(&path) {
-            Ok(_) => {
-                images_repo::mark_deleted_by_id(&conn, id, now)?;
-                payload_items.push(TrashedItem {
-                    image_id: id,
-                    original_path: record.full_path,
-                });
-                succeeded.push(id);
-            }
-            Err(error) => {
-                failed.push(TrashFailure {
-                    image_id: id,
-                    error: error.to_string(),
-                });
+        to_delete.push((id, record.full_path));
+    }
+
+    // 第二步：在独立后台线程批量删除（回收站走 COM/MTA，避免主线程 STA 冲突；
+    // 网络盘无回收站则在同一线程回退永久删除）。
+    if !to_delete.is_empty() {
+        let results = run_on_worker(move || {
+            to_delete
+                .into_iter()
+                .map(|(id, full_path)| {
+                    let outcome = delete_one(&full_path);
+                    (id, full_path, outcome)
+                })
+                .collect::<Vec<_>>()
+        })?;
+
+        // 第三步（回到调用线程）：按删除结果更新 DB。
+        for (id, full_path, outcome) in results {
+            match outcome {
+                Ok(permanent) => {
+                    images_repo::mark_deleted_by_id(&conn, id, now)?;
+                    payload_items.push(TrashedItem {
+                        image_id: id,
+                        original_path: full_path,
+                        permanent,
+                    });
+                    succeeded.push(id);
+                    if permanent {
+                        permanently_deleted.push(id);
+                    }
+                }
+                Err(error) => failed.push(TrashFailure { image_id: id, error }),
             }
         }
     }
@@ -116,6 +188,7 @@ pub fn trash_images(pool: &Pool, image_ids: &[i64], now: i64) -> AppResult<Trash
 
     Ok(TrashOutcome {
         succeeded,
+        permanently_deleted,
         failed,
         undo_id,
     })
@@ -135,25 +208,38 @@ pub fn undo(pool: &Pool, undo_id: i64, now: i64) -> AppResult<UndoOutcome> {
     let payload: TrashPayload =
         serde_json::from_str(&entry.payload_json).map_err(|e| AppError::Other(e.to_string()))?;
 
-    let mut restored = Vec::new();
+    // 永久删除（网络盘回退）的项物理文件已不存在，无法恢复——只能恢复进了回收站的项。
+    let (permanent, recoverable): (Vec<TrashedItem>, Vec<TrashedItem>) =
+        payload.items.into_iter().partition(|item| item.permanent);
 
     // 平台分支：能从回收站恢复物理文件的平台先尝试；不能的，仅恢复 DB 标记。
-    let manual_recovery_required = restore_files_from_trash(&payload)?;
+    let manual_recovery_required = restore_files_from_trash(&recoverable)?;
 
-    for item in &payload.items {
+    let mut restored = Vec::new();
+    for item in &recoverable {
         images_repo::restore_by_id(&conn, item.image_id)?;
         restored.push(item.image_id);
     }
     images_repo::mark_undo_done(&conn, undo_id, now)?;
 
-    let note = if manual_recovery_required {
-        Some(
+    let mut notes = Vec::new();
+    if manual_recovery_required {
+        notes.push(
             "DB 标记已恢复，但当前平台无法自动从回收站恢复文件。\
              请到系统回收站手动还原，下次扫描会重新登记。"
                 .to_string(),
-        )
-    } else {
+        );
+    }
+    if !permanent.is_empty() {
+        notes.push(format!(
+            "{} 个文件位于网络盘、删除时已永久删除（无回收站），无法恢复。",
+            permanent.len()
+        ));
+    }
+    let note = if notes.is_empty() {
         None
+    } else {
+        Some(notes.join("\n"))
     };
 
     Ok(UndoOutcome {
@@ -164,39 +250,50 @@ pub fn undo(pool: &Pool, undo_id: i64, now: i64) -> AppResult<UndoOutcome> {
 }
 
 /// 尝试从回收站恢复物理文件。返回 `true` 表示当前平台无法自动恢复（manual_recovery_required）。
+/// 仅接收"进了回收站、可恢复"的项（永久删除项已在调用方剔除）。
 #[cfg(any(target_os = "windows", target_os = "linux"))]
-fn restore_files_from_trash(payload: &TrashPayload) -> AppResult<bool> {
+fn restore_files_from_trash(items: &[TrashedItem]) -> AppResult<bool> {
     use std::collections::HashSet;
-    use trash::os_limited;
 
-    let want: HashSet<String> = payload
-        .items
+    if items.is_empty() {
+        return Ok(false);
+    }
+
+    let want: HashSet<String> = items
         .iter()
         .map(|item| item.original_path.clone())
         .collect();
 
-    let items = os_limited::list().map_err(|e| AppError::Other(e.to_string()))?;
-    let mut to_restore = Vec::new();
-    for item in items {
-        let original = item.original_path().to_string_lossy().to_string();
-        if want.contains(&original) {
-            to_restore.push(item);
+    // 同样必须在后台线程跑：os_limited::list/restore_all 也走 COM，
+    // 在主 UI 线程（STA）上调用会触发 RPC_E_CHANGED_MODE 崩溃。
+    run_on_worker(move || -> Result<bool, String> {
+        use trash::os_limited;
+
+        let items = os_limited::list().map_err(|e| e.to_string())?;
+        let mut to_restore = Vec::new();
+        for item in items {
+            let original = item.original_path().to_string_lossy().to_string();
+            if want.contains(&original) {
+                to_restore.push(item);
+            }
         }
-    }
 
-    if to_restore.is_empty() {
-        // 回收站里没找到——文件可能被用户清空或手动还原
-        return Ok(true);
-    }
+        if to_restore.is_empty() {
+            // 回收站里没找到——文件可能被用户清空或手动还原
+            return Ok(true);
+        }
 
-    os_limited::restore_all(to_restore).map_err(|e| AppError::Other(e.to_string()))?;
-    Ok(false)
+        os_limited::restore_all(to_restore).map_err(|e| e.to_string())?;
+        Ok(false)
+    })?
+    .map_err(AppError::Other)
 }
 
 #[cfg(not(any(target_os = "windows", target_os = "linux")))]
-fn restore_files_from_trash(_payload: &TrashPayload) -> AppResult<bool> {
+fn restore_files_from_trash(items: &[TrashedItem]) -> AppResult<bool> {
     // macOS：trash crate 不提供回收站读/恢复 API；只恢复 DB 标记。
-    Ok(true)
+    // 无可恢复项时不需要提示手动还原。
+    Ok(!items.is_empty())
 }
 
 #[cfg(test)]

@@ -157,6 +157,8 @@ pub struct DedupResolveArgs {
 pub struct DedupResolveResult {
     pub group_id: i64,
     pub trashed: Vec<i64>,
+    /// `trashed` 的子集：网络盘无回收站，已永久删除（不可撤销恢复）。
+    pub permanently_deleted: Vec<i64>,
     pub trash_failures: Vec<trash_service::TrashFailure>,
     pub undo_id: Option<i64>,
 }
@@ -195,6 +197,7 @@ pub fn dedup_resolve(
     let outcome = if to_trash.is_empty() {
         trash_service::TrashOutcome {
             succeeded: Vec::new(),
+            permanently_deleted: Vec::new(),
             failed: Vec::new(),
             undo_id: None,
         }
@@ -203,12 +206,26 @@ pub fn dedup_resolve(
     };
 
     let conn = pool.get().map_err(|e| e.to_string())?;
-    duplicates_repo::update_group_status(&conn, group.id, status_after, keep_image_id, Some(now))
+    if args.action == DedupAction::Trash && !outcome.failed.is_empty() {
+        if !outcome.succeeded.is_empty() {
+            duplicates_repo::remove_items(&conn, group.id, &outcome.succeeded)
+                .map_err(|e| e.to_string())?;
+        }
+    } else {
+        duplicates_repo::update_group_status(
+            &conn,
+            group.id,
+            status_after,
+            keep_image_id,
+            Some(now),
+        )
         .map_err(|e| e.to_string())?;
+    }
 
     Ok(DedupResolveResult {
         group_id: group.id,
         trashed: outcome.succeeded,
+        permanently_deleted: outcome.permanently_deleted,
         trash_failures: outcome.failed,
         undo_id: outcome.undo_id,
     })

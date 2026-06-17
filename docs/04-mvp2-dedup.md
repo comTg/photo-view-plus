@@ -238,16 +238,19 @@ Minimal           -         -     -    -
 **目标**：把文件移到 Windows 回收站，写撤销日志。
 
 具体：
-- 依赖：`trash` crate（v3+），底层调 Windows Shell `IFileOperation`
+- 依赖：`trash` crate（v5+，开 `coinit_multithreaded`），底层调 Windows Shell `IFileOperation`
+- 线程：所有 `trash`/`os_limited` 调用必须经 `run_on_worker` 在后台线程跑，否则主线程
+  STA 与 trash 的 MTA 冲突会 `RPC_E_CHANGED_MODE` 崩溃整进程（详见 docs/07 §4.1）
 - 流程：
   ```
-  对每个 image_id：
+  对每个 image_id（后台线程批量删除，回主线程落库）：
     1. 读绝对路径
-    2. trash::delete(path)（系统会提示同名时自动处理）
+    2. delete_one(path)：trash::delete 进回收站；网络盘失败则回退 fs::remove_file 永久删除
     3. UPDATE images SET deleted_at=now()
-    4. INSERT undo_log: action='trash', payload={image_id, original_path}
+    4. INSERT undo_log: action='trash', payload={image_id, original_path, permanent}
   ```
 - 失败处理：文件已不在 → 标 deleted_at 但记 warn；权限拒绝 → 返回错误展示给用户
+- 网络盘永久删除：`permanent=true` 的项撤销时无法恢复文件，UndoOutcome.note 明确告知用户
 - 撤销：
   ```
   undo_log → 读 payload.original_path

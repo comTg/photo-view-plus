@@ -251,31 +251,36 @@ const DedupGroupRow = memo(function DedupGroupRow({
     image: DedupGroupDetail["items"][number]["image"];
   } | null>(null);
 
-  useEffect(() => {
-    let alive = true;
-    setLoading(true);
-    setError(null);
-    setDetail(null);
-    setKeepIds(new Set());
+  const loadDetail = useCallback(
+    async (shouldApply: () => boolean = () => true) => {
+      setLoading(true);
+      setError(null);
+      setDetail(null);
+      setKeepIds(new Set());
 
-    dedupGroupDetail(group.id)
-      .then((next) => {
-        if (!alive) return;
+      try {
+        const next = await dedupGroupDetail(group.id);
+        if (!shouldApply()) return;
         setDetail(next);
         const suggested = next ? suggestKeepId(next) : null;
         setKeepIds(suggested === null ? new Set() : new Set([suggested]));
-      })
-      .catch((e) => {
-        if (alive) setError(String(e));
-      })
-      .finally(() => {
-        if (alive) setLoading(false);
-      });
+      } catch (e) {
+        if (shouldApply()) setError(String(e));
+      } finally {
+        if (shouldApply()) setLoading(false);
+      }
+    },
+    [group.id],
+  );
+
+  useEffect(() => {
+    let alive = true;
+    void loadDetail(() => alive);
 
     return () => {
       alive = false;
     };
-  }, [group.id]);
+  }, [loadDetail]);
 
   const selectedDeleteCount = useMemo(() => {
     if (!detail) return 0;
@@ -337,6 +342,9 @@ const DedupGroupRow = memo(function DedupGroupRow({
           keepImageIds: keeps,
           action,
         });
+        if (action === "trash" && result.trashFailures.length > 0) {
+          await loadDetail();
+        }
         showResolveToast(action, result, onToast);
       } catch (e) {
         onToast(`处理失败：${String(e)}`);
@@ -344,7 +352,7 @@ const DedupGroupRow = memo(function DedupGroupRow({
         setResolving(false);
       }
     },
-    [detail, group.id, keepIds, onResolve, onToast, resolving, selectedDeleteCount],
+    [detail, group.id, keepIds, loadDetail, onResolve, onToast, resolving, selectedDeleteCount],
   );
 
   return (
@@ -470,10 +478,13 @@ function showResolveToast(
 ) {
   if (action === "trash") {
     const failures = result.trashFailures.length;
+    const permanent = result.permanentlyDeleted.length;
+    const permanentNote =
+      permanent > 0 ? `（其中 ${permanent} 张网络盘文件已永久删除，不可恢复）` : "";
     onToast(
       failures === 0
-        ? `已删除 ${result.trashed.length} 张，撤销 ID #${result.undoId ?? "-"}`
-        : `删除 ${result.trashed.length} 张，失败 ${failures} 张`,
+        ? `已删除 ${result.trashed.length} 张，撤销 ID #${result.undoId ?? "-"}${permanentNote}`
+        : `删除 ${result.trashed.length} 张，失败 ${failures} 张，分组已保留${permanentNote}`,
     );
     return;
   }

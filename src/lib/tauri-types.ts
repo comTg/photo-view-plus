@@ -253,6 +253,8 @@ export interface TrashFailure {
 export interface DedupResolveResult {
   groupId: number;
   trashed: number[];
+  /** trashed 的子集：网络盘无回收站，已永久删除（不可撤销恢复）。 */
+  permanentlyDeleted: number[];
   trashFailures: TrashFailure[];
   undoId: number | null;
 }

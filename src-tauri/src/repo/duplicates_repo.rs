@@ -63,6 +63,16 @@ pub fn insert_items(
     Ok(inserted)
 }
 
+pub fn remove_items(conn: &Connection, group_id: i64, image_ids: &[i64]) -> AppResult<usize> {
+    let mut stmt =
+        conn.prepare("DELETE FROM duplicate_items WHERE group_id = ?1 AND image_id = ?2")?;
+    let mut removed = 0;
+    for image_id in image_ids {
+        removed += stmt.execute(params![group_id, image_id])?;
+    }
+    Ok(removed)
+}
+
 pub fn get_group(conn: &Connection, id: i64) -> AppResult<Option<DuplicateGroup>> {
     let group = conn
         .query_row(

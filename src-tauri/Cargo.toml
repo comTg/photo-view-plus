@@ -49,7 +49,7 @@ http = "1"
 blake3 = "1"
 image_hasher = "2"
 bk-tree = "0.5"
-trash = "5"
+trash = { version = "5", default-features = false, features = ["coinit_multithreaded", "chrono"] }
 
 [dev-dependencies]
 tempfile = "3"

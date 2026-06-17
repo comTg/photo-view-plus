@@ -98,7 +98,7 @@ pnpm ai:check                   # 检查 CUDA / 模型可用性
 继承用户全局 CLAUDE.md 的全部红线（删文件、动密钥、改 schema、git 强制操作等需先问）。**本项目特有红线**：
 
 1. **MVP 阶段隔离**：当前阶段（MVP1 / MVP2）的代码里不要预埋 AI 相关代码、向量库依赖、Python worker 启动逻辑。每个 MVP 只引入它所需的最小依赖。
-2. **不要直接永久删除图片**：所有"删除"操作必须走回收站（Windows Shell IFileOperation），并保留撤销日志。
+2. **不要直接永久删除本地图片**：所有"删除"操作必须走回收站（Windows Shell IFileOperation），并保留撤销日志。**唯一例外——网络盘**：SMB / UNC / 映射网络盘没有回收站，`trash::delete` 必然失败，此时回退为 `fs::remove_file` 永久删除（不可恢复），并在 `undo_log` 里标记 `permanent=true`，撤销时明确告知用户该文件已不可恢复。本地盘删除失败（占用等）**绝不**回退永久删除。实现见 `trash_service::delete_one`。
 3. **不要阻塞 UI 线程做扫描或 AI**：扫描、缩略图、pHash、AI 全部走后台队列，前端通过事件订阅进度。
 4. **不要把图片绝对路径硬编码进数据库**：用 `roots.id + 相对路径` 存储，处理盘符变化。
 5. **AI Worker 崩溃不能拖死主程序**：主进程对 AI worker 必须有健康检查 + 自动重启 + 超时熔断。

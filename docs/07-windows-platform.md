@@ -83,8 +83,17 @@ uv pip install onnxruntime-gpu
 
 ### 4.1 API
 
-- 用 `trash` crate v3+，底层 `IFileOperation::DeleteItem(FOFX_RECYCLEONDELETE)`
+- 用 `trash` crate v5+，底层 `IFileOperation::DeleteItem(FOFX_RECYCLEONDELETE)`
 - 处理 `S_OK` / `0x80270000`（用户取消）/ `0x80070005`（权限不足）
+- **必须开 `coinit_multithreaded` 特性，且必须在后台线程调用**：`trash` 走 COM。Tauri
+  同步 `#[tauri::command]` 跑在主 UI 线程（被 wry/tao `OleInitialize` 设为 COM STA），
+  在主线程上调用带 `coinit_multithreaded` 的 `trash` 会请求 MTA → `CoInitializeEx`
+  返回 `RPC_E_CHANGED_MODE (0x80010106)` → panic 跨 WebView2 C++ 回调无法 unwind →
+  整进程 abort。`trash_service::run_on_worker` 把所有 `trash`/`os_limited` 调用放到全新
+  后台线程（COM 未初始化，可干净按 MTA 初始化）。
+- **网络盘回退永久删除**：SMB / UNC / 映射网络盘没有回收站，`trash::delete` 必然失败。
+  `delete_one` 检测到 `is_network_path` 后回退 `fs::remove_file`（永久删除，不可恢复），
+  并在 `undo_log` 标 `permanent=true`。本地盘删除失败绝不回退（见 CLAUDE.md 红线 2）。
 
 ### 4.2 撤销
 
