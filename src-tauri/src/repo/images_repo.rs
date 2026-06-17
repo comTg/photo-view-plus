@@ -244,12 +244,15 @@ pub fn upsert_scanned_image(
             return Ok(UpsertOutcome::Unchanged(id));
         }
 
+        // 文件内容变了（size/mtime 变化）：缩略图和指纹都过时了，一并清空重算，
+        // 否则去重会用旧指纹分组（Bug B）。blake3/dhash 置空后会被 pending 查询重新拾取。
         conn.execute(
             "UPDATE images
              SET filename = ?1, extension = ?2, size_bytes = ?3, mtime = ?4,
                  width = ?5, height = ?6, orientation = ?7, taken_at = ?8,
                  gps_lat = ?9, gps_lng = ?10, camera_make = ?11, camera_model = ?12,
                  thumb_status = 'pending', thumb_hash = NULL, thumb_error = NULL,
+                 blake3 = NULL, dhash = NULL, hash_status = 'pending',
                  indexed_at = ?13, deleted_at = NULL
              WHERE id = ?14",
             params![
@@ -420,8 +423,8 @@ pub struct UndoEntry {
     pub created_at: i64,
 }
 
-/// 写 blake3。`hash_status` 是流水线整体状态（pending/ready/failed），
-/// 由 hash_service 显式调 `set_hash_status` 维护，这里不动。
+/// 写 blake3。"是否已算"由 `blake3 IS NULL` 判定（见 `pending_blake3_images`），
+/// 不依赖 `hash_status`，这里不动它。
 pub fn set_blake3(conn: &Connection, id: i64, blake3: &str) -> AppResult<()> {
     conn.execute(
         "UPDATE images SET blake3 = ?1 WHERE id = ?2 AND deleted_at IS NULL",
@@ -447,6 +450,8 @@ pub fn set_phash(conn: &Connection, id: i64, phash: u64) -> AppResult<()> {
     Ok(())
 }
 
+/// 写 `hash_status`。注意：哈希流水线已不再用它做"跳过"判定（失败可重试、不连累另一种哈希），
+/// 该列目前仅作信息字段保留。
 pub fn set_hash_status(conn: &Connection, id: i64, status: &str) -> AppResult<()> {
     conn.execute(
         "UPDATE images SET hash_status = ?1 WHERE id = ?2",
@@ -456,10 +461,12 @@ pub fn set_hash_status(conn: &Connection, id: i64, status: &str) -> AppResult<()
 }
 
 /// 还没算 BLAKE3 的图（未删除）。
+///
+/// 不再按 `hash_status='failed'` 排除：`hash_status` 是 blake3/dhash 共用列，按它排除会让
+/// 一种哈希的失败连累另一种，且失败永不重试。改为只看 `blake3 IS NULL` —— 失败（常是网络
+/// 抖动）下次点去重会自动重试；真正坏的文件每次快速失败一次，代价可忽略（去重是手动触发）。
 pub fn pending_blake3_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
-    let sql = format!(
-        "{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.blake3 IS NULL AND i.hash_status != 'failed'"
-    );
+    let sql = format!("{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.blake3 IS NULL");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], row_to_record)?;
     let mut out = Vec::new();
@@ -485,9 +492,9 @@ pub fn pending_thumbnail_images(conn: &Connection) -> AppResult<Vec<ImageRecord>
 
 /// 缩略图已就绪但还没算 dHash 的图（视觉哈希依赖 thumb）。
 pub fn pending_dhash_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
+    // 同 pending_blake3_images：不按共用的 hash_status 排除，失败可重试、不连累 blake3。
     let sql = format!(
-        "{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.dhash IS NULL \
-         AND i.thumb_status = 'ready' AND i.hash_status != 'failed'"
+        "{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.dhash IS NULL AND i.thumb_status = 'ready'"
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], row_to_record)?;
@@ -888,5 +895,60 @@ mod tests {
         assert!(!load_scan_states(&conn, root.id)
             .expect("load")
             .contains_key("IMG_001.JPG"));
+    }
+
+    #[test]
+    fn changed_file_resets_hashes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pool = crate::db::open(&dir.path().join("app.sqlite")).expect("db");
+        let conn = pool.get().expect("conn");
+        let root = roots_repo::insert(
+            &conn,
+            &NewRoot {
+                path: dir.path().to_string_lossy().to_string(),
+                label: None,
+                root_type: "local".to_string(),
+            },
+            1,
+        )
+        .expect("root");
+
+        let mut image = NewImageMetadata {
+            root_id: root.id,
+            rel_path: "IMG_001.JPG".to_string(),
+            filename: "IMG_001.JPG".to_string(),
+            extension: "jpg".to_string(),
+            size_bytes: 42,
+            mtime: 100,
+            width: None,
+            height: None,
+            orientation: None,
+            taken_at: None,
+            gps_lat: None,
+            gps_lng: None,
+            camera_make: None,
+            camera_model: None,
+        };
+        let id = upsert_scanned_image(&conn, &image, 3).expect("insert").image_id();
+        set_blake3(&conn, id, "deadbeef").expect("blake");
+        set_dhash(&conn, id, 12345).expect("dhash");
+        // 已算出指纹 -> 不在 pending 列表里
+        assert!(pending_blake3_images(&conn).expect("pending").is_empty());
+
+        // 文件内容变化（mtime 变）-> upsert 走 Updated 分支，应清空指纹
+        image.mtime = 200;
+        let outcome = upsert_scanned_image(&conn, &image, 5).expect("re-upsert");
+        assert!(matches!(outcome, UpsertOutcome::Updated(_)));
+
+        let detail = get_detail(&conn, id).expect("detail").expect("some");
+        assert_eq!(detail.blake3, None, "改动后 blake3 应被清空重算");
+        assert_eq!(detail.dhash, None, "改动后 dhash 应被清空重算");
+        // 重新进入待算队列
+        let pending_ids: Vec<i64> = pending_blake3_images(&conn)
+            .expect("pending")
+            .iter()
+            .map(|r| r.id)
+            .collect();
+        assert_eq!(pending_ids, vec![id]);
     }
 }

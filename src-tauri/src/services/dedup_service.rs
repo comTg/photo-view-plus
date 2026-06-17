@@ -533,7 +533,7 @@ mod tests {
     /// 直接调 run_exact_grouping，需要伪造一个 AppHandle ——
     /// 这部分留给集成测试（tests/dedup_tests.rs），单测验证内部逻辑/SQL 即可。
     #[test]
-    fn pending_blake3_excludes_failed_and_deleted() {
+    fn pending_blake3_skips_done_and_deleted_but_retries_failed() {
         let (pool, _dir) = fresh_pool();
         let conn = pool.get().expect("conn");
         let root = roots_repo::insert(
@@ -550,15 +550,24 @@ mod tests {
         let a = add_image(&conn, root.id, "a.jpg");
         let b = add_image(&conn, root.id, "b.jpg");
         let _c = add_image(&conn, root.id, "c.jpg");
+        let d = add_image(&conn, root.id, "d.jpg");
 
-        // a 已算 blake3
+        // a 已算 blake3 -> 跳过
         images_repo::set_blake3(&conn, a, "deadbeef").expect("blake a");
-        // b 标 failed
+        // b 曾被标记 failed -> 现在应被重试（不再因 hash_status 排除）
         images_repo::set_hash_status(&conn, b, "failed").expect("status b");
-        // c 软删
+        // c 软删 -> 跳过
         images_repo::mark_deleted(&conn, root.id, "c.jpg", 100).expect("delete c");
+        // d 全新 pending -> 应入选
 
         let pending = images_repo::pending_blake3_images(&conn).expect("pending");
-        assert_eq!(pending.len(), 0, "all three should be excluded");
+        let mut ids: Vec<i64> = pending.iter().map(|r| r.id).collect();
+        ids.sort();
+        let mut expected = vec![b, d];
+        expected.sort();
+        assert_eq!(
+            ids, expected,
+            "failed(b) 应被重试、新图(d) 应入选；已算(a)/已删(c) 跳过"
+        );
     }
 }

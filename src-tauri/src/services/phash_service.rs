@@ -70,9 +70,8 @@ fn compute(task: DhashTask) -> AppResult<()> {
     let dhash = match dhash_from_thumb(&thumb_path) {
         Ok(value) => value,
         Err(error) => {
+            // 不写失败状态：下次去重会自动重试（多为缩略图暂时缺失/损坏）。不连累 blake3。
             tracing::warn!(image_id = task.image_id, path = ?thumb_path, %error, "dhash failed");
-            let conn = task.pool.get()?;
-            images_repo::set_hash_status(&conn, task.image_id, "failed")?;
             return Ok(());
         }
     };
