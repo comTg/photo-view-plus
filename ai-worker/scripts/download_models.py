@@ -6,6 +6,10 @@ from pathlib import Path
 
 
 def default_model_dir() -> Path:
+    # 与 src/model_registry.py 同规则：优先 PVP_MODEL_DIR，保证下载目录与 worker 查找目录一致。
+    env_dir = os.environ.get("PVP_MODEL_DIR")
+    if env_dir:
+        return Path(env_dir)
     local_app_data = os.environ.get("LOCALAPPDATA")
     if local_app_data:
         return Path(local_app_data) / "PhotoViewPlus" / "models"

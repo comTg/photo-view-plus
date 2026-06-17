@@ -21,6 +21,16 @@ cuda = [
 models = [
     "huggingface_hub>=0.24.0",
 ]
+# RAM-plus（Recognize Anything Plus）多标签识别，原生中文标签。
+# 注意：recognize-anything 不在 PyPI，且其 setup.py 钉死 timm==0.4.12 等老版本，
+# 直接作为依赖会破坏 torch 2.11 / open_clip 环境。所以这里只放它运行时真正需要的
+# transformers（BERT 文本编码器）；recognize-anything 本体用 --no-deps 单独装，见
+# scripts/install_ram.py 或 docs/05。装：uv sync --extra cuda --extra tagger
+tagger = [
+    # RAM 的 BERT 文本编码器是 transformers 4.x 时代的自定义实现，5.x 大改 API 大概率不兼容，钉到 4.x。
+    "transformers>=4.44.0,<5",
+    "scipy>=1.13.0",
+]
 
 [dependency-groups]
 dev = []

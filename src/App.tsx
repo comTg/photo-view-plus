@@ -10,6 +10,7 @@ import {
   aiModelDownload,
   aiPipelineStatus,
   aiProcessPending,
+  aiRetagAll,
   aiSearch,
   aiSearchByImage,
   aiTagImage,
@@ -634,6 +635,20 @@ export default function App() {
     }
   }, [refreshAiState]);
 
+  const handleAiRetagAll = useCallback(async () => {
+    setAiBusy(true);
+    try {
+      const count = await aiRetagAll();
+      await refreshAiState();
+      setImageTags([]);
+      setToast(`已清空旧标签，将重新打 ${count} 张图片的标签`);
+    } catch (error) {
+      setToast(`重打标签失败：${String(error)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }, [refreshAiState]);
+
   const handleAiDownloadModel = useCallback(
     async (modelKey: string) => {
       setAiBusy(true);
@@ -876,6 +891,7 @@ export default function App() {
             onAiStop={handleAiStop}
             onAiDiagnostics={handleAiDiagnostics}
             onAiProcessPending={handleAiProcessPending}
+            onAiRetagAll={handleAiRetagAll}
             onAiDownloadModel={handleAiDownloadModel}
           />
         ) : activeView === "dedup" ? (
@@ -1586,6 +1602,7 @@ function SettingsView({
   onAiStop,
   onAiDiagnostics,
   onAiProcessPending,
+  onAiRetagAll,
   onAiDownloadModel,
 }: {
   settings: AppSettings | null;
@@ -1598,6 +1615,7 @@ function SettingsView({
   onAiStop: () => Promise<void>;
   onAiDiagnostics: () => Promise<void>;
   onAiProcessPending: () => Promise<void>;
+  onAiRetagAll: () => Promise<void>;
   onAiDownloadModel: (modelKey: string) => Promise<void>;
 }) {
   if (!settings) {
@@ -1743,6 +1761,16 @@ function SettingsView({
               >
                 <Sparkles aria-hidden="true" />
                 处理待办
+              </button>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={aiBusy}
+                onClick={() => void onAiRetagAll()}
+                title="清空已有 AI 标签（含旧的英文标签），并用当前模型重新打一遍"
+              >
+                <Tags aria-hidden="true" />
+                清空并重打标签
               </button>
             </div>
           </div>

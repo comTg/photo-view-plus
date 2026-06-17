@@ -39,6 +39,10 @@ struct AiSupervisorInner {
     child: Option<Child>,
     status: AiWorkerStatus,
     restart_times: VecDeque<Instant>,
+    /// 连续启动失败次数，用于计算退避时长。
+    start_failures: u32,
+    /// 退避窗口截止时刻：在此之前 `ensure_ready` 不再尝试启动。
+    start_cooldown_until: Option<Instant>,
 }
 
 pub struct AiSupervisor {
@@ -83,6 +87,8 @@ impl AiSupervisor {
                 child: None,
                 status,
                 restart_times: VecDeque::new(),
+                start_failures: 0,
+                start_cooldown_until: None,
             }),
         })
     }
@@ -108,6 +114,8 @@ impl AiSupervisor {
                 inner.status.compute = started.health.compute;
                 inner.status.last_error = None;
                 inner.child = Some(started.child);
+                inner.start_failures = 0;
+                inner.start_cooldown_until = None;
                 Ok(inner.status.clone())
             }
             Err(error) => {
@@ -117,6 +125,30 @@ impl AiSupervisor {
                 Err(error)
             }
         }
+    }
+
+    /// 后台流水线专用：带退避地确保 worker 就绪，返回 true 表示可以投递任务。
+    /// 在退避窗口内不重复尝试启动——这样 worker 起不来时（如没装 Python 环境）
+    /// 不会每 2 秒投递一批必然失败的任务、把日志刷满 "queue task failed"。
+    pub async fn ensure_ready(&self) -> bool {
+        {
+            let inner = self.inner.lock().await;
+            if inner.child.is_some() && inner.status.status == "ready" {
+                return true;
+            }
+            if let Some(until) = inner.start_cooldown_until {
+                if Instant::now() < until {
+                    return false;
+                }
+            }
+        }
+        // start() 成功会清零失败计数与退避窗口（见上）。
+        if self.start().await.is_ok() {
+            return true;
+        }
+        let mut inner = self.inner.lock().await;
+        apply_start_cooldown(&mut inner);
+        false
     }
 
     pub async fn stop(&self) -> AppResult<AiWorkerStatus> {
@@ -365,6 +397,18 @@ impl AiSupervisor {
             health,
         })
     }
+}
+
+/// 启动失败后设置指数退避窗口（5s → 15s → 30s → 60s 封顶），供 `ensure_ready` 使用。
+fn apply_start_cooldown(inner: &mut AiSupervisorInner) {
+    inner.start_failures = inner.start_failures.saturating_add(1);
+    let secs = match inner.start_failures {
+        1 => 5,
+        2 => 15,
+        3 => 30,
+        _ => 60,
+    };
+    inner.start_cooldown_until = Some(Instant::now() + Duration::from_secs(secs));
 }
 
 fn refresh_restart_window(inner: &mut AiSupervisorInner) {

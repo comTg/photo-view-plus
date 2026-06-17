@@ -20,6 +20,10 @@ use crate::services::thumbnail_service;
 
 const EMBED_BATCH: i64 = 32;
 const TAG_BATCH: i64 = 16;
+/// 启动后到首次跑后台 AI 的静默期。worker 首启要 import torch/CUDA、加载 CLIP，
+/// 是开机最重的磁盘/CPU 尖峰；推迟到首屏渲染、首批缩略图之后，避免和冷启动的
+/// WebView2 / Vite 抢资源造成长时间白屏。手动“启动 / 处理待办”不受此延迟影响。
+const STARTUP_GRACE: Duration = Duration::from_secs(20);
 
 #[derive(Clone)]
 pub struct AiPipeline {
@@ -62,6 +66,9 @@ impl AiPipeline {
 
     pub fn spawn_loop(self: Arc<Self>, app: tauri::AppHandle<tauri::Wry>) {
         tauri::async_runtime::spawn(async move {
+            // 启动后先让前端完成首屏，再开始后台 AI：启动 Python/CUDA worker 很重，
+            // 不应和窗口首次渲染抢 CPU/磁盘/显存。
+            tokio::time::sleep(STARTUP_GRACE).await;
             let mut interval = tokio::time::interval(Duration::from_secs(2));
             loop {
                 interval.tick().await;
@@ -106,8 +113,28 @@ impl AiPipeline {
         if !settings_service::read(&self.paths)?.ai_enabled {
             return Ok(());
         }
-        self.enqueue_embedding_batch()?;
-        self.enqueue_tag_batch()?;
+        // 先看有没有待处理的图：没有就别去唤醒（启动）Python worker。
+        let (embed_pending, tag_pending) = {
+            let conn = self.pool.get()?;
+            (
+                count_pending(&conn, "embedding_status")?,
+                count_pending(&conn, "tag_status")?,
+            )
+        };
+        if embed_pending == 0 && tag_pending == 0 {
+            return Ok(());
+        }
+        // worker 未就绪（或正处于启动失败退避窗口内）就跳过本轮：
+        // 否则会反复向队列投递必然失败的任务，刷满 "queue task failed"。
+        if !self.supervisor.ensure_ready().await {
+            return Ok(());
+        }
+        if embed_pending > 0 {
+            self.enqueue_embedding_batch()?;
+        }
+        if tag_pending > 0 {
+            self.enqueue_tag_batch()?;
+        }
         Ok(())
     }
 

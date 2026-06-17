@@ -1,4 +1,4 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
 use http::header;
@@ -63,23 +63,10 @@ pub fn run() {
                 let _ = queue_app.emit("queue:status", status);
             });
 
-            // MVP2 状态：BK-tree（视觉哈希索引） + dedup 协调器
+            // MVP2 状态：BK-tree（视觉哈希索引） + dedup 协调器。
+            // BK-tree 体量随图库增长，全量加载放后台线程（见 spawn_background_init），
+            // 否则会阻塞 setup 主线程的消息泵、导致窗口长时间白屏。
             let dhash_index = Arc::new(DhashIndex::new());
-            match pool.get() {
-                Ok(conn) => match repo::images_repo::all_dhashes(&conn) {
-                    Ok(entries) => {
-                        let count = entries.len();
-                        dhash_index.rebuild_from(entries);
-                        tracing::info!(loaded = count, "dhash BK-tree loaded");
-                    }
-                    Err(error) => {
-                        tracing::warn!(%error, "failed to load dhash BK-tree on startup");
-                    }
-                },
-                Err(error) => {
-                    tracing::warn!(%error, "failed to get conn for BK-tree init");
-                }
-            }
             let dedup_coord = Arc::new(DedupCoordinator::new());
 
             // MVP3 AI worker supervisor：按需启动 Python 子进程，后台 monitor 只负责已启动后的健康检查。
@@ -97,19 +84,14 @@ pub fn run() {
             ));
             ai_pipeline.clone().spawn_loop(app.handle().clone());
 
-            // 重排上次未完成的缩略图：扫描中断会留下 thumb_status='pending' 的图，
-            // 而重复扫描不会再触碰未改动文件，必须在这里主动恢复，否则它们永远停在"生成中"。
-            match services::thumbnail_service::requeue_pending_thumbnails(
-                &pool,
-                &scheduler,
-                &paths.thumbs_dir,
-            ) {
-                Ok(count) if count > 0 => {
-                    tracing::info!(count, "requeued pending thumbnails")
-                }
-                Ok(_) => {}
-                Err(error) => tracing::warn!(%error, "failed to requeue pending thumbnails"),
-            }
+            // BK-tree 全量加载 + 重排上次未完成的缩略图都会查全库，放后台线程，
+            // 让 setup 尽快返回、窗口立即出图，不再白屏等待。
+            spawn_background_init(
+                pool.clone(),
+                scheduler.clone(),
+                dhash_index.clone(),
+                paths.thumbs_dir.clone(),
+            );
 
             app.manage(paths);
             app.manage(pool);
@@ -163,18 +145,70 @@ pub fn run() {
             commands::ai::ai_tags_list,
             commands::ai::ai_image_tags,
             commands::ai::ai_images_by_tag,
+            commands::ai::ai_retag_all,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| eprintln!("error while running tauri application: {error}"));
 }
 
+/// 后台初始化：BK-tree 全量加载 + 重排未完成缩略图。两者都查全库，
+/// 不能放在 setup 主线程里跑，否则窗口会白屏到它们结束。
+fn spawn_background_init(
+    pool: db::Pool,
+    scheduler: queue::Scheduler,
+    dhash_index: Arc<DhashIndex>,
+    thumbs_dir: PathBuf,
+) {
+    std::thread::spawn(move || {
+        match pool.get() {
+            Ok(conn) => match repo::images_repo::all_dhashes(&conn) {
+                Ok(entries) => {
+                    let count = entries.len();
+                    dhash_index.rebuild_from(entries);
+                    tracing::info!(loaded = count, "dhash BK-tree loaded");
+                }
+                Err(error) => tracing::warn!(%error, "failed to load dhash BK-tree on startup"),
+            },
+            Err(error) => tracing::warn!(%error, "failed to get conn for BK-tree init"),
+        }
+
+        // 扫描中断会留下 thumb_status='pending' 的图，重复扫描不会再触碰未改动文件，
+        // 必须主动恢复，否则它们永远停在"生成中"。
+        match services::thumbnail_service::requeue_pending_thumbnails(&pool, &scheduler, &thumbs_dir)
+        {
+            Ok(count) if count > 0 => tracing::info!(count, "requeued pending thumbnails"),
+            Ok(_) => {}
+            Err(error) => tracing::warn!(%error, "failed to requeue pending thumbnails"),
+        }
+    });
+}
+
+/// 定位 ai-worker 目录。优先 `PVP_AI_WORKER_DIR`，否则在若干候选位置里取第一个真实存在的。
+/// 注意：`tauri dev` 下进程工作目录是 `src-tauri/`，所以必须向上找一级，
+/// 不能直接 `current_dir()/ai-worker`（那会落到不存在的 `src-tauri/ai-worker`）。
 fn resolve_ai_worker_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("PVP_AI_WORKER_DIR") {
         return PathBuf::from(dir);
     }
-    std::env::current_dir()
-        .unwrap_or_else(|_| PathBuf::from("."))
-        .join("ai-worker")
+
+    let mut candidates: Vec<PathBuf> = Vec::new();
+    if let Ok(cwd) = std::env::current_dir() {
+        candidates.push(cwd.join("ai-worker"));
+        if let Some(parent) = cwd.parent() {
+            candidates.push(parent.join("ai-worker"));
+        }
+    }
+    // 编译期已知的源码树位置（dev 兜底）：<repo>/src-tauri 的上一级 = <repo>。
+    if let Some(repo_root) = Path::new(env!("CARGO_MANIFEST_DIR")).parent() {
+        candidates.push(repo_root.join("ai-worker"));
+    }
+
+    candidates
+        .iter()
+        .find(|dir| dir.exists())
+        .cloned()
+        .or_else(|| candidates.into_iter().next())
+        .unwrap_or_else(|| PathBuf::from("ai-worker"))
 }
 
 fn set_profile_window_title(app: &tauri::AppHandle<tauri::Wry>, profile: config::Profile) {
@@ -340,7 +374,12 @@ fn text_response(status: http::StatusCode, text: &str) -> http::Response<Vec<u8>
 }
 
 fn init_tracing(profile: config::Profile) {
-    let filter = EnvFilter::try_from_env("PVP_LOG").unwrap_or_else(|_| EnvFilter::new("info"));
+    // 依赖（尤其是 LanceDB）在 info 级别极其啰嗦：每次 embedding upsert 会刷十几行
+    // lance::* 事件，写满日志文件、也让 dev 下同步写 stdout 的 fmt layer 互相抢锁。
+    // 默认只放行本项目 crate 的 info，其余依赖压到 warn；需要排障时用 PVP_LOG 覆盖。
+    let filter = EnvFilter::try_from_env("PVP_LOG").unwrap_or_else(|_| {
+        EnvFilter::new("warn,photo_view_plus_lib=info,photo_view_plus=info")
+    });
     let stdout_layer = tracing_subscriber::fmt::layer();
 
     if let Some(log_dir) = log_dir_for(profile) {

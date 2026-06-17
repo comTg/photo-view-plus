@@ -51,11 +51,27 @@ impl AppPaths {
             db_path: data_dir.join("db").join("app.sqlite"),
             thumbs_dir: data_dir.join("thumbs"),
             vectors_dir: data_dir.join("vectors"),
-            models_dir: data_dir.join("models"),
+            // 模型权重体积大且与 profile 无关：统一放 %LOCALAPPDATA%\PhotoViewPlus\models，
+            // dev/test/prod 共享，并与 pnpm ai:download 的下载目录一致（CLAUDE.md 红线 #7）。
+            // 否则 supervisor 注入给 worker 的查找目录会和下载目录对不上，模型下了也加载不到。
+            models_dir: shared_models_dir().unwrap_or_else(|| data_dir.join("models")),
             config_path: data_dir.join("config.json"),
             data_dir,
         }
     }
+}
+
+/// 统一的模型目录：优先 `PVP_MODEL_DIR`，否则 `%LOCALAPPDATA%\PhotoViewPlus\models`。
+/// 与 ai-worker/src/model_registry.py 的 default_model_dir 保持同一规则。
+fn shared_models_dir() -> Option<PathBuf> {
+    if let Ok(dir) = std::env::var("PVP_MODEL_DIR") {
+        let trimmed = dir.trim();
+        if !trimmed.is_empty() {
+            return Some(PathBuf::from(trimmed));
+        }
+    }
+    std::env::var_os("LOCALAPPDATA")
+        .map(|local| PathBuf::from(local).join("PhotoViewPlus").join("models"))
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]

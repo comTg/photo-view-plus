@@ -170,6 +170,10 @@ export async function aiProcessPending(): Promise<void> {
   return invoke<void>("ai_process_pending");
 }
 
+export async function aiRetagAll(): Promise<number> {
+  return invoke<number>("ai_retag_all");
+}
+
 export async function aiTagsList(limit?: number): Promise<AiTag[]> {
   return invoke<AiTag[]>("ai_tags_list", { limit });
 }

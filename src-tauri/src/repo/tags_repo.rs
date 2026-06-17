@@ -93,6 +93,26 @@ pub fn replace_image_tags(
     Ok(written)
 }
 
+/// 清空所有 AI 标签，并把"缩略图就绪、未删除"的图片重置为待打标签，
+/// 让后台流水线用当前 tagger（如换成 RAM-plus 中文）重新打一遍。
+/// 返回被重置 tag_status 的图片数。user 来源的标签与引用不受影响。
+pub fn clear_ai_tags_and_reset(conn: &mut Connection) -> AppResult<usize> {
+    let tx = conn.transaction()?;
+    tx.execute("DELETE FROM image_tags WHERE source = 'ai'", [])?;
+    // 清掉不再被任何图片引用的孤儿标签（多为旧的英文 AI 标签）。
+    tx.execute(
+        "DELETE FROM tags WHERE id NOT IN (SELECT DISTINCT tag_id FROM image_tags)",
+        [],
+    )?;
+    let reset = tx.execute(
+        "UPDATE images SET tag_status = 'pending'
+         WHERE deleted_at IS NULL AND thumb_status = 'ready'",
+        [],
+    )?;
+    tx.commit()?;
+    Ok(reset)
+}
+
 pub fn tags_for_image(conn: &Connection, image_id: i64) -> AppResult<Vec<ImageTag>> {
     let mut stmt = conn.prepare(
         "SELECT it.image_id, it.tag_id, t.name, it.score, it.source, t.category

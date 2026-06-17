@@ -461,6 +461,22 @@ pub async fn ai_process_pending(pipeline: State<'_, Arc<AiPipeline>>) -> Result<
     pipeline.enqueue_pending().await.map_err(|e| e.to_string())
 }
 
+/// 清空旧的 AI 标签（含历史英文标签）并把就绪图片重置为待打标签，随后立即触发一轮重打。
+/// 返回被重置的图片数。重打用的是当前 tagger（接入 RAM-plus 后即为中文）。
+#[tauri::command]
+pub async fn ai_retag_all(
+    pool: State<'_, Pool>,
+    pipeline: State<'_, Arc<AiPipeline>>,
+) -> Result<usize, String> {
+    let reset = {
+        let mut conn = pool.get().map_err(|e| e.to_string())?;
+        tags_repo::clear_ai_tags_and_reset(&mut conn).map_err(|e| e.to_string())?
+    };
+    // 清理已成功；尽量立刻起一轮重打（worker 未就绪时后台流水线稍后也会处理）。
+    let _ = pipeline.enqueue_pending().await;
+    Ok(reset)
+}
+
 #[tauri::command]
 pub fn ai_tags_list(pool: State<'_, Pool>, limit: Option<i64>) -> Result<Vec<Tag>, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;

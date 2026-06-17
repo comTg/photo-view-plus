@@ -1,6 +1,8 @@
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
+use tokio::sync::OnceCell;
+
 use arrow_array::types::Float32Type;
 use arrow_array::{
     Array, FixedSizeListArray, Float32Array, Int64Array, RecordBatch, RecordBatchIterator,
@@ -32,18 +34,37 @@ pub struct VectorSearchHit {
     pub score: f32,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 pub struct LanceDbRepo {
     path: PathBuf,
+    // 复用连接：lancedb::connect 每次都会重读命名空间 __manifest，按调用重连
+    // 会在每批 upsert 上叠加大量冗余磁盘 I/O。连接是 Clone 且为复用而设计的。
+    conn: Arc<OnceCell<lancedb::Connection>>,
 }
 
 impl LanceDbRepo {
     pub fn new(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            conn: Arc::new(OnceCell::new()),
+        }
     }
 
     pub fn path(&self) -> &Path {
         &self.path
+    }
+
+    /// 懒初始化并缓存 LanceDB 连接。首次失败不会污染 cell，下次调用会重试。
+    async fn connection(&self) -> AppResult<&lancedb::Connection> {
+        self.conn
+            .get_or_try_init(|| async {
+                std::fs::create_dir_all(&self.path)?;
+                lancedb::connect(&self.path.to_string_lossy())
+                    .execute()
+                    .await
+                    .map_err(lance_error)
+            })
+            .await
     }
 
     pub async fn upsert_embeddings(&self, records: &[EmbeddingRecord]) -> AppResult<()> {
@@ -137,10 +158,7 @@ impl LanceDbRepo {
     }
 
     async fn open_table(&self) -> AppResult<lancedb::Table> {
-        let db = lancedb::connect(&self.path.to_string_lossy())
-            .execute()
-            .await
-            .map_err(lance_error)?;
+        let db = self.connection().await?;
         db.open_table(TABLE_NAME)
             .execute()
             .await
@@ -148,14 +166,10 @@ impl LanceDbRepo {
     }
 
     async fn open_or_create_table(&self) -> AppResult<lancedb::Table> {
-        if let Ok(table) = self.open_table().await {
+        let db = self.connection().await?;
+        if let Ok(table) = db.open_table(TABLE_NAME).execute().await {
             return Ok(table);
         }
-        std::fs::create_dir_all(&self.path)?;
-        let db = lancedb::connect(&self.path.to_string_lossy())
-            .execute()
-            .await
-            .map_err(lance_error)?;
         db.create_empty_table(TABLE_NAME, embedding_schema())
             .execute()
             .await
