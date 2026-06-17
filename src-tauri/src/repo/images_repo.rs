@@ -11,7 +11,8 @@ const IMAGE_SELECT: &str = "\
            i.width, i.height, i.orientation, i.taken_at, i.gps_lat, i.gps_lng,
            i.camera_make, i.camera_model, i.thumb_status, i.thumb_hash, i.thumb_error,
            i.indexed_at, i.deleted_at, r.path,
-           i.blake3, i.phash, i.dhash, i.hash_status
+           i.blake3, i.phash, i.dhash, i.hash_status,
+           i.tag_status, i.embedding_status
     FROM images i
     JOIN roots r ON r.id = i.root_id";
 
@@ -46,6 +47,8 @@ pub struct ImageRecord {
     pub phash: Option<i64>,
     pub dhash: Option<i64>,
     pub hash_status: String,
+    pub tag_status: String,
+    pub embedding_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -162,6 +165,27 @@ pub fn get_detail(conn: &Connection, id: i64) -> AppResult<Option<ImageRecord>> 
     Ok(conn.query_row(&sql, [id], row_to_record).optional()?)
 }
 
+pub fn get_details_by_ids(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ImageRecord>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "{IMAGE_SELECT} WHERE i.id IN ({}) AND i.deleted_at IS NULL",
+        placeholders(ids.len())
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params_from_iter(ids.iter().copied().map(Value::Integer)),
+        row_to_record,
+    )?;
+    let mut by_id = std::collections::HashMap::new();
+    for row in rows {
+        let record = row?;
+        by_id.insert(record.id, record);
+    }
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
 pub fn get_thumb_hash(conn: &Connection, id: i64) -> AppResult<Option<String>> {
     Ok(conn
         .query_row("SELECT thumb_hash FROM images WHERE id = ?1", [id], |row| {
@@ -252,7 +276,8 @@ pub fn upsert_scanned_image(
                  width = ?5, height = ?6, orientation = ?7, taken_at = ?8,
                  gps_lat = ?9, gps_lng = ?10, camera_make = ?11, camera_model = ?12,
                  thumb_status = 'pending', thumb_hash = NULL, thumb_error = NULL,
-                 blake3 = NULL, dhash = NULL, hash_status = 'pending',
+                 blake3 = NULL, phash = NULL, dhash = NULL, hash_status = 'pending',
+                 tag_status = 'pending', embedding_status = 'pending',
                  indexed_at = ?13, deleted_at = NULL
              WHERE id = ?14",
             params![
@@ -457,6 +482,22 @@ pub fn set_hash_status(conn: &Connection, id: i64, status: &str) -> AppResult<()
     Ok(())
 }
 
+pub fn set_tag_status(conn: &Connection, id: i64, status: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET tag_status = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![status, id],
+    )?;
+    Ok(())
+}
+
+pub fn set_embedding_status(conn: &Connection, id: i64, status: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET embedding_status = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![status, id],
+    )?;
+    Ok(())
+}
+
 /// 还没算 BLAKE3 的图（未删除）。
 ///
 /// 不再按 `hash_status='failed'` 排除：`hash_status` 是 blake3/dhash 共用列，按它排除会让
@@ -495,6 +536,63 @@ pub fn pending_dhash_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map([], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 缩略图已就绪但还没生成 CLIP embedding 的图。
+pub fn pending_embedding_images(conn: &Connection, limit: i64) -> AppResult<Vec<ImageRecord>> {
+    let sql = format!(
+        "{IMAGE_SELECT}
+         WHERE i.deleted_at IS NULL
+           AND i.thumb_status = 'ready'
+           AND i.embedding_status = 'pending'
+         ORDER BY i.indexed_at ASC, i.id ASC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit.clamp(1, 256)], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 缩略图已就绪但还没跑 AI tagger 的图。
+pub fn pending_tag_images(conn: &Connection, limit: i64) -> AppResult<Vec<ImageRecord>> {
+    let sql = format!(
+        "{IMAGE_SELECT}
+         WHERE i.deleted_at IS NULL
+           AND i.thumb_status = 'ready'
+           AND i.tag_status = 'pending'
+         ORDER BY i.indexed_at ASC, i.id ASC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit.clamp(1, 256)], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn ids_for_tag(conn: &Connection, tag_id: i64, limit: i64, offset: i64) -> AppResult<Vec<i64>> {
+    let mut stmt = conn.prepare(
+        "SELECT i.id
+         FROM image_tags it
+         JOIN images i ON i.id = it.image_id
+         WHERE it.tag_id = ?1 AND i.deleted_at IS NULL
+         ORDER BY it.score DESC, i.mtime DESC
+         LIMIT ?2 OFFSET ?3",
+    )?;
+    let rows = stmt.query_map(params![tag_id, limit.clamp(1, 500), offset.max(0)], |row| {
+        row.get(0)
+    })?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
@@ -760,6 +858,8 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
         phash: row.get(22)?,
         dhash: row.get(23)?,
         hash_status: row.get(24)?,
+        tag_status: row.get(25)?,
+        embedding_status: row.get(26)?,
     })
 }
 

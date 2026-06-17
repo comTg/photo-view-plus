@@ -5,6 +5,19 @@ import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useRoots } from "@/hooks/useRoots";
 import { useTauriEvent } from "@/lib/events";
 import {
+  aiImageTags,
+  aiImagesByTag,
+  aiModelDownload,
+  aiPipelineStatus,
+  aiProcessPending,
+  aiSearch,
+  aiSearchByImage,
+  aiTagImage,
+  aiTagsList,
+  aiWorkerDiagnostics,
+  aiWorkerStart,
+  aiWorkerStatus,
+  aiWorkerStop,
   imagesGetDetail,
   imagesQuery,
   imagesRename,
@@ -20,9 +33,15 @@ import {
   thumbUrl,
 } from "@/lib/tauri";
 import type {
+  AiDiagnostics,
+  AiPipelineStatus,
+  AiSearchResult,
+  AiTag,
+  AiWorkerStatus,
   AppSettings,
   ImageQueryParams,
   ImageRecord,
+  ImageTag,
   QueueStatus,
   ScanDone,
   ScanErrorEvent,
@@ -64,7 +83,7 @@ const FORMATS = ["jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "tiff", "g
 
 type ViewMode = "grid-lg" | "grid-md" | "grid-sm" | "list";
 type GpsFilter = "any" | "yes" | "no";
-type ActiveView = "browse" | "dedup" | "settings";
+type ActiveView = "browse" | "dedup" | "ai" | "settings";
 type LoadMode = "reset" | "more" | "refresh";
 
 export default function App() {
@@ -73,6 +92,15 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>("browse");
   const [settings, setSettings] = useState<AppSettings | null>(null);
+  const [aiStatus, setAiStatus] = useState<AiWorkerStatus | null>(null);
+  const [aiDiagnostics, setAiDiagnostics] = useState<AiDiagnostics | null>(null);
+  const [aiPipeline, setAiPipeline] = useState<AiPipelineStatus | null>(null);
+  const [aiTags, setAiTags] = useState<AiTag[]>([]);
+  const [imageTags, setImageTags] = useState<ImageTag[]>([]);
+  const [aiSearchDraft, setAiSearchDraft] = useState("");
+  const [aiResults, setAiResults] = useState<AiSearchResult[]>([]);
+  const [aiResultsTitle, setAiResultsTitle] = useState("语义搜索");
+  const [aiBusy, setAiBusy] = useState(false);
 
   const roots = useRoots();
   const selection = roots.selection;
@@ -144,6 +172,15 @@ export default function App() {
       .catch((error) => setToast(`读取设置失败：${String(error)}`));
     queueStatus()
       .then(setQueue)
+      .catch(() => undefined);
+    aiWorkerStatus()
+      .then(setAiStatus)
+      .catch(() => undefined);
+    aiPipelineStatus()
+      .then(setAiPipeline)
+      .catch(() => undefined);
+    aiTagsList(80)
+      .then(setAiTags)
       .catch(() => undefined);
   }, []);
 
@@ -290,11 +327,15 @@ export default function App() {
   }, []);
 
   const handleQueueStatus = useCallback((payload: QueueStatus) => setQueue(payload), []);
+  const handleAiStatus = useCallback((payload: AiWorkerStatus) => setAiStatus(payload), []);
+  const handleAiProgress = useCallback((payload: AiPipelineStatus) => setAiPipeline(payload), []);
 
   useTauriEvent<ScanProgress>("scan:progress", handleScanProgress);
   useTauriEvent<ScanDone>("scan:done", handleScanDone);
   useTauriEvent<ScanErrorEvent>("scan:error", handleScanError);
   useTauriEvent<QueueStatus>("queue:status", handleQueueStatus);
+  useTauriEvent<AiWorkerStatus>("ai:worker_status", handleAiStatus);
+  useTauriEvent<AiPipelineStatus>("ai:progress", handleAiProgress);
 
   const primarySelectedId =
     selectedIds.length > 0 ? (selectedIds[selectedIds.length - 1] ?? null) : null;
@@ -311,11 +352,15 @@ export default function App() {
   useEffect(() => {
     if (primarySelectedId === null) {
       setDetail(null);
+      setImageTags([]);
       return;
     }
     imagesGetDetail(primarySelectedId)
       .then(setDetail)
       .catch((error) => setToast(`读取详情失败：${String(error)}`));
+    aiImageTags(primarySelectedId)
+      .then(setImageTags)
+      .catch(() => setImageTags([]));
   }, [primarySelectedId]);
 
   useEffect(() => {
@@ -459,6 +504,172 @@ export default function App() {
     }
   }, []);
 
+  const handleAiStart = useCallback(async () => {
+    setAiBusy(true);
+    try {
+      const status = await aiWorkerStart();
+      setAiStatus(status);
+      setToast("AI Worker 已启动");
+    } catch (error) {
+      setToast(`启动 AI Worker 失败：${String(error)}`);
+      void aiWorkerStatus()
+        .then(setAiStatus)
+        .catch(() => undefined);
+    } finally {
+      setAiBusy(false);
+    }
+  }, []);
+
+  const handleAiStop = useCallback(async () => {
+    setAiBusy(true);
+    try {
+      const status = await aiWorkerStop();
+      setAiStatus(status);
+      setToast("AI Worker 已停止");
+    } catch (error) {
+      setToast(`停止 AI Worker 失败：${String(error)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }, []);
+
+  const handleAiDiagnostics = useCallback(async () => {
+    setAiBusy(true);
+    try {
+      const diagnostics = await aiWorkerDiagnostics();
+      setAiDiagnostics(diagnostics);
+      void aiWorkerStatus()
+        .then(setAiStatus)
+        .catch(() => undefined);
+      setToast("AI 诊断已刷新");
+    } catch (error) {
+      setToast(`AI 诊断失败：${String(error)}`);
+      void aiWorkerStatus()
+        .then(setAiStatus)
+        .catch(() => undefined);
+    } finally {
+      setAiBusy(false);
+    }
+  }, []);
+
+  const refreshAiState = useCallback(async () => {
+    const [pipeline, tags] = await Promise.all([aiPipelineStatus(), aiTagsList(80)]);
+    setAiPipeline(pipeline);
+    setAiTags(tags);
+  }, []);
+
+  const handleAiSearch = useCallback(async () => {
+    const text = aiSearchDraft.trim();
+    if (!text) {
+      setToast("请输入要搜索的自然语言");
+      return;
+    }
+    setAiBusy(true);
+    try {
+      const results = await aiSearch({
+        text,
+        rootIds: typeof selection === "number" ? [selection] : undefined,
+        limit: 80,
+      });
+      setAiResults(results);
+      setAiResultsTitle(`语义搜索：${text}`);
+      setActiveView("ai");
+    } catch (error) {
+      setToast(`AI 搜索失败：${String(error)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }, [aiSearchDraft, selection]);
+
+  const handleAiSimilar = useCallback(
+    async (imageId?: number) => {
+      const id = imageId ?? primarySelectedId;
+      if (id === null || id === undefined) {
+        setToast("先选择一张图片");
+        return;
+      }
+      setAiBusy(true);
+      try {
+        const results = await aiSearchByImage(id, 80);
+        setAiResults(results);
+        setAiResultsTitle(`以图搜图：#${id}`);
+        setActiveView("ai");
+      } catch (error) {
+        setToast(`以图搜图失败：${String(error)}`);
+      } finally {
+        setAiBusy(false);
+      }
+    },
+    [primarySelectedId],
+  );
+
+  const handleAiTagSelected = useCallback(async () => {
+    if (primarySelectedId === null) {
+      setToast("先选择一张图片");
+      return;
+    }
+    setAiBusy(true);
+    try {
+      const tags = await aiTagImage(primarySelectedId);
+      setImageTags(tags);
+      await refreshAiState();
+      setToast(`已生成 ${tags.length} 个标签`);
+    } catch (error) {
+      setToast(`生成标签失败：${String(error)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }, [primarySelectedId, refreshAiState]);
+
+  const handleAiProcessPending = useCallback(async () => {
+    setAiBusy(true);
+    try {
+      await aiProcessPending();
+      await refreshAiState();
+      setToast("已触发 AI 后台处理");
+    } catch (error) {
+      setToast(`触发 AI 处理失败：${String(error)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }, [refreshAiState]);
+
+  const handleAiDownloadModel = useCallback(
+    async (modelKey: string) => {
+      setAiBusy(true);
+      try {
+        await aiModelDownload(modelKey);
+        setToast(`已开始下载模型：${modelKey}`);
+        void handleAiDiagnostics();
+      } catch (error) {
+        setToast(`模型下载失败：${String(error)}`);
+      } finally {
+        setAiBusy(false);
+      }
+    },
+    [handleAiDiagnostics],
+  );
+
+  const handleTagFilter = useCallback(async (tag: AiTag) => {
+    setAiBusy(true);
+    try {
+      const page = await aiImagesByTag(tag.id, 0, 200);
+      setAiResults(
+        page.items.map((image) => ({
+          image,
+          score: 1,
+          source: "tag",
+        })),
+      );
+      setAiResultsTitle(`#${tag.name}`);
+      setActiveView("ai");
+    } catch (error) {
+      setToast(`读取标签图片失败：${String(error)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }, []);
+
   const handleGridEndReached = useCallback(() => {
     if (imagesRef.current.length < total && !imageLoadingRef.current) {
       void loadImages("more");
@@ -568,6 +779,15 @@ export default function App() {
           </button>
           <button
             type="button"
+            className={`toolbar-button${activeView === "ai" ? " toolbar-button--active" : ""}`}
+            onClick={() => setActiveView((view) => (view === "ai" ? "browse" : "ai"))}
+            title="AI 搜索"
+          >
+            <Sparkles aria-hidden="true" />
+            AI
+          </button>
+          <button
+            type="button"
             className="icon-button"
             onClick={() => setActiveView((view) => (view === "settings" ? "browse" : "settings"))}
             title="设置"
@@ -614,10 +834,25 @@ export default function App() {
         />
         <nav className="nav-group">
           <div className="section-label">标签</div>
-          <button type="button" className="nav-item nav-item--muted">
-            <Tags aria-hidden="true" />
-            MVP3 启用
-          </button>
+          {aiTags.length === 0 ? (
+            <button type="button" className="nav-item nav-item--muted">
+              <Tags aria-hidden="true" />
+              等待 AI 标签
+            </button>
+          ) : (
+            aiTags.slice(0, 12).map((tag) => (
+              <button
+                key={tag.id}
+                type="button"
+                className="nav-item"
+                onClick={() => void handleTagFilter(tag)}
+                title={`${tag.name} · ${tag.imageCount}`}
+              >
+                <Tags aria-hidden="true" />
+                {tag.name} · {tag.imageCount}
+              </button>
+            ))
+          )}
         </nav>
         <nav className="nav-group">
           <div className="section-label">智能相册</div>
@@ -630,9 +865,41 @@ export default function App() {
 
       <main className={`app-main${activeView === "browse" ? " app-main--browse" : ""}`}>
         {activeView === "settings" ? (
-          <SettingsView settings={settings} onPatch={handleSettingsPatch} />
+          <SettingsView
+            settings={settings}
+            aiStatus={aiStatus}
+            aiDiagnostics={aiDiagnostics}
+            aiPipeline={aiPipeline}
+            aiBusy={aiBusy}
+            onPatch={handleSettingsPatch}
+            onAiStart={handleAiStart}
+            onAiStop={handleAiStop}
+            onAiDiagnostics={handleAiDiagnostics}
+            onAiProcessPending={handleAiProcessPending}
+            onAiDownloadModel={handleAiDownloadModel}
+          />
         ) : activeView === "dedup" ? (
           <DedupView onToast={setToast} />
+        ) : activeView === "ai" ? (
+          <AiSearchView
+            query={aiSearchDraft}
+            onQueryChange={setAiSearchDraft}
+            onSearch={handleAiSearch}
+            onProcessPending={handleAiProcessPending}
+            onRefresh={refreshAiState}
+            onSelectTag={handleTagFilter}
+            onSelectImage={(image) => {
+              setSelectedIds([image.id]);
+              lastSelectedId.current = image.id;
+            }}
+            onPreviewImage={(image) => openPreviewById(image.id)}
+            tags={aiTags}
+            results={aiResults}
+            title={aiResultsTitle}
+            pipeline={aiPipeline}
+            workerStatus={aiStatus}
+            busy={aiBusy}
+          />
         ) : (
           <div className="browse-view">
             <FilterBar
@@ -708,12 +975,16 @@ export default function App() {
             image={detail}
             selectedCount={selectedCount}
             selectedRecords={selectedRecords}
+            imageTags={imageTags}
+            aiBusy={aiBusy}
             onRename={handleRename}
             onReveal={handleReveal}
             onCopyPaths={handleCopyPaths}
             onPreview={() => {
               if (primarySelectedId !== null) openPreviewById(primarySelectedId);
             }}
+            onTagImage={handleAiTagSelected}
+            onFindSimilar={() => void handleAiSimilar()}
           />
         </aside>
       )}
@@ -732,7 +1003,12 @@ export default function App() {
                 ? `${selectedRoot.path} · ${total.toLocaleString("zh-CN")} 张`
                 : `${roots.roots.length} 个目录`}
         </span>
-        <TaskStatus queue={queue} progress={selectedProgress} />
+        <TaskStatus
+          queue={queue}
+          progress={selectedProgress}
+          aiStatus={aiStatus}
+          aiPipeline={aiPipeline}
+        />
       </footer>
       {toast && (
         <button type="button" className="toast" onClick={() => setToast(null)}>
@@ -797,6 +1073,146 @@ interface FilterBarProps {
   setTakenTo: (value: string) => void;
   gpsFilter: GpsFilter;
   setGpsFilter: (value: GpsFilter) => void;
+}
+
+interface AiSearchViewProps {
+  query: string;
+  onQueryChange: (value: string) => void;
+  onSearch: () => Promise<void>;
+  onProcessPending: () => Promise<void>;
+  onRefresh: () => Promise<void>;
+  onSelectTag: (tag: AiTag) => Promise<void>;
+  onSelectImage: (image: ImageRecord) => void;
+  onPreviewImage: (image: ImageRecord) => void;
+  tags: AiTag[];
+  results: AiSearchResult[];
+  title: string;
+  pipeline: AiPipelineStatus | null;
+  workerStatus: AiWorkerStatus | null;
+  busy: boolean;
+}
+
+function AiSearchView({
+  query,
+  onQueryChange,
+  onSearch,
+  onProcessPending,
+  onRefresh,
+  onSelectTag,
+  onSelectImage,
+  onPreviewImage,
+  tags,
+  results,
+  title,
+  pipeline,
+  workerStatus,
+  busy,
+}: AiSearchViewProps) {
+  return (
+    <section className="ai-view">
+      <div className="ai-toolbar">
+        <label className="ai-search-box">
+          <Search aria-hidden="true" />
+          <input
+            value={query}
+            onChange={(event) => onQueryChange(event.target.value)}
+            onKeyDown={(event) => {
+              if (event.key === "Enter") {
+                event.preventDefault();
+                void onSearch();
+              }
+            }}
+            placeholder="输入自然语言，例如：海边日落、红色跑车、报错截图"
+          />
+        </label>
+        <button
+          type="button"
+          className="primary-action"
+          disabled={busy}
+          onClick={() => void onSearch()}
+        >
+          <Search aria-hidden="true" />
+          搜索
+        </button>
+        <button
+          type="button"
+          className="toolbar-button"
+          disabled={busy}
+          onClick={() => void onProcessPending()}
+        >
+          <Sparkles aria-hidden="true" />
+          处理待办
+        </button>
+        <button
+          type="button"
+          className="toolbar-button"
+          disabled={busy}
+          onClick={() => void onRefresh()}
+        >
+          <RefreshCw aria-hidden="true" />
+          刷新
+        </button>
+      </div>
+
+      <div className="ai-status-strip">
+        <span>Worker {aiStatusText(workerStatus?.status)}</span>
+        <span>
+          Embedding {pipeline?.embeddingPending ?? 0} 待处理 / {pipeline?.embeddingInflight ?? 0}{" "}
+          运行
+        </span>
+        <span>
+          标签 {pipeline?.taggingPending ?? 0} 待处理 / {pipeline?.taggingInflight ?? 0} 运行
+        </span>
+      </div>
+
+      <div className="ai-tag-cloud">
+        {tags.length === 0 ? (
+          <span className="muted">还没有标签</span>
+        ) : (
+          tags.map((tag) => (
+            <button
+              key={tag.id}
+              type="button"
+              className="tag-chip"
+              onClick={() => void onSelectTag(tag)}
+            >
+              #{tag.name}
+              <small>{tag.imageCount}</small>
+            </button>
+          ))
+        )}
+      </div>
+
+      <div className="ai-results-header">
+        <h1>{title}</h1>
+        <span>{results.length.toLocaleString("zh-CN")} 张</span>
+      </div>
+      {results.length === 0 ? (
+        <EmptyState
+          title="等待 AI 搜索"
+          body="先处理 embedding，再输入自然语言或点击标签查看结果。"
+        />
+      ) : (
+        <div className="ai-result-grid">
+          {results.map((result) => (
+            <div className="ai-result-item" key={`${result.source}:${result.image.id}`}>
+              <ImageCard
+                image={result.image}
+                selected={false}
+                selectionMode={false}
+                onClickImage={(image) => onSelectImage(image)}
+                onPreviewImage={onPreviewImage}
+                onOpenContextMenu={() => undefined}
+              />
+              <span className="ai-result-score">
+                {result.source} · {(result.score * 100).toFixed(0)}
+              </span>
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
+  );
 }
 
 function FilterBar(props: FilterBarProps) {
@@ -975,20 +1391,28 @@ interface DetailPaneProps {
   image: ImageRecord | null;
   selectedCount: number;
   selectedRecords: ImageRecord[];
+  imageTags: ImageTag[];
+  aiBusy: boolean;
   onRename: (filename: string) => Promise<void>;
   onReveal: () => Promise<void>;
   onCopyPaths: () => Promise<void>;
   onPreview: () => void;
+  onTagImage: () => Promise<void>;
+  onFindSimilar: () => void;
 }
 
 function DetailPane({
   image,
   selectedCount,
   selectedRecords,
+  imageTags,
+  aiBusy,
   onRename,
   onReveal,
   onCopyPaths,
   onPreview,
+  onTagImage,
+  onFindSimilar,
 }: DetailPaneProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -1109,9 +1533,34 @@ function DetailPane({
       <DetailRow label="缩略图" value={thumbStatusText(image.thumbStatus)} />
 
       <div className="section-label section-label--spaced">标签</div>
-      <p className="muted">MVP3 启用 AI / 用户标签。</p>
+      <div className="tag-row">
+        {imageTags.length > 0 ? (
+          imageTags.map((tag) => (
+            <span
+              key={`${tag.tagId}:${tag.source}`}
+              title={`${tag.score.toFixed(2)} · ${tag.source}`}
+            >
+              {tag.name}
+            </span>
+          ))
+        ) : (
+          <span className="tag-row__empty">暂无标签</span>
+        )}
+      </div>
+      <button
+        type="button"
+        className="primary-action"
+        disabled={aiBusy}
+        onClick={() => void onTagImage()}
+      >
+        <Tags aria-hidden="true" />
+        生成标签
+      </button>
       <div className="section-label section-label--spaced">相似</div>
-      <p className="muted">MVP3 启用以图搜图。</p>
+      <button type="button" className="primary-action" disabled={aiBusy} onClick={onFindSimilar}>
+        <Sparkles aria-hidden="true" />
+        查找相似
+      </button>
     </section>
   );
 }
@@ -1128,14 +1577,35 @@ function DetailRow({ label, value }: { label: string; value: string | null }) {
 
 function SettingsView({
   settings,
+  aiStatus,
+  aiDiagnostics,
+  aiPipeline,
+  aiBusy,
   onPatch,
+  onAiStart,
+  onAiStop,
+  onAiDiagnostics,
+  onAiProcessPending,
+  onAiDownloadModel,
 }: {
   settings: AppSettings | null;
+  aiStatus: AiWorkerStatus | null;
+  aiDiagnostics: AiDiagnostics | null;
+  aiPipeline: AiPipelineStatus | null;
+  aiBusy: boolean;
   onPatch: (patch: Partial<AppSettings>) => Promise<void>;
+  onAiStart: () => Promise<void>;
+  onAiStop: () => Promise<void>;
+  onAiDiagnostics: () => Promise<void>;
+  onAiProcessPending: () => Promise<void>;
+  onAiDownloadModel: (modelKey: string) => Promise<void>;
 }) {
   if (!settings) {
     return <EmptyState title="正在读取设置" body="配置文件位于应用本地数据目录。" />;
   }
+
+  const aiReady = aiStatus?.status === "ready";
+  const modelRows = aiDiagnostics ? Object.entries(aiDiagnostics.models) : [];
 
   return (
     <section className="settings-view">
@@ -1194,6 +1664,154 @@ function SettingsView({
             }
           />
         </label>
+        <label>
+          <span>启用 AI 后台任务</span>
+          <input
+            type="checkbox"
+            checked={settings.aiEnabled}
+            onChange={(event) => void onPatch({ aiEnabled: event.target.checked })}
+          />
+        </label>
+        <label>
+          <span>AI 闲置停止分钟</span>
+          <input
+            type="number"
+            min={1}
+            max={120}
+            value={settings.aiIdleStopMinutes}
+            onChange={(event) => void onPatch({ aiIdleStopMinutes: Number(event.target.value) })}
+          />
+        </label>
+        <label>
+          <span>CLIP 模型</span>
+          <select
+            value={settings.aiClipModel}
+            onChange={(event) => void onPatch({ aiClipModel: event.target.value })}
+          >
+            <option value="clip-vit-b-32">clip-vit-b-32</option>
+            <option value="siglip-so400m">siglip-so400m</option>
+          </select>
+        </label>
+        <label>
+          <span>标签模型</span>
+          <select
+            value={settings.aiTaggerModel}
+            onChange={(event) => void onPatch({ aiTaggerModel: event.target.value })}
+          >
+            <option value="ram-plus">ram-plus</option>
+          </select>
+        </label>
+        <div className="settings-panel settings-panel--wide">
+          <div className="settings-panel__header">
+            <div>
+              <span className="section-label">AI Worker</span>
+              <strong>{aiStatusText(aiStatus?.status)}</strong>
+            </div>
+            <div className="settings-panel__actions">
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={aiBusy || aiReady}
+                onClick={() => void onAiStart()}
+              >
+                <CirclePlay aria-hidden="true" />
+                启动
+              </button>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={aiBusy || !aiStatus || aiStatus.status === "stopped"}
+                onClick={() => void onAiStop()}
+              >
+                <CircleX aria-hidden="true" />
+                停止
+              </button>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={aiBusy}
+                onClick={() => void onAiDiagnostics()}
+              >
+                <RefreshCw aria-hidden="true" />
+                诊断
+              </button>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={aiBusy || !settings.aiEnabled}
+                onClick={() => void onAiProcessPending()}
+              >
+                <Sparkles aria-hidden="true" />
+                处理待办
+              </button>
+            </div>
+          </div>
+          <div className="ai-kv">
+            <span>设备</span>
+            <strong>{aiStatus?.device ?? aiDiagnostics?.device ?? "未知"}</strong>
+            <span>Compute</span>
+            <strong>{aiStatus?.compute ?? aiDiagnostics?.computeCapability ?? "未知"}</strong>
+            <span>PID / Port</span>
+            <strong>
+              {aiStatus?.pid ?? "-"} / {aiStatus?.port ?? "-"}
+            </strong>
+            <span>重启</span>
+            <strong>{aiStatus?.restartsLastMinute ?? 0}/min</strong>
+            <span>Embedding</span>
+            <strong>
+              {aiPipeline
+                ? `${aiPipeline.embeddingPending} 待处理 · ${aiPipeline.embeddingInflight} 运行`
+                : "未知"}
+            </strong>
+            <span>标签</span>
+            <strong>
+              {aiPipeline
+                ? `${aiPipeline.taggingPending} 待处理 · ${aiPipeline.taggingInflight} 运行`
+                : "未知"}
+            </strong>
+            <span>Worker</span>
+            <strong title={aiStatus?.workerDir}>{aiStatus?.workerDir ?? "未初始化"}</strong>
+            <span>Models</span>
+            <strong title={aiStatus?.modelsDir}>{aiStatus?.modelsDir ?? "未初始化"}</strong>
+            {aiDiagnostics && (
+              <>
+                <span>CUDA</span>
+                <strong>
+                  {aiDiagnostics.cudaAvailable
+                    ? `${aiDiagnostics.cudaVersion ?? "CUDA"} · ${aiDiagnostics.deviceName ?? "GPU"}`
+                    : "不可用"}
+                </strong>
+                <span>VRAM</span>
+                <strong>
+                  {aiDiagnostics.vramFreeGb !== null && aiDiagnostics.vramTotalGb !== null
+                    ? `${aiDiagnostics.vramFreeGb} / ${aiDiagnostics.vramTotalGb} GB`
+                    : "未知"}
+                </strong>
+              </>
+            )}
+          </div>
+          {aiStatus?.lastError && <p className="settings-error">{aiStatus.lastError}</p>}
+          {aiDiagnostics?.warnings?.map((warning) => (
+            <p className="settings-warning" key={warning}>
+              {warning}
+            </p>
+          ))}
+          {modelRows.length > 0 && (
+            <div className="model-list">
+              {modelRows.map(([key, model]) => (
+                <button
+                  key={key}
+                  type="button"
+                  className="model-chip"
+                  disabled={aiBusy || Boolean(model.downloaded)}
+                  onClick={() => void onAiDownloadModel(key)}
+                >
+                  {key} · {model.downloaded ? "已下载" : "下载"} · {model.sizeMb ?? "-"} MB
+                </button>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     </section>
   );
@@ -1226,9 +1844,13 @@ function EmptyState({
 const TaskStatus = memo(function TaskStatus({
   queue,
   progress,
+  aiStatus,
+  aiPipeline,
 }: {
   queue: QueueStatus | null;
   progress?: ScanProgress;
+  aiStatus: AiWorkerStatus | null;
+  aiPipeline: AiPipelineStatus | null;
 }) {
   const progressText = progress
     ? `扫描 ${progress.processed.toLocaleString("zh-CN")}/${progress.total.toLocaleString("zh-CN")}`
@@ -1236,9 +1858,13 @@ const TaskStatus = memo(function TaskStatus({
   const queueText = queue
     ? `缩略图队列 ${queue.p0} · 运行 ${queue.running}${queue.paused ? " · 已暂停" : ""}`
     : "队列状态未知";
+  const aiText = `AI ${aiStatusText(aiStatus?.status)}`;
+  const aiQueueText = aiPipeline
+    ? `CLIP ${aiPipeline.embeddingPending} · 标签 ${aiPipeline.taggingPending}`
+    : "AI 队列未知";
   return (
     <span>
-      {progressText} · {queueText}
+      {progressText} · {queueText} · {aiText} · {aiQueueText}
     </span>
   );
 });
@@ -1296,6 +1922,15 @@ function thumbStatusText(status: string): string {
   if (status === "failed") return "缩略图失败";
   if (status === "unsupported") return "格式暂不支持";
   return "生成中";
+}
+
+function aiStatusText(status: string | null | undefined): string {
+  if (status === "ready") return "运行中";
+  if (status === "starting") return "启动中";
+  if (status === "stopping") return "停止中";
+  if (status === "degraded") return "降级";
+  if (status === "stopped") return "已停止";
+  return "未知";
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {

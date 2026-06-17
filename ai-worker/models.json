@@ -1,0 +1,15 @@
+{
+  "clip-vit-b-32": {
+    "hf_repo": "timm/vit_base_patch32_clip_224.openai",
+    "format": "open_clip",
+    "size_mb": 580
+  },
+  "ram-plus": {
+    "hf_repo": "xinyu1205/recognize-anything-plus-model",
+    "size_mb": 1200
+  },
+  "siglip-so400m": {
+    "hf_repo": "google/siglip-so400m-patch14-384",
+    "size_mb": 3700
+  }
+}

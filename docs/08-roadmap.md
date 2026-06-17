@@ -55,7 +55,22 @@
 - [ ] T14 端到端验收：macOS 上跑完单测 + 集成测试，Windows 实机回收站撤销路径需用户验收
 
 ### M3 MVP3（详见 `docs/05` § 2）
-- [ ] T1-T16 共 16 个任务
+- [x] T1 migration 0003（tag_status / embedding_status + tags / image_tags）
+- [x] T2 AI Worker 脚手架（FastAPI `/health`、`/ready`、`/diagnostics`、`/shutdown`；`uv.lock` 已生成）
+- [x] T3 进程托管底座（Rust supervisor 按需启动 / 停止 / 状态事件 / 健康检查 / 3 次每分钟重启上限）
+- [x] T4 CUDA / 模型可用性自检（RTX 5070 + CUDA 12.8 + torch 2.11.0+cu128 已确认）
+- [x] T5 模型下载管理（worker `/models/status` / `/models/download` / `/models/cancel` + 设置页下载入口）
+- [x] T6 CLIP 图片向量化（open_clip ViT-B-32，CUDA 可用时 GPU；无模型依赖时 fallback）
+- [x] T7 LanceDB 写入与查询（`lancedb` Rust crate，集成测试覆盖 upsert / get / top_k）
+- [x] T8 主进程拉取流水线（P5 标签 / P6 embedding 后台队列，尊重 AI 开关）
+- [x] T9 自然语言搜图（CLIP text embedding + LanceDB top-k + SQLite join）
+- [x] T10 以图搜图（复用图片 embedding，缺失时临时 embed）
+- [x] T11 自动标签（CLIP zero-shot + 视觉 fallback；RAM++ 权重下载入口保留）
+- [x] T12 标签筛选与标签云（左侧标签、AI 面板标签云）
+- [x] T13 搜索 DSL 子集（`#tag`、`format:jpg`、`size:>5MB` / `size:<20MB`）
+- [x] T14 AI 状态面板（Worker、CUDA、队列、模型状态）
+- [x] T15 AI Worker 容错（超时、健康检查、重启上限、degraded 状态）
+- [ ] T16 大样本端到端验收待用户用真实图库手动验证（当前 smoke 见 `tests/ai_bench.md`）
 
 ### M4 MVP4（详见 `docs/06` § 2）
 - [ ] T1-T13 共 13 个任务

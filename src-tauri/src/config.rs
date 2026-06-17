@@ -40,6 +40,8 @@ pub struct AppPaths {
     pub data_dir: PathBuf,
     pub db_path: PathBuf,
     pub thumbs_dir: PathBuf,
+    pub vectors_dir: PathBuf,
+    pub models_dir: PathBuf,
     pub config_path: PathBuf,
 }
 
@@ -48,6 +50,8 @@ impl AppPaths {
         Self {
             db_path: data_dir.join("db").join("app.sqlite"),
             thumbs_dir: data_dir.join("thumbs"),
+            vectors_dir: data_dir.join("vectors"),
+            models_dir: data_dir.join("models"),
             config_path: data_dir.join("config.json"),
             data_dir,
         }
@@ -62,6 +66,10 @@ pub struct AppSettings {
     pub thumb_cache_gb: u32,
     pub local_scan_concurrency: u8,
     pub network_scan_concurrency: u8,
+    pub ai_enabled: bool,
+    pub ai_idle_stop_minutes: u16,
+    pub ai_clip_model: String,
+    pub ai_tagger_model: String,
 }
 
 impl Default for AppSettings {
@@ -72,6 +80,10 @@ impl Default for AppSettings {
             thumb_cache_gb: 5,
             local_scan_concurrency: 16,
             network_scan_concurrency: 4,
+            ai_enabled: true,
+            ai_idle_stop_minutes: 10,
+            ai_clip_model: "clip-vit-b-32".to_string(),
+            ai_tagger_model: "ram-plus".to_string(),
         }
     }
 }
@@ -84,6 +96,10 @@ pub struct AppSettingsPatch {
     pub thumb_cache_gb: Option<u32>,
     pub local_scan_concurrency: Option<u8>,
     pub network_scan_concurrency: Option<u8>,
+    pub ai_enabled: Option<bool>,
+    pub ai_idle_stop_minutes: Option<u16>,
+    pub ai_clip_model: Option<String>,
+    pub ai_tagger_model: Option<String>,
 }
 
 impl AppSettings {
@@ -103,5 +119,26 @@ impl AppSettings {
         if let Some(network_scan_concurrency) = patch.network_scan_concurrency {
             self.network_scan_concurrency = network_scan_concurrency.clamp(1, 4);
         }
+        if let Some(ai_enabled) = patch.ai_enabled {
+            self.ai_enabled = ai_enabled;
+        }
+        if let Some(ai_idle_stop_minutes) = patch.ai_idle_stop_minutes {
+            self.ai_idle_stop_minutes = ai_idle_stop_minutes.clamp(1, 120);
+        }
+        if let Some(ai_clip_model) = patch.ai_clip_model {
+            self.ai_clip_model = sanitize_model_key(ai_clip_model, "clip-vit-b-32");
+        }
+        if let Some(ai_tagger_model) = patch.ai_tagger_model {
+            self.ai_tagger_model = sanitize_model_key(ai_tagger_model, "ram-plus");
+        }
+    }
+}
+
+fn sanitize_model_key(value: String, fallback: &str) -> String {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        fallback.to_string()
+    } else {
+        trimmed.to_string()
     }
 }

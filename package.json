@@ -17,7 +17,10 @@
     "tauri:test": "cross-env PVP_PROFILE=test tauri dev --config src-tauri/tauri.test.json",
     "tauri:prod": "cross-env PVP_PROFILE=prod tauri dev --config src-tauri/tauri.prod.json",
     "tauri:build:dev": "cross-env PVP_PROFILE=dev tauri build --config src-tauri/tauri.dev.json",
-    "tauri:build:prod": "cross-env PVP_PROFILE=prod tauri build --config src-tauri/tauri.prod.json"
+    "tauri:build:prod": "cross-env PVP_PROFILE=prod tauri build --config src-tauri/tauri.prod.json",
+    "ai:dev": "cd ai-worker && uv run python -m src.main --host 127.0.0.1 --port 0",
+    "ai:check": "cd ai-worker && uv run python scripts/check_runtime.py",
+    "ai:download": "cd ai-worker && uv run --extra models python scripts/download_models.py"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",

@@ -10,3 +10,8 @@ registry = "sparse+https://mirrors.tuna.tsinghua.edu.cn/crates.io-index/"
 
 [net]
 git-fetch-with-cli = true
+
+[build]
+# LanceDB / DataFusion / Tauri 在 Windows debug test 编译时峰值内存很高。
+# 默认单任务编译，避免 `cargo test` 偶发 rustc OOM；需要提速时可临时 `cargo test -j 2`。
+jobs = 1

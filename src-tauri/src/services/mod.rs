@@ -1,3 +1,6 @@
+pub mod ai_client;
+pub mod ai_pipeline;
+pub mod ai_supervisor;
 pub mod dedup_service;
 pub mod hash_service;
 pub mod phash_service;

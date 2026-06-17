@@ -44,6 +44,8 @@ pub fn run() {
             let paths = config::AppPaths::from_data_dir(data_dir);
             std::fs::create_dir_all(&paths.data_dir)?;
             std::fs::create_dir_all(&paths.thumbs_dir)?;
+            std::fs::create_dir_all(&paths.vectors_dir)?;
+            std::fs::create_dir_all(&paths.models_dir)?;
 
             tracing::info!(path = ?paths.db_path, "opening database");
             let pool =
@@ -80,6 +82,21 @@ pub fn run() {
             }
             let dedup_coord = Arc::new(DedupCoordinator::new());
 
+            // MVP3 AI worker supervisor：按需启动 Python 子进程，后台 monitor 只负责已启动后的健康检查。
+            let ai_worker_dir = resolve_ai_worker_dir();
+            let ai_supervisor = Arc::new(
+                services::ai_supervisor::AiSupervisor::new(ai_worker_dir, paths.models_dir.clone())
+                    .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+            );
+            ai_supervisor.clone().spawn_monitor(app.handle().clone());
+            let ai_pipeline = Arc::new(services::ai_pipeline::AiPipeline::new(
+                pool.clone(),
+                scheduler.clone(),
+                ai_supervisor.clone(),
+                &paths,
+            ));
+            ai_pipeline.clone().spawn_loop(app.handle().clone());
+
             // 重排上次未完成的缩略图：扫描中断会留下 thumb_status='pending' 的图，
             // 而重复扫描不会再触碰未改动文件，必须在这里主动恢复，否则它们永远停在"生成中"。
             match services::thumbnail_service::requeue_pending_thumbnails(
@@ -99,6 +116,8 @@ pub fn run() {
             app.manage(scheduler);
             app.manage(dhash_index);
             app.manage(dedup_coord);
+            app.manage(ai_supervisor);
+            app.manage(ai_pipeline);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -130,9 +149,32 @@ pub fn run() {
             commands::dedup::dedup_export_csv,
             commands::trash::trash_history,
             commands::trash::trash_undo,
+            commands::ai::ai_worker_start,
+            commands::ai::ai_worker_stop,
+            commands::ai::ai_worker_status,
+            commands::ai::ai_worker_diagnostics,
+            commands::ai::ai_models_status,
+            commands::ai::ai_model_download,
+            commands::ai::ai_search,
+            commands::ai::ai_search_by_image,
+            commands::ai::ai_tag_image,
+            commands::ai::ai_pipeline_status,
+            commands::ai::ai_process_pending,
+            commands::ai::ai_tags_list,
+            commands::ai::ai_image_tags,
+            commands::ai::ai_images_by_tag,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| eprintln!("error while running tauri application: {error}"));
+}
+
+fn resolve_ai_worker_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("PVP_AI_WORKER_DIR") {
+        return PathBuf::from(dir);
+    }
+    std::env::current_dir()
+        .unwrap_or_else(|_| PathBuf::from("."))
+        .join("ai-worker")
 }
 
 fn set_profile_window_title(app: &tauri::AppHandle<tauri::Wry>, profile: config::Profile) {

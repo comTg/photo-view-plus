@@ -1,0 +1,42 @@
+[project]
+name = "photo-view-plus-ai-worker"
+version = "0.0.1"
+description = "Local AI worker for PhotoView+"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "fastapi>=0.115.0",
+    "uvicorn[standard]>=0.30.0",
+    "pydantic>=2.8.0",
+    "pillow>=10.4.0",
+    "huggingface_hub>=0.24.0",
+]
+
+[project.optional-dependencies]
+cuda = [
+    "torch>=2.6.0",
+    "torchvision>=0.21.0",
+    "onnxruntime-gpu>=1.20.0",
+    "open_clip_torch>=2.26.0",
+]
+models = [
+    "huggingface_hub>=0.24.0",
+]
+
+[dependency-groups]
+dev = []
+
+[tool.uv.sources]
+torch = { index = "pytorch-cu128" }
+torchvision = { index = "pytorch-cu128" }
+
+[[tool.uv.index]]
+name = "pytorch-cu128"
+url = "https://download.pytorch.org/whl/cu128"
+explicit = true
+
+[tool.hatch.build.targets.wheel]
+packages = ["src"]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"

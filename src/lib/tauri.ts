@@ -1,6 +1,12 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AddRootArgs,
+  AiDiagnostics,
+  AiPipelineStatus,
+  AiSearchArgs,
+  AiSearchResult,
+  AiTag,
+  AiWorkerStatus,
   AppSettings,
   AppSettingsPatch,
   DbStatus,
@@ -18,6 +24,7 @@ import type {
   ImagePage,
   ImageQueryParams,
   ImageRecord,
+  ImageTag,
   QueueStatus,
   RemoveResult,
   RenameImageArgs,
@@ -116,6 +123,67 @@ export async function settingsGet(): Promise<AppSettings> {
 
 export async function settingsUpdate(patch: AppSettingsPatch): Promise<AppSettings> {
   return invoke<AppSettings>("settings_update", { patch });
+}
+
+// AI Worker
+export async function aiWorkerStart(): Promise<AiWorkerStatus> {
+  return invoke<AiWorkerStatus>("ai_worker_start");
+}
+
+export async function aiWorkerStop(): Promise<AiWorkerStatus> {
+  return invoke<AiWorkerStatus>("ai_worker_stop");
+}
+
+export async function aiWorkerStatus(): Promise<AiWorkerStatus> {
+  return invoke<AiWorkerStatus>("ai_worker_status");
+}
+
+export async function aiWorkerDiagnostics(): Promise<AiDiagnostics> {
+  return invoke<AiDiagnostics>("ai_worker_diagnostics");
+}
+
+export async function aiModelsStatus(): Promise<unknown> {
+  return invoke<unknown>("ai_models_status");
+}
+
+export async function aiModelDownload(modelKey: string): Promise<unknown> {
+  return invoke<unknown>("ai_model_download", { modelKey });
+}
+
+export async function aiSearch(args: AiSearchArgs): Promise<AiSearchResult[]> {
+  return invoke<AiSearchResult[]>("ai_search", { args });
+}
+
+export async function aiSearchByImage(imageId: number, limit?: number): Promise<AiSearchResult[]> {
+  return invoke<AiSearchResult[]>("ai_search_by_image", { imageId, limit });
+}
+
+export async function aiTagImage(imageId: number): Promise<ImageTag[]> {
+  return invoke<ImageTag[]>("ai_tag_image", { imageId });
+}
+
+export async function aiPipelineStatus(): Promise<AiPipelineStatus> {
+  return invoke<AiPipelineStatus>("ai_pipeline_status");
+}
+
+export async function aiProcessPending(): Promise<void> {
+  return invoke<void>("ai_process_pending");
+}
+
+export async function aiTagsList(limit?: number): Promise<AiTag[]> {
+  return invoke<AiTag[]>("ai_tags_list", { limit });
+}
+
+export async function aiImageTags(imageId: number): Promise<ImageTag[]> {
+  return invoke<ImageTag[]>("ai_image_tags", { imageId });
+}
+
+export async function aiImagesByTag(
+  tagId: number,
+  offset?: number,
+  limit?: number,
+): Promise<ImagePage> {
+  return invoke<ImagePage>("ai_images_by_tag", { tagId, offset, limit });
 }
 
 // Dedup

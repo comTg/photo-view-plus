@@ -1,3 +1,4 @@
+pub mod ai;
 pub mod dedup;
 pub mod images;
 pub mod roots;

@@ -5,6 +5,7 @@
 //! 4. 外键约束生效：删除 root 级联删 images
 //! 5. WAL 模式与 PRAGMA 生效
 
+use photo_view_plus_lib::repo::tags_repo::{self, NewTagScore};
 use photo_view_plus_lib::*;
 use rusqlite::params;
 use tempfile::TempDir;
@@ -56,9 +57,83 @@ fn test_003_current_version_after_init() {
     let conn = pool.get().unwrap();
     let version = migrations::current_version(&conn).unwrap();
     assert!(
-        version >= 2,
-        "expected version >= 2 after MVP2, got {version}"
+        version >= 3,
+        "expected version >= 3 after MVP3 schema, got {version}"
     );
+}
+
+#[test]
+fn test_007_mvp3_tags_schema_and_repo_roundtrip() {
+    let (pool, _dir) = fresh();
+    let mut conn = pool.get().unwrap();
+
+    for table in ["tags", "image_tags"] {
+        assert!(
+            db::table_exists(&conn, table).unwrap(),
+            "table {table} should exist after 0003"
+        );
+    }
+
+    conn.execute(
+        "INSERT INTO roots(path, type, created_at) VALUES (?1, 'local', 0)",
+        params!["/tmp/ai-tags"],
+    )
+    .unwrap();
+    let root_id: i64 = conn.last_insert_rowid();
+
+    conn.execute(
+        "INSERT INTO images(root_id, rel_path, filename, extension, size_bytes, mtime, indexed_at)
+         VALUES (?1, 'sunset.jpg', 'sunset.jpg', 'jpg', 100, 0, 0)",
+        params![root_id],
+    )
+    .unwrap();
+    let image_id = conn.last_insert_rowid();
+
+    let tag_status: String = conn
+        .query_row(
+            "SELECT tag_status FROM images WHERE id = ?1",
+            [image_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    let embedding_status: String = conn
+        .query_row(
+            "SELECT embedding_status FROM images WHERE id = ?1",
+            [image_id],
+            |r| r.get(0),
+        )
+        .unwrap();
+    assert_eq!(tag_status, "pending");
+    assert_eq!(embedding_status, "pending");
+
+    let tags = tags_repo::replace_image_tags(
+        &mut conn,
+        image_id,
+        &[
+            NewTagScore {
+                name: "sunset".to_string(),
+                score: 0.93,
+                source: "ai".to_string(),
+                category: Some("scene".to_string()),
+            },
+            NewTagScore {
+                name: "sea".to_string(),
+                score: 0.84,
+                source: "ai".to_string(),
+                category: Some("scene".to_string()),
+            },
+        ],
+        10,
+    )
+    .unwrap();
+    assert_eq!(tags.len(), 2);
+
+    let fetched = tags_repo::tags_for_image(&conn, image_id).unwrap();
+    assert_eq!(fetched.len(), 2);
+    assert_eq!(fetched[0].name, "sunset");
+
+    let cloud = tags_repo::list_tags(&conn, 10).unwrap();
+    assert_eq!(cloud.len(), 2);
 }
 
 #[test]

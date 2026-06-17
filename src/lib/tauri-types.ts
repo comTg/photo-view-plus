@@ -67,6 +67,12 @@ export interface ImageRecord {
   deletedAt: number | null;
   rootPath: string;
   fullPath: string;
+  blake3: string | null;
+  phash: number | null;
+  dhash: number | null;
+  hashStatus: string;
+  tagStatus: string;
+  embeddingStatus: string;
 }
 
 export interface ImagePage {
@@ -166,6 +172,10 @@ export interface AppSettings {
   thumbCacheGb: number;
   localScanConcurrency: number;
   networkScanConcurrency: number;
+  aiEnabled: boolean;
+  aiIdleStopMinutes: number;
+  aiClipModel: string;
+  aiTaggerModel: string;
 }
 
 export interface AppSettingsPatch {
@@ -174,6 +184,85 @@ export interface AppSettingsPatch {
   thumbCacheGb?: number;
   localScanConcurrency?: number;
   networkScanConcurrency?: number;
+  aiEnabled?: boolean;
+  aiIdleStopMinutes?: number;
+  aiClipModel?: string;
+  aiTaggerModel?: string;
+}
+
+// ===== MVP3 AI worker =====
+
+export type AiWorkerLifecycle = "stopped" | "starting" | "ready" | "stopping" | "degraded" | string;
+
+export interface AiWorkerStatus {
+  status: AiWorkerLifecycle;
+  device: string | null;
+  compute: string | null;
+  pid: number | null;
+  port: number | null;
+  lastError: string | null;
+  restartsLastMinute: number;
+  workerDir: string;
+  modelsDir: string;
+}
+
+export interface AiModelDiagnostics {
+  downloaded?: boolean;
+  sizeMb?: number;
+  loaded?: boolean;
+  [key: string]: unknown;
+}
+
+export interface AiDiagnostics {
+  torchVersion: string | null;
+  cudaAvailable: boolean;
+  cudaVersion: string | null;
+  deviceName: string | null;
+  computeCapability: string | null;
+  vramTotalGb: number | null;
+  vramFreeGb: number | null;
+  device: string;
+  models: Record<string, AiModelDiagnostics>;
+  warnings?: string[];
+  packages?: Record<string, string | null>;
+  [key: string]: unknown;
+}
+
+export interface AiPipelineStatus {
+  embeddingPending: number;
+  taggingPending: number;
+  embeddingInflight: number;
+  taggingInflight: number;
+}
+
+export interface AiSearchArgs {
+  text: string;
+  rootIds?: number[];
+  limit?: number;
+}
+
+export interface AiSearchResult {
+  image: ImageRecord;
+  score: number;
+  source: string;
+}
+
+export interface AiTag {
+  id: number;
+  name: string;
+  source: string;
+  category: string | null;
+  createdAt: number;
+  imageCount: number;
+}
+
+export interface ImageTag {
+  imageId: number;
+  tagId: number;
+  name: string;
+  score: number;
+  source: string;
+  category: string | null;
 }
 
 // ===== MVP2 去重 =====

@@ -17,6 +17,9 @@ pub enum AppError {
     #[error("join: {0}")]
     Join(#[from] tokio::task::JoinError),
 
+    #[error("http: {0}")]
+    Http(#[from] reqwest::Error),
+
     #[error("migration {version} failed: {source}")]
     Migration {
         version: u32,
