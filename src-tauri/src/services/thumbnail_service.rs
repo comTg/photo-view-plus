@@ -133,8 +133,7 @@ pub fn requeue_pending_thumbnails(
 
     let mut count = 0usize;
     for img in pending {
-        let is_network =
-            crate::utils::path_normalize::is_network_path(Path::new(&img.root_path));
+        let is_network = crate::utils::path_normalize::is_network_path(Path::new(&img.root_path));
         scheduler.enqueue(ThumbnailTask::new(
             pool.clone(),
             img.id,

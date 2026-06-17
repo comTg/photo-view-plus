@@ -103,6 +103,10 @@ export function thumbUrl(imageId: number, size = 256): string {
   return `http://thumb.localhost/${imageId}?size=${size}`;
 }
 
+export function originalUrl(imageId: number): string {
+  return `http://original.localhost/${imageId}`;
+}
+
 // Settings
 export async function settingsGet(): Promise<AppSettings> {
   return invoke<AppSettings>("settings_get");

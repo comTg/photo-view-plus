@@ -1642,72 +1642,7 @@ body {
   color: var(--muted);
 }
 
-.dedup-split {
-  display: grid;
-  grid-template-columns: 280px minmax(0, 1fr);
-  gap: 12px;
-  flex: 1;
-  min-height: 0;
-  overflow: hidden;
-}
-
-.dedup-group-list {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  overflow-y: auto;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px;
-  background: var(--surface);
-}
-
-.dedup-group-list--empty {
-  align-items: center;
-  justify-content: center;
-  padding: 24px;
-  color: var(--muted);
-  font-size: 13px;
-  text-align: center;
-}
-
-.dedup-group-item {
-  display: grid;
-  grid-template-columns: 1fr auto;
-  grid-template-areas:
-    "method status"
-    "meta meta";
-  align-items: center;
-  gap: 4px;
-  padding: 8px 10px;
-  background: var(--surface-2, var(--surface));
-  border: 1px solid var(--border);
-  border-radius: 6px;
-  cursor: pointer;
-  text-align: left;
-  color: inherit;
-  font: inherit;
-}
-
-.dedup-group-item--active {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 12%, transparent);
-}
-
-.dedup-group-method {
-  grid-area: method;
-  font-weight: 600;
-  font-size: 13px;
-}
-
-.dedup-group-meta {
-  grid-area: meta;
-  font-size: 11px;
-  color: var(--muted);
-}
-
 .dedup-group-status {
-  grid-area: status;
   font-size: 11px;
   padding: 2px 6px;
   border-radius: 4px;
@@ -1728,98 +1663,223 @@ body {
   text-decoration: line-through;
 }
 
-.dedup-compare {
-  display: flex;
-  flex-direction: column;
-  gap: 12px;
-  overflow-y: auto;
+.dedup-list-shell {
+  flex: 1;
+  min-height: 0;
   border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 12px;
   background: var(--surface);
-}
-
-.dedup-compare--empty {
-  align-items: center;
-  justify-content: center;
-  color: var(--muted);
-  font-size: 14px;
-}
-
-.dedup-compare-grid {
-  display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(220px, 1fr));
-  gap: 12px;
-}
-
-.dedup-item {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  padding: 8px;
-  background: var(--surface-2, var(--surface));
-  border: 2px solid var(--border);
-  border-radius: 6px;
-  cursor: pointer;
-  text-align: left;
-  color: inherit;
-  font: inherit;
-}
-
-.dedup-item--keep {
-  border-color: var(--accent);
-  background: color-mix(in srgb, var(--accent) 8%, transparent);
-}
-
-.dedup-item-thumb {
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  width: 100%;
-  aspect-ratio: 1 / 1;
-  background: rgba(0, 0, 0, 0.05);
-  border-radius: 4px;
   overflow: hidden;
 }
 
-.dedup-item-thumb img {
+.dedup-list-shell--empty {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 24px;
+  color: var(--muted);
+  font-size: 13px;
+  text-align: center;
+}
+
+.dedup-virtual-list {
+  height: 100%;
+}
+
+.dedup-group-row {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  margin: 8px;
+  padding: 10px;
+  background: var(--surface-2, var(--surface));
+  border: 1px solid var(--border);
+  border-radius: 8px;
+}
+
+.dedup-row-header {
+  display: grid;
+  grid-template-columns: minmax(150px, 1fr) auto auto;
+  gap: 10px;
+  align-items: center;
+}
+
+.dedup-row-title {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  min-width: 0;
+}
+
+.dedup-row-title strong {
+  font-size: 14px;
+}
+
+.dedup-row-title span {
+  font-size: 12px;
+  color: var(--muted);
+}
+
+.dedup-row-actions {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 6px;
+  flex-wrap: wrap;
+}
+
+.dedup-action-button {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+  white-space: nowrap;
+}
+
+.dedup-action-button svg {
+  width: 14px;
+  height: 14px;
+}
+
+.dedup-row-state {
+  padding: 10px 12px;
+  color: var(--muted);
+  font-size: 12px;
+  border-top: 1px solid var(--border);
+}
+
+.dedup-row-state--error {
+  color: #d92d20;
+}
+
+.dedup-image-list {
+  display: flex;
+  flex-direction: column;
+  border-top: 1px solid var(--border);
+}
+
+.dedup-image-row {
+  display: grid;
+  grid-template-columns: 28px 86px minmax(180px, 1fr) minmax(180px, 0.72fr);
+  gap: 10px;
+  align-items: center;
+  min-height: 76px;
+  padding: 8px 2px;
+  border: 0;
+  border-bottom: 1px solid var(--border);
+  background: transparent;
+  color: inherit;
+  cursor: pointer;
+  font: inherit;
+  text-align: left;
+}
+
+.dedup-image-row:last-child {
+  border-bottom: 0;
+}
+
+.dedup-image-row--keep {
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+
+.dedup-image-keep {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  color: var(--muted);
+}
+
+.dedup-image-row--keep .dedup-image-keep {
+  color: var(--accent);
+}
+
+.dedup-image-keep svg {
+  width: 18px;
+  height: 18px;
+}
+
+.dedup-image-thumb {
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 86px;
+  height: 64px;
+  background: rgba(0, 0, 0, 0.05);
+  border-radius: 4px;
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 11px;
+}
+
+.dedup-image-thumb img {
   width: 100%;
   height: 100%;
   object-fit: contain;
 }
 
-.dedup-item-meta {
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: 12px;
+.dedup-image-main,
+.dedup-image-stats {
+  min-width: 0;
 }
 
-.dedup-item-path {
-  color: var(--muted);
+.dedup-image-main {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.dedup-image-main strong,
+.dedup-image-main span {
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.dedup-item-keep-flag {
-  margin-top: 4px;
-  font-size: 11px;
+.dedup-image-main strong {
+  font-size: 13px;
+}
+
+.dedup-image-main span,
+.dedup-image-stats {
   color: var(--muted);
+  font-size: 12px;
 }
 
-.dedup-item-keep-flag--on {
-  color: var(--accent);
-  font-weight: 600;
+.dedup-image-stats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 3px 10px;
 }
 
-.dedup-actions {
-  display: flex;
-  gap: 8px;
-  position: sticky;
-  bottom: 0;
-  padding-top: 8px;
-  background: var(--surface);
+.dedup-list-footer {
+  padding: 10px;
+  text-align: center;
+  color: var(--muted);
+  font-size: 12px;
+}
+
+@media (max-width: 980px) {
+  .dedup-row-header {
+    grid-template-columns: minmax(0, 1fr) auto;
+  }
+
+  .dedup-row-actions {
+    grid-column: 1 / -1;
+    justify-content: flex-start;
+  }
+
+  .dedup-image-row {
+    grid-template-columns: 28px 72px minmax(0, 1fr);
+  }
+
+  .dedup-image-thumb {
+    width: 72px;
+    height: 54px;
+  }
+
+  .dedup-image-stats {
+    grid-column: 3;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 
 .dedup-error {

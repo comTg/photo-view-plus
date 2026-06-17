@@ -179,16 +179,19 @@ export function useDedup(): UseDedup {
     onDone,
   );
 
-  const start = useCallback(async (method: DedupMethod, threshold?: number) => {
-    try {
-      const result = await dedupStart({ method, threshold });
-      setStatus(result.status);
-      await reloadGroups();
-    } catch (e) {
-      setError(String(e));
-      throw e;
-    }
-  }, [reloadGroups]);
+  const start = useCallback(
+    async (method: DedupMethod, threshold?: number) => {
+      try {
+        const result = await dedupStart({ method, threshold });
+        setStatus(result.status);
+        await reloadGroups();
+      } catch (e) {
+        setError(String(e));
+        throw e;
+      }
+    },
+    [reloadGroups],
+  );
 
   const resolve = useCallback(
     async (args: DedupResolveArgs) => {

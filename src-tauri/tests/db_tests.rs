@@ -55,7 +55,10 @@ fn test_003_current_version_after_init() {
     let (pool, _dir) = fresh();
     let conn = pool.get().unwrap();
     let version = migrations::current_version(&conn).unwrap();
-    assert!(version >= 2, "expected version >= 2 after MVP2, got {version}");
+    assert!(
+        version >= 2,
+        "expected version >= 2 after MVP2, got {version}"
+    );
 }
 
 #[test]

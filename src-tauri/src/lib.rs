@@ -32,6 +32,7 @@ pub fn run() {
 
     tauri::Builder::default()
         .register_uri_scheme_protocol("thumb", thumb_protocol)
+        .register_asynchronous_uri_scheme_protocol("original", original_protocol)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
@@ -135,18 +136,7 @@ fn thumb_protocol(
     ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
     request: http::Request<Vec<u8>>,
 ) -> http::Response<Vec<u8>> {
-    let image_id = request
-        .uri()
-        .path()
-        .trim_matches('/')
-        .parse::<i64>()
-        .ok()
-        .or_else(|| {
-            request
-                .uri()
-                .host()
-                .and_then(|host| host.parse::<i64>().ok())
-        });
+    let image_id = image_id_from_request(&request);
 
     let Some(image_id) = image_id else {
         return text_response(http::StatusCode::BAD_REQUEST, "invalid thumbnail image id");
@@ -176,6 +166,106 @@ fn thumb_protocol(
             .body(bytes)
             .unwrap_or_else(|_| http::Response::new(Vec::new())),
         Err(_) => text_response(http::StatusCode::NOT_FOUND, "thumbnail file missing"),
+    }
+}
+
+fn original_protocol(
+    ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
+    request: http::Request<Vec<u8>>,
+    responder: tauri::UriSchemeResponder,
+) {
+    let image_id = image_id_from_request(&request);
+    let method = request.method().clone();
+    let app = ctx.app_handle().clone();
+
+    std::thread::spawn(move || {
+        let response = if method != http::Method::GET && method != http::Method::HEAD {
+            text_response(
+                http::StatusCode::METHOD_NOT_ALLOWED,
+                "original protocol only supports GET and HEAD",
+            )
+        } else if let Some(image_id) = image_id {
+            original_response(&app, image_id, method != http::Method::HEAD)
+        } else {
+            text_response(http::StatusCode::BAD_REQUEST, "invalid original image id")
+        };
+        responder.respond(response);
+    });
+}
+
+fn original_response(
+    app: &tauri::AppHandle<tauri::Wry>,
+    image_id: i64,
+    include_body: bool,
+) -> http::Response<Vec<u8>> {
+    let pool = app.state::<db::Pool>();
+    let conn = match pool.get() {
+        Ok(conn) => conn,
+        Err(error) => {
+            return text_response(http::StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+        }
+    };
+    let detail = match repo::images_repo::get_detail(&conn, image_id) {
+        Ok(Some(detail)) if detail.deleted_at.is_none() => detail,
+        Ok(_) => return text_response(http::StatusCode::NOT_FOUND, "image is not available"),
+        Err(error) => {
+            return text_response(http::StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
+        }
+    };
+    let path = PathBuf::from(&detail.full_path);
+    let metadata = match std::fs::metadata(&path) {
+        Ok(metadata) if metadata.is_file() => metadata,
+        Ok(_) => return text_response(http::StatusCode::NOT_FOUND, "image path is not a file"),
+        Err(_) => return text_response(http::StatusCode::NOT_FOUND, "image file missing"),
+    };
+    let bytes = if include_body {
+        match std::fs::read(&path) {
+            Ok(bytes) => bytes,
+            Err(error) => return text_response(http::StatusCode::NOT_FOUND, &error.to_string()),
+        }
+    } else {
+        Vec::new()
+    };
+
+    http::Response::builder()
+        .status(http::StatusCode::OK)
+        .header(header::CONTENT_TYPE, image_content_type(&detail.extension))
+        .header(header::CONTENT_LENGTH, metadata.len().to_string())
+        .header(header::CACHE_CONTROL, "max-age=60")
+        .body(bytes)
+        .unwrap_or_else(|_| http::Response::new(Vec::new()))
+}
+
+fn image_id_from_request(request: &http::Request<Vec<u8>>) -> Option<i64> {
+    request
+        .uri()
+        .path()
+        .trim_matches('/')
+        .parse::<i64>()
+        .ok()
+        .or_else(|| {
+            request
+                .uri()
+                .host()
+                .and_then(|host| host.parse::<i64>().ok())
+        })
+}
+
+fn image_content_type(extension: &str) -> &'static str {
+    match extension
+        .trim_start_matches('.')
+        .to_ascii_lowercase()
+        .as_str()
+    {
+        "jpg" | "jpeg" => "image/jpeg",
+        "png" => "image/png",
+        "webp" => "image/webp",
+        "gif" => "image/gif",
+        "bmp" => "image/bmp",
+        "tif" | "tiff" => "image/tiff",
+        "heic" => "image/heic",
+        "heif" => "image/heif",
+        _ => "application/octet-stream",
     }
 }
 

@@ -350,10 +350,7 @@ pub fn mark_deleted_by_id(conn: &Connection, id: i64, now: i64) -> AppResult<()>
 }
 
 pub fn restore_by_id(conn: &Connection, id: i64) -> AppResult<()> {
-    conn.execute(
-        "UPDATE images SET deleted_at = NULL WHERE id = ?1",
-        [id],
-    )?;
+    conn.execute("UPDATE images SET deleted_at = NULL WHERE id = ?1", [id])?;
     Ok(())
 }
 
@@ -507,9 +504,8 @@ pub fn pending_dhash_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
 
 /// 启动时全量取 (image_id, dhash) 用于建 BK-tree。
 pub fn all_dhashes(conn: &Connection) -> AppResult<Vec<(i64, u64)>> {
-    let mut stmt = conn.prepare(
-        "SELECT id, dhash FROM images WHERE dhash IS NOT NULL AND deleted_at IS NULL",
-    )?;
+    let mut stmt = conn
+        .prepare("SELECT id, dhash FROM images WHERE dhash IS NOT NULL AND deleted_at IS NULL")?;
     let rows = stmt.query_map([], |row| {
         let id: i64 = row.get(0)?;
         let dhash: i64 = row.get(1)?;
@@ -929,7 +925,9 @@ mod tests {
             camera_make: None,
             camera_model: None,
         };
-        let id = upsert_scanned_image(&conn, &image, 3).expect("insert").image_id();
+        let id = upsert_scanned_image(&conn, &image, 3)
+            .expect("insert")
+            .image_id();
         set_blake3(&conn, id, "deadbeef").expect("blake");
         set_dhash(&conn, id, 12345).expect("dhash");
         // 已算出指纹 -> 不在 pending 列表里

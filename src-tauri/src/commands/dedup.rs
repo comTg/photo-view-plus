@@ -172,8 +172,8 @@ pub fn dedup_resolve(
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("分组不存在：{}", args.group_id))?;
 
-    let items = duplicates_repo::items_for_group(&conn, args.group_id)
-        .map_err(|e| e.to_string())?;
+    let items =
+        duplicates_repo::items_for_group(&conn, args.group_id).map_err(|e| e.to_string())?;
     let keep_set: std::collections::HashSet<i64> = args.keep_image_ids.iter().copied().collect();
 
     let (status_after, keep_image_id, to_trash) = match args.action {
@@ -223,10 +223,7 @@ pub struct DedupExportArgs {
 }
 
 #[tauri::command]
-pub fn dedup_export_csv(
-    pool: State<'_, Pool>,
-    args: DedupExportArgs,
-) -> Result<i64, String> {
+pub fn dedup_export_csv(pool: State<'_, Pool>, args: DedupExportArgs) -> Result<i64, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;
     let groups = duplicates_repo::list_groups(
         &conn,
@@ -244,8 +241,7 @@ pub fn dedup_export_csv(
     rows.push("\u{feff}group_id,method,similarity,image_id,root,rel_path,filename,size,width,height,mtime,blake3,phash,kept".to_string());
     let mut written = 0i64;
     for group in &groups.items {
-        let items = duplicates_repo::items_for_group(&conn, group.id)
-            .map_err(|e| e.to_string())?;
+        let items = duplicates_repo::items_for_group(&conn, group.id).map_err(|e| e.to_string())?;
         for item in items {
             let image = images_repo::get_detail(&conn, item.image_id)
                 .map_err(|e| e.to_string())?
@@ -258,7 +254,9 @@ pub fn dedup_export_csv(
                 "{},{},{},{},{},{},{},{},{},{},{},{},{},{}",
                 group.id,
                 group.method,
-                item.similarity.map(|s| format!("{s:.4}")).unwrap_or_default(),
+                item.similarity
+                    .map(|s| format!("{s:.4}"))
+                    .unwrap_or_default(),
                 image.id,
                 csv_escape(&image.root_path),
                 csv_escape(&image.rel_path),
@@ -268,15 +266,17 @@ pub fn dedup_export_csv(
                 image.height.map(|v| v.to_string()).unwrap_or_default(),
                 image.mtime,
                 image.blake3.clone().unwrap_or_default(),
-                image.phash.map(|v| (v as u64).to_string()).unwrap_or_default(),
+                image
+                    .phash
+                    .map(|v| (v as u64).to_string())
+                    .unwrap_or_default(),
                 if kept { "1" } else { "0" }
             ));
             written += 1;
         }
     }
 
-    std::fs::write(PathBuf::from(&args.save_path), rows.join("\n"))
-        .map_err(|e| e.to_string())?;
+    std::fs::write(PathBuf::from(&args.save_path), rows.join("\n")).map_err(|e| e.to_string())?;
     Ok(written)
 }
 

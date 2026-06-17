@@ -129,14 +129,11 @@ pub fn undo(pool: &Pool, undo_id: i64, now: i64) -> AppResult<UndoOutcome> {
         return Err(AppError::Other("该记录已被撤销".to_string()));
     }
     if entry.action != "trash" {
-        return Err(AppError::Other(format!(
-            "不支持撤销动作：{}",
-            entry.action
-        )));
+        return Err(AppError::Other(format!("不支持撤销动作：{}", entry.action)));
     }
 
-    let payload: TrashPayload = serde_json::from_str(&entry.payload_json)
-        .map_err(|e| AppError::Other(e.to_string()))?;
+    let payload: TrashPayload =
+        serde_json::from_str(&entry.payload_json).map_err(|e| AppError::Other(e.to_string()))?;
 
     let mut restored = Vec::new();
 
@@ -259,7 +256,9 @@ mod tests {
         assert!(result.failed.is_empty());
         assert!(result.undo_id.is_some());
 
-        let record = images_repo::get_detail(&conn, id).expect("get").expect("some");
+        let record = images_repo::get_detail(&conn, id)
+            .expect("get")
+            .expect("some");
         assert_eq!(record.deleted_at, Some(100));
     }
 

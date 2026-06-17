@@ -120,7 +120,9 @@ mod tests {
         f.write_all(b"hello world").expect("write");
         let token = tokio_util::sync::CancellationToken::new();
         // BLAKE3("hello world") known hex（来自官方测试向量）
-        let h = hash_file(&path, &token).expect("ok").expect("not cancelled");
+        let h = hash_file(&path, &token)
+            .expect("ok")
+            .expect("not cancelled");
         assert_eq!(
             h,
             "d74981efa70a0c880b8d8c1985d075dbcbf679b99a5f9914e5aaf96b831a9e24"

@@ -1,5 +1,5 @@
+import { originalUrl } from "@/lib/tauri";
 import type { ImageRecord } from "@/lib/tauri-types";
-import { convertFileSrc } from "@tauri-apps/api/core";
 import Lightbox, { type Slide } from "yet-another-react-lightbox";
 import Counter from "yet-another-react-lightbox/plugins/counter";
 import Fullscreen from "yet-another-react-lightbox/plugins/fullscreen";
@@ -21,7 +21,7 @@ export function ImagePreviewLightbox({
   onIndexChange,
 }: ImagePreviewLightboxProps) {
   const slides: Slide[] = images.map((image) => ({
-    src: convertFileSrc(image.fullPath),
+    src: originalUrl(image.id),
     alt: image.filename,
     width: image.width ?? undefined,
     height: image.height ?? undefined,

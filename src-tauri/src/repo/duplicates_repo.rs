@@ -115,7 +115,8 @@ pub fn list_groups(conn: &Connection, params: &GroupQueryParams) -> AppResult<Gr
     };
 
     let count_sql = format!("SELECT COUNT(*) FROM duplicate_groups g {where_sql}");
-    let total: i64 = conn.query_row(&count_sql, params_from_iter(binds.iter()), |row| row.get(0))?;
+    let total: i64 =
+        conn.query_row(&count_sql, params_from_iter(binds.iter()), |row| row.get(0))?;
 
     let mut page_binds = binds;
     page_binds.push(Value::Integer(limit));
@@ -204,10 +205,7 @@ pub fn merge_into(conn: &Connection, from: i64, into: i64) -> AppResult<()> {
          SELECT ?1, image_id, similarity FROM duplicate_items WHERE group_id = ?2",
         params![into, from],
     )?;
-    conn.execute(
-        "DELETE FROM duplicate_groups WHERE id = ?1",
-        params![from],
-    )?;
+    conn.execute("DELETE FROM duplicate_groups WHERE id = ?1", params![from])?;
     Ok(())
 }
 

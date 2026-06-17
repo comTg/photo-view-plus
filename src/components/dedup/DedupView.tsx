@@ -1,15 +1,19 @@
 import { useDedup } from "@/hooks/useDedup";
-import { dedupExportCsv, thumbUrl, trashHistory, trashUndo } from "@/lib/tauri";
+import { dedupExportCsv, dedupGroupDetail, thumbUrl, trashHistory, trashUndo } from "@/lib/tauri";
 import type {
   DedupAction,
+  DedupGroupDetail,
   DedupGroupMethod,
   DedupGroupStatus,
   DedupMethod,
+  DedupResolveResult,
   DuplicateGroup,
   UndoEntry,
 } from "@/lib/tauri-types";
 import { save } from "@tauri-apps/plugin-dialog";
-import { memo, useCallback, useEffect, useState } from "react";
+import { Archive, CheckCircle2, Circle, Loader2, Trash2, XCircle } from "lucide-react";
+import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { Virtuoso } from "react-virtuoso";
 
 const THRESHOLD_PRESETS = [
   { label: "极严格 (Original)", value: 0 },
@@ -28,12 +32,6 @@ export function DedupView({ onToast }: DedupViewProps) {
   const [method, setMethod] = useState<DedupMethod>("both");
   const [threshold, setThreshold] = useState(2);
   const [historyOpen, setHistoryOpen] = useState(false);
-  const [keepIds, setKeepIds] = useState<Set<number>>(new Set());
-
-  // biome-ignore lint/correctness/useExhaustiveDependencies: 故意在选中分组切换时清空 keep 选择
-  useEffect(() => {
-    setKeepIds(new Set());
-  }, [dedup.selectedGroupId]);
 
   const handleStart = useCallback(async () => {
     try {
@@ -43,39 +41,6 @@ export function DedupView({ onToast }: DedupViewProps) {
       onToast(`启动失败：${String(e)}`);
     }
   }, [dedup, method, threshold, onToast]);
-
-  const handleResolve = useCallback(
-    async (action: DedupAction) => {
-      if (dedup.selectedGroupId === null) return;
-      try {
-        const keeps = Array.from(keepIds);
-        if (action === "trash" && keeps.length === 0) {
-          onToast("请至少勾选 1 张要保留的图");
-          return;
-        }
-        const result = await dedup.resolve({
-          groupId: dedup.selectedGroupId,
-          keepImageIds: keeps,
-          action,
-        });
-        if (action === "trash") {
-          const failures = result.trashFailures.length;
-          onToast(
-            failures === 0
-              ? `已删除 ${result.trashed.length} 张，撤销 ID #${result.undoId ?? "-"}`
-              : `删除 ${result.trashed.length} 张，失败 ${failures} 张`,
-          );
-        } else if (action === "keep_all") {
-          onToast("已标记为保留全部");
-        } else {
-          onToast("已忽略此组");
-        }
-      } catch (e) {
-        onToast(`处理失败：${String(e)}`);
-      }
-    },
-    [dedup, keepIds, onToast],
-  );
 
   const handleExport = useCallback(async () => {
     try {
@@ -94,18 +59,6 @@ export function DedupView({ onToast }: DedupViewProps) {
       onToast(`导出失败：${String(e)}`);
     }
   }, [dedup.filter.method, dedup.filter.status, onToast]);
-
-  const toggleKeep = useCallback((id: number) => {
-    setKeepIds((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
 
   return (
     <section className="dedup-view">
@@ -142,7 +95,8 @@ export function DedupView({ onToast }: DedupViewProps) {
         </button>
         <span className="dedup-status">
           阶段：{phaseLabel(dedup.status.phase)} · 哈希待办 {dedup.status.hashPending} · dHash 待办{" "}
-          {dedup.status.dhashPending} · 已发现 {dedup.status.groupsFound} 组
+          {dedup.status.dhashPending} · 已发现 {dedup.status.groupsFound} 组 · 已加载{" "}
+          {dedup.groups.length}/{dedup.total} 组
         </span>
         <span className="dedup-spacer" />
         <select
@@ -187,155 +141,312 @@ export function DedupView({ onToast }: DedupViewProps) {
 
       {historyOpen && <UndoPanel onToast={onToast} onClose={() => setHistoryOpen(false)} />}
 
-      <div className="dedup-split">
-        <GroupList
-          groups={dedup.groups}
-          loading={dedup.loading}
-          selectedId={dedup.selectedGroupId}
-          onSelect={dedup.setSelectedGroupId}
-        />
-        <CompareView
-          detail={dedup.detail}
-          loading={dedup.detailLoading}
-          keepIds={keepIds}
-          onToggleKeep={toggleKeep}
-          onResolve={handleResolve}
-        />
-      </div>
+      <DedupVirtualList
+        groups={dedup.groups}
+        loading={dedup.loading}
+        loadingMore={dedup.loadingMore}
+        hasMore={dedup.hasMoreGroups}
+        running={dedup.status.running}
+        onToast={onToast}
+        onLoadMore={dedup.loadMoreGroups}
+        onResolve={dedup.resolve}
+      />
 
       {dedup.error && <div className="dedup-error">{dedup.error}</div>}
     </section>
   );
 }
 
-interface GroupListProps {
+interface DedupVirtualListProps {
   groups: DuplicateGroup[];
   loading: boolean;
-  selectedId: number | null;
-  onSelect: (id: number | null) => void;
+  loadingMore: boolean;
+  hasMore: boolean;
+  running: boolean;
+  onToast: (message: string) => void;
+  onLoadMore: () => Promise<void>;
+  onResolve: (args: {
+    groupId: number;
+    keepImageIds: number[];
+    action: DedupAction;
+  }) => Promise<DedupResolveResult>;
 }
 
-const GroupList = memo(function GroupList({
+const DedupVirtualList = memo(function DedupVirtualList({
   groups,
   loading,
-  selectedId,
-  onSelect,
-}: GroupListProps) {
-  if (loading) {
-    return <aside className="dedup-group-list">加载中…</aside>;
-  }
+  loadingMore,
+  hasMore,
+  running,
+  onToast,
+  onLoadMore,
+  onResolve,
+}: DedupVirtualListProps) {
   if (groups.length === 0) {
     return (
-      <aside className="dedup-group-list dedup-group-list--empty">
-        <p>当前没有匹配的分组。点击"开始查找重复"运行去重，或调整过滤条件。</p>
-      </aside>
+      <div className="dedup-list-shell dedup-list-shell--empty">
+        <p>{loading ? "加载中..." : "当前没有匹配的分组。点击开始查找重复，或调整过滤条件。"}</p>
+      </div>
     );
   }
+
   return (
-    <aside className="dedup-group-list">
-      {groups.map((group) => (
-        <button
-          type="button"
-          key={group.id}
-          className={`dedup-group-item${selectedId === group.id ? " dedup-group-item--active" : ""}`}
-          onClick={() => onSelect(group.id)}
-        >
-          <span className="dedup-group-method">
-            {group.method === "exact" ? "完全重复" : "视觉近似"}
-          </span>
-          <span className="dedup-group-meta">
+    <div className="dedup-list-shell">
+      <Virtuoso
+        className="dedup-virtual-list"
+        data={groups}
+        computeItemKey={(_, group) => group.id}
+        endReached={() => {
+          if (hasMore) void onLoadMore();
+        }}
+        increaseViewportBy={{ top: 400, bottom: 900 }}
+        itemContent={(_, group) => (
+          <DedupGroupRow group={group} running={running} onToast={onToast} onResolve={onResolve} />
+        )}
+        components={{
+          Footer: () => (
+            <div className="dedup-list-footer">
+              {loadingMore ? "加载更多..." : hasMore ? "继续向下滚动加载更多" : "已显示全部分组"}
+            </div>
+          ),
+        }}
+      />
+    </div>
+  );
+});
+
+interface DedupGroupRowProps {
+  group: DuplicateGroup;
+  running: boolean;
+  onToast: (message: string) => void;
+  onResolve: (args: {
+    groupId: number;
+    keepImageIds: number[];
+    action: DedupAction;
+  }) => Promise<DedupResolveResult>;
+}
+
+const DedupGroupRow = memo(function DedupGroupRow({
+  group,
+  running,
+  onToast,
+  onResolve,
+}: DedupGroupRowProps) {
+  const [detail, setDetail] = useState<DedupGroupDetail | null>(null);
+  const [keepIds, setKeepIds] = useState<Set<number>>(new Set());
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [resolving, setResolving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    setLoading(true);
+    setError(null);
+    setDetail(null);
+    setKeepIds(new Set());
+
+    dedupGroupDetail(group.id)
+      .then((next) => {
+        if (!alive) return;
+        setDetail(next);
+        const suggested = next ? suggestKeepId(next) : null;
+        setKeepIds(suggested === null ? new Set() : new Set([suggested]));
+      })
+      .catch((e) => {
+        if (alive) setError(String(e));
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+
+    return () => {
+      alive = false;
+    };
+  }, [group.id]);
+
+  const selectedDeleteCount = useMemo(() => {
+    if (!detail) return 0;
+    return detail.items.filter((item) => !keepIds.has(item.image.id)).length;
+  }, [detail, keepIds]);
+
+  const canResolve = group.status === "open" && !running && !resolving && detail !== null;
+
+  const toggleKeep = useCallback((id: number) => {
+    setKeepIds((prev) => {
+      const next = new Set(prev);
+      if (next.has(id)) {
+        next.delete(id);
+      } else {
+        next.add(id);
+      }
+      return next;
+    });
+  }, []);
+
+  const handleResolve = useCallback(
+    async (action: DedupAction) => {
+      if (!detail || resolving) return;
+      const keeps = Array.from(keepIds);
+      if (action === "trash") {
+        if (keeps.length === 0) {
+          onToast("请至少保留 1 张图");
+          return;
+        }
+        if (selectedDeleteCount === 0) {
+          onToast("当前没有待删除图片");
+          return;
+        }
+      }
+
+      setResolving(true);
+      try {
+        const result = await onResolve({
+          groupId: group.id,
+          keepImageIds: keeps,
+          action,
+        });
+        showResolveToast(action, result, onToast);
+      } catch (e) {
+        onToast(`处理失败：${String(e)}`);
+      } finally {
+        setResolving(false);
+      }
+    },
+    [detail, group.id, keepIds, onResolve, onToast, resolving, selectedDeleteCount],
+  );
+
+  return (
+    <article className="dedup-group-row">
+      <header className="dedup-row-header">
+        <div className="dedup-row-title">
+          <strong>{group.method === "exact" ? "完全重复" : "视觉近似"}</strong>
+          <span>
             #{group.id} · {group.itemCount} 张
             {group.threshold !== null ? ` · dist≤${group.threshold}` : ""}
           </span>
-          <span className={`dedup-group-status dedup-group-status--${group.status}`}>
-            {statusLabel(group.status)}
-          </span>
-        </button>
-      ))}
-    </aside>
+        </div>
+        <span className={`dedup-group-status dedup-group-status--${group.status}`}>
+          {statusLabel(group.status)}
+        </span>
+        <div className="dedup-row-actions">
+          <button
+            type="button"
+            className="primary-action dedup-action-button"
+            disabled={!canResolve || selectedDeleteCount === 0}
+            onClick={() => void handleResolve("trash")}
+            title={running ? "去重运行中，完成后可删除" : "删除未保留项到回收站"}
+          >
+            {resolving ? <Loader2 aria-hidden="true" /> : <Trash2 aria-hidden="true" />}
+            删除 {selectedDeleteCount}
+          </button>
+          <button
+            type="button"
+            className="toolbar-button dedup-action-button"
+            disabled={!canResolve}
+            onClick={() => void handleResolve("keep_all")}
+          >
+            <Archive aria-hidden="true" />
+            全部保留
+          </button>
+          <button
+            type="button"
+            className="toolbar-button dedup-action-button"
+            disabled={!canResolve}
+            onClick={() => void handleResolve("dismiss")}
+          >
+            <XCircle aria-hidden="true" />
+            忽略
+          </button>
+        </div>
+      </header>
+
+      {loading && <div className="dedup-row-state">加载图片...</div>}
+      {error && <div className="dedup-row-state dedup-row-state--error">{error}</div>}
+      {!loading && !error && !detail && <div className="dedup-row-state">分组不存在</div>}
+      {detail && (
+        <div className="dedup-image-list">
+          {detail.items.map((item) => {
+            const isKeep = keepIds.has(item.image.id);
+            return (
+              <button
+                type="button"
+                key={item.image.id}
+                className={`dedup-image-row${isKeep ? " dedup-image-row--keep" : ""}`}
+                onClick={() => toggleKeep(item.image.id)}
+                title={item.image.fullPath}
+              >
+                <span className="dedup-image-keep">
+                  {isKeep ? <CheckCircle2 aria-hidden="true" /> : <Circle aria-hidden="true" />}
+                </span>
+                <span className="dedup-image-thumb">
+                  {item.image.thumbStatus === "ready" ? (
+                    <img src={thumbUrl(item.image.id, 256)} alt={item.image.filename} />
+                  ) : (
+                    <span>{item.image.thumbStatus}</span>
+                  )}
+                </span>
+                <span className="dedup-image-main">
+                  <strong>{item.image.filename}</strong>
+                  <span>{item.image.relPath}</span>
+                </span>
+                <span className="dedup-image-stats">
+                  <span>{formatResolution(item.image.width, item.image.height)}</span>
+                  <span>{formatBytes(item.image.sizeBytes)}</span>
+                  <span>{formatTime(item.image.mtime)}</span>
+                  {item.similarity !== null && (
+                    <span>相似度 {(item.similarity * 100).toFixed(1)}%</span>
+                  )}
+                </span>
+              </button>
+            );
+          })}
+        </div>
+      )}
+    </article>
   );
 });
 
-interface CompareViewProps {
-  detail: ReturnType<typeof useDedup>["detail"];
-  loading: boolean;
-  keepIds: Set<number>;
-  onToggleKeep: (id: number) => void;
-  onResolve: (action: DedupAction) => Promise<void>;
+function showResolveToast(
+  action: DedupAction,
+  result: DedupResolveResult,
+  onToast: (message: string) => void,
+) {
+  if (action === "trash") {
+    const failures = result.trashFailures.length;
+    onToast(
+      failures === 0
+        ? `已删除 ${result.trashed.length} 张，撤销 ID #${result.undoId ?? "-"}`
+        : `删除 ${result.trashed.length} 张，失败 ${failures} 张`,
+    );
+    return;
+  }
+  if (action === "keep_all") {
+    onToast("已标记为保留全部");
+    return;
+  }
+  onToast("已忽略此组");
 }
 
-const CompareView = memo(function CompareView({
-  detail,
-  loading,
-  keepIds,
-  onToggleKeep,
-  onResolve,
-}: CompareViewProps) {
-  if (loading) {
-    return <main className="dedup-compare">加载中…</main>;
+function suggestKeepId(detail: DedupGroupDetail): number | null {
+  let best = detail.items[0]?.image ?? null;
+  for (const item of detail.items.slice(1)) {
+    const current = item.image;
+    if (!best || keepScore(current) > keepScore(best)) {
+      best = current;
+    }
   }
-  if (!detail) {
-    return (
-      <main className="dedup-compare dedup-compare--empty">
-        <p>从左侧选择一个分组查看详情。</p>
-      </main>
-    );
-  }
-  return (
-    <main className="dedup-compare">
-      <div className="dedup-compare-grid">
-        {detail.items.map((item) => {
-          const isKeep = keepIds.has(item.image.id);
-          return (
-            <button
-              type="button"
-              key={item.image.id}
-              className={`dedup-item${isKeep ? " dedup-item--keep" : ""}`}
-              onClick={() => onToggleKeep(item.image.id)}
-              title={item.image.fullPath}
-            >
-              <div className="dedup-item-thumb">
-                {item.image.thumbStatus === "ready" ? (
-                  <img src={thumbUrl(item.image.id, 512)} alt={item.image.filename} />
-                ) : (
-                  <span>{item.image.thumbStatus}</span>
-                )}
-              </div>
-              <div className="dedup-item-meta">
-                <strong>{item.image.filename}</strong>
-                <span>
-                  {item.image.width ?? "?"}×{item.image.height ?? "?"} ·{" "}
-                  {formatBytes(item.image.sizeBytes)}
-                </span>
-                <span className="dedup-item-path">{item.image.relPath}</span>
-                {item.similarity !== null && (
-                  <span>相似度 {(item.similarity * 100).toFixed(1)}%</span>
-                )}
-                <span
-                  className={`dedup-item-keep-flag${isKeep ? " dedup-item-keep-flag--on" : ""}`}
-                >
-                  {isKeep ? "✓ 保留" : "点击勾选保留"}
-                </span>
-              </div>
-            </button>
-          );
-        })}
-      </div>
+  return best?.id ?? null;
+}
 
-      <footer className="dedup-actions">
-        <button type="button" className="primary-action" onClick={() => void onResolve("trash")}>
-          删除未勾选项（回收站）
-        </button>
-        <button type="button" className="toolbar-button" onClick={() => void onResolve("keep_all")}>
-          全部保留
-        </button>
-        <button type="button" className="toolbar-button" onClick={() => void onResolve("dismiss")}>
-          标记不是重复
-        </button>
-      </footer>
-    </main>
-  );
-});
+function keepScore(image: DedupGroupDetail["items"][number]["image"]): number {
+  const pixels = (image.width ?? 0) * (image.height ?? 0);
+  return pixels * 1_000_000_000 + image.sizeBytes * 1_000 + image.mtime;
+}
+
+function formatResolution(width: number | null, height: number | null): string {
+  if (width === null || height === null) return "?x?";
+  return `${width}x${height}`;
+}
 
 interface UndoPanelProps {
   onToast: (message: string) => void;
