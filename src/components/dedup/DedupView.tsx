@@ -4,6 +4,7 @@ import {
   dedupExportCsv,
   dedupGroupDetail,
   imagesRevealInDir,
+  originalUrl,
   thumbUrl,
   trashHistory,
   trashUndo,
@@ -20,7 +21,8 @@ import type {
 } from "@/lib/tauri-types";
 import { save } from "@tauri-apps/plugin-dialog";
 import { Archive, CheckCircle2, Circle, Loader2, Trash2, XCircle } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useState } from "react";
+import { type CSSProperties, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import { Virtuoso } from "react-virtuoso";
 
 const THRESHOLD_PRESETS = [
@@ -423,13 +425,7 @@ const DedupGroupRow = memo(function DedupGroupRow({
                 <span className="dedup-image-keep">
                   {isKeep ? <CheckCircle2 aria-hidden="true" /> : <Circle aria-hidden="true" />}
                 </span>
-                <span className="dedup-image-thumb">
-                  {item.image.thumbStatus === "ready" ? (
-                    <img src={thumbUrl(item.image.id, 256)} alt={item.image.filename} />
-                  ) : (
-                    <span>{item.image.thumbStatus}</span>
-                  )}
-                </span>
+                <ThumbHoverPreview image={item.image} />
                 <span className="dedup-image-main">
                   <strong>{item.image.filename}</strong>
                   <span>{item.image.relPath}</span>
@@ -470,6 +466,91 @@ const DedupGroupRow = memo(function DedupGroupRow({
     </article>
   );
 });
+
+type DedupImage = DedupGroupDetail["items"][number]["image"];
+
+// 鼠标在缩略图上停留 350ms 后才弹原图预览，避免快速划过时连发原图请求
+// （网络盘原图读取有并发闸门，见 Rust read_gate）。
+const HOVER_PREVIEW_DELAY_MS = 350;
+
+/** 去重列表里的缩略图：鼠标悬停一定时间后在浮层里预览原图。 */
+function ThumbHoverPreview({ image }: { image: DedupImage }) {
+  const [anchor, setAnchor] = useState<DOMRect | null>(null);
+  const timerRef = useRef<number | null>(null);
+
+  const clearTimer = () => {
+    if (timerRef.current !== null) {
+      window.clearTimeout(timerRef.current);
+      timerRef.current = null;
+    }
+  };
+
+  // 卸载（含 Virtuoso 回收行）时清掉待触发的定时器。
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) {
+        window.clearTimeout(timerRef.current);
+      }
+    },
+    [],
+  );
+
+  return (
+    <span
+      className="dedup-image-thumb"
+      onMouseEnter={(event) => {
+        const rect = event.currentTarget.getBoundingClientRect();
+        clearTimer();
+        timerRef.current = window.setTimeout(() => setAnchor(rect), HOVER_PREVIEW_DELAY_MS);
+      }}
+      onMouseLeave={() => {
+        clearTimer();
+        setAnchor(null);
+      }}
+    >
+      {image.thumbStatus === "ready" ? (
+        <img src={thumbUrl(image.id, 256)} alt={image.filename} />
+      ) : (
+        <span>{image.thumbStatus}</span>
+      )}
+      {anchor && <HoverPreviewPopup image={image} anchor={anchor} />}
+    </span>
+  );
+}
+
+/** 原图预览浮层。用 portal 挂到 body，避开 Virtuoso 的 transform 容器对 fixed 定位的影响。 */
+function HoverPreviewPopup({ image, anchor }: { image: DedupImage; anchor: DOMRect }) {
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+
+  const margin = 12;
+  const maxHeight = 520;
+  // 右侧空间够就放右边，否则放左边；纵向夹在视口内。
+  const placeLeft = window.innerWidth - anchor.right < 300;
+  const top = Math.max(margin, Math.min(anchor.top, window.innerHeight - maxHeight - margin));
+  const style: CSSProperties = placeLeft
+    ? { top, right: window.innerWidth - anchor.left + margin }
+    : { top, left: anchor.right + margin };
+
+  return createPortal(
+    <div className="dedup-hover-preview" style={style}>
+      {status !== "ready" && (
+        <span className="dedup-hover-preview__hint">
+          {status === "error" ? "原图加载失败" : "加载原图…"}
+        </span>
+      )}
+      <img
+        className="dedup-hover-preview__img"
+        src={originalUrl(image.id)}
+        alt={image.filename}
+        onLoad={() => setStatus("ready")}
+        onError={() => setStatus("error")}
+        style={{ display: status === "ready" ? "block" : "none" }}
+      />
+      {status === "ready" && <span className="dedup-hover-preview__name">{image.filename}</span>}
+    </div>,
+    document.body,
+  );
+}
 
 function showResolveToast(
   action: DedupAction,

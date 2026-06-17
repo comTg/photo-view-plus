@@ -1868,6 +1868,46 @@ body {
   object-fit: contain;
 }
 
+.dedup-hover-preview {
+  position: fixed;
+  z-index: 200;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  max-width: 520px;
+  padding: 6px;
+  background: var(--panel-raised);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  box-shadow: var(--shadow);
+  /* 纯预览，不拦截鼠标，确保缩略图的 mouseleave 正常触发 */
+  pointer-events: none;
+}
+
+.dedup-hover-preview__img {
+  max-width: 508px;
+  max-height: 480px;
+  object-fit: contain;
+  background: rgba(0, 0, 0, 0.2);
+  border-radius: 4px;
+}
+
+.dedup-hover-preview__hint {
+  padding: 28px 36px;
+  color: var(--text-muted);
+  font-size: 12px;
+  text-align: center;
+}
+
+.dedup-hover-preview__name {
+  max-width: 508px;
+  overflow: hidden;
+  color: var(--text-muted);
+  font-size: 11px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 .dedup-image-main,
 .dedup-image-stats {
   min-width: 0;
