@@ -171,6 +171,53 @@ pub fn get_thumb_hash(conn: &Connection, id: i64) -> AppResult<Option<String>> {
         .flatten())
 }
 
+/// 重复扫描快速跳过用的轻量状态：只取判断"文件是否改动"所需字段，
+/// 这样可以在读图头 / 解 EXIF 之前就判定 `Unchanged`，避免无谓的磁盘 I/O。
+#[derive(Debug, Clone, Copy)]
+pub struct ScannedFileState {
+    pub id: i64,
+    pub size_bytes: i64,
+    pub mtime: i64,
+}
+
+impl ScannedFileState {
+    /// 大小与 mtime 均一致时认为文件未变化，可直接复用旧记录。
+    pub fn is_unchanged(&self, size_bytes: i64, mtime: i64) -> bool {
+        self.size_bytes == size_bytes && self.mtime == mtime
+    }
+}
+
+/// 批量预载某个 root 下所有**未删除**图片的扫描状态，键为 rel_path。
+///
+/// 扫描开始时一次性读入内存，之后每个文件做 O(1) 内存比对，避免逐文件点查数据库；
+/// 同一份数据还能直接用于扫描结束时的"缺失即删除"判定（见 `mark_missing_deleted`）。
+/// 已软删除的行不在其中——磁盘上若重新出现，`prior` 为 `None`，会走 `upsert` 重新入库并恢复。
+pub fn load_scan_states(
+    conn: &Connection,
+    root_id: i64,
+) -> AppResult<std::collections::HashMap<String, ScannedFileState>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, rel_path, size_bytes, mtime
+         FROM images WHERE root_id = ?1 AND deleted_at IS NULL",
+    )?;
+    let rows = stmt.query_map([root_id], |row| {
+        Ok((
+            row.get::<_, String>(1)?,
+            ScannedFileState {
+                id: row.get(0)?,
+                size_bytes: row.get(2)?,
+                mtime: row.get(3)?,
+            },
+        ))
+    })?;
+    let mut map = std::collections::HashMap::new();
+    for row in rows {
+        let (rel_path, state) = row?;
+        map.insert(rel_path, state);
+    }
+    Ok(map)
+}
+
 pub fn upsert_scanned_image(
     conn: &Connection,
     image: &NewImageMetadata,
@@ -281,17 +328,6 @@ pub fn update_thumbnail_failed(
         params![status, error, id],
     )?;
     Ok(())
-}
-
-pub fn active_rel_paths(conn: &Connection, root_id: i64) -> AppResult<Vec<String>> {
-    let mut stmt =
-        conn.prepare("SELECT rel_path FROM images WHERE root_id = ?1 AND deleted_at IS NULL")?;
-    let rows = stmt.query_map([root_id], |row| row.get::<_, String>(0))?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
 }
 
 pub fn mark_deleted(conn: &Connection, root_id: i64, rel_path: &str, now: i64) -> AppResult<()> {
@@ -785,5 +821,58 @@ mod tests {
         .expect("query");
         assert_eq!(page.total, 1);
         assert_eq!(page.items[0].filename, "IMG_001.JPG");
+    }
+
+    #[test]
+    fn load_scan_states_detects_changes() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let pool = crate::db::open(&dir.path().join("app.sqlite")).expect("db");
+        let conn = pool.get().expect("conn");
+        let root = roots_repo::insert(
+            &conn,
+            &NewRoot {
+                path: dir.path().to_string_lossy().to_string(),
+                label: None,
+                root_type: "local".to_string(),
+            },
+            1,
+        )
+        .expect("root");
+
+        // 未入库时映射为空。
+        assert!(load_scan_states(&conn, root.id).expect("load").is_empty());
+
+        let image = NewImageMetadata {
+            root_id: root.id,
+            rel_path: "IMG_001.JPG".to_string(),
+            filename: "IMG_001.JPG".to_string(),
+            extension: "jpg".to_string(),
+            size_bytes: 42,
+            mtime: 100,
+            width: Some(10),
+            height: Some(20),
+            orientation: None,
+            taken_at: None,
+            gps_lat: None,
+            gps_lng: None,
+            camera_make: None,
+            camera_model: None,
+        };
+        upsert_scanned_image(&conn, &image, 3).expect("insert");
+
+        let states = load_scan_states(&conn, root.id).expect("load");
+        let state = states.get("IMG_001.JPG").copied().expect("state");
+        // 大小 + mtime 一致 -> 未改动。
+        assert!(state.is_unchanged(42, 100));
+        // mtime 变化 -> 改动。
+        assert!(!state.is_unchanged(42, 101));
+        // 大小变化 -> 改动。
+        assert!(!state.is_unchanged(43, 100));
+
+        // 软删除的行不应出现在预载映射里（磁盘重现时会走 upsert 恢复）。
+        mark_deleted(&conn, root.id, "IMG_001.JPG", 9).expect("mark deleted");
+        assert!(!load_scan_states(&conn, root.id)
+            .expect("load")
+            .contains_key("IMG_001.JPG"));
     }
 }

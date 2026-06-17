@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
 use std::fs::File;
 use std::io::BufReader;
 use std::path::{Path, PathBuf};
@@ -247,6 +247,8 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
         ..ScanDone::default()
     };
     let mut visited = HashSet::new();
+    // 一次性预载该 root 的既有状态，扫描期间走内存比对，避免逐文件查库。
+    let states = images_repo::load_scan_states(&conn, task.root_id)?;
     let started = Instant::now();
     let mut last_emit = Instant::now();
     let mut processed: usize = 0;
@@ -299,7 +301,22 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
         visited.insert(rel_path.clone());
         processed += 1;
 
-        match scan_one_file(&conn, &task, &root, path, &rel_path) {
+        // Windows 上 entry.metadata() 复用目录枚举时已取得的元数据，不再额外 stat。
+        let metadata = match entry.metadata() {
+            Ok(metadata) => metadata,
+            Err(error) => {
+                tracing::warn!(path = ?path, %error, "failed to read file metadata");
+                emit_scan_error(
+                    &task,
+                    error.to_string(),
+                    Some(path.to_string_lossy().to_string()),
+                );
+                continue;
+            }
+        };
+        let prior = states.get(&rel_path).copied();
+
+        match scan_one_file(&conn, &task, &root, path, &rel_path, &metadata, prior) {
             Ok(outcome) => match outcome {
                 UpsertOutcome::Added(_) => done.added += 1,
                 UpsertOutcome::Updated(_) => done.updated += 1,
@@ -329,7 +346,7 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
         }
     }
 
-    done.removed = mark_missing_deleted(&conn, task.root_id, &visited)?;
+    done.removed = mark_missing_deleted(&conn, task.root_id, &states, &visited)?;
     let finished = now_unix();
     let total = i64::try_from(processed).unwrap_or(i64::MAX);
     tracing::info!(
@@ -359,10 +376,20 @@ fn scan_one_file(
     root: &Root,
     path: &Path,
     rel_path: &str,
+    metadata: &std::fs::Metadata,
+    prior: Option<images_repo::ScannedFileState>,
 ) -> AppResult<UpsertOutcome> {
-    let metadata = std::fs::metadata(path)?;
     let size_bytes = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
     let mtime = unix_time(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
+
+    // 重复扫描快速跳过：预载状态里已知该文件且大小/mtime 未变 → 直接复用旧记录，
+    // 不再读图头 / 解 EXIF（probe_image）、也不写库，缩略图同样不会重排。
+    if let Some(state) = prior {
+        if state.is_unchanged(size_bytes, mtime) {
+            return Ok(UpsertOutcome::Unchanged(state.id));
+        }
+    }
+
     let probe = probe_image(path);
     let filename = path
         .file_name()
@@ -436,14 +463,15 @@ fn rel_path_string(root_path: &Path, path: &Path) -> Option<String> {
 fn mark_missing_deleted(
     conn: &rusqlite::Connection,
     root_id: i64,
+    states: &HashMap<String, images_repo::ScannedFileState>,
     visited: &HashSet<String>,
 ) -> AppResult<i64> {
-    let active = images_repo::active_rel_paths(conn, root_id)?;
     let now = now_unix();
     let mut removed = 0;
-    for rel_path in active {
-        if !visited.contains(&rel_path) {
-            images_repo::mark_deleted(conn, root_id, &rel_path, now)?;
+    // states 仅含扫描开始时未删除的行；本次扫描没访问到的即为磁盘上已消失。
+    for rel_path in states.keys() {
+        if !visited.contains(rel_path) {
+            images_repo::mark_deleted(conn, root_id, rel_path, now)?;
             removed += 1;
         }
     }
