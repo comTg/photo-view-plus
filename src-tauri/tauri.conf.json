@@ -14,9 +14,9 @@
       {
         "title": "PhotoView+",
         "width": 1680,
-        "height": 800,
-        "minWidth": 960,
-        "minHeight": 600,
+        "height": 900,
+        "minWidth": 1680,
+        "minHeight": 900,
         "resizable": true,
         "fullscreen": false,
         "decorations": true

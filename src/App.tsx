@@ -1,3 +1,4 @@
+import { ImagePreviewLightbox } from "@/components/browse/ImagePreviewLightbox";
 import { DedupView } from "@/components/dedup/DedupView";
 import { RootList } from "@/components/sidebar/RootList";
 import { useRoots } from "@/hooks/useRoots";
@@ -29,6 +30,30 @@ import type {
   SortField,
 } from "@/lib/tauri-types";
 import { open } from "@tauri-apps/plugin-dialog";
+import {
+  ArrowLeft,
+  ArrowRight,
+  Camera,
+  Check,
+  CirclePause,
+  CirclePlay,
+  CircleX,
+  Clock3,
+  Copy,
+  FolderOpen,
+  Image as ImageIcon,
+  Images,
+  LayoutGrid,
+  Maximize2,
+  Pencil,
+  RefreshCw,
+  Search,
+  Settings,
+  SlidersHorizontal,
+  Sparkles,
+  Star,
+  Tags,
+} from "lucide-react";
 import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VirtuosoGrid } from "react-virtuoso";
 
@@ -82,6 +107,7 @@ export default function App() {
   const [selectionMode, setSelectionMode] = useState(false);
   const lastSelectedId = useRef<number | null>(null);
   const [detail, setDetail] = useState<ImageRecord | null>(null);
+  const [previewIndex, setPreviewIndex] = useState<number | null>(null);
 
   const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress>>({});
   const [queue, setQueue] = useState<QueueStatus | null>(null);
@@ -267,6 +293,15 @@ export default function App() {
   const primarySelectedId =
     selectedIds.length > 0 ? (selectedIds[selectedIds.length - 1] ?? null) : null;
 
+  const openPreviewById = useCallback((imageId: number) => {
+    const index = imagesRef.current.findIndex((image) => image.id === imageId);
+    if (index < 0) {
+      setToast("当前图片还没有加载到预览列表");
+      return;
+    }
+    setPreviewIndex(index);
+  }, []);
+
   useEffect(() => {
     if (primarySelectedId === null) {
       setDetail(null);
@@ -287,10 +322,20 @@ export default function App() {
         setSelectionMode(false);
         setSelectedIds([]);
       }
+      if (event.key === " " && primarySelectedId !== null && !isTypingTarget(event.target)) {
+        event.preventDefault();
+        openPreviewById(primarySelectedId);
+      }
     };
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectionMode]);
+  }, [openPreviewById, primarySelectedId, selectionMode]);
+
+  useEffect(() => {
+    if (previewIndex !== null && previewIndex >= images.length) {
+      setPreviewIndex(null);
+    }
+  }, [images.length, previewIndex]);
 
   const handleScan = useCallback(async (rootId: number) => {
     try {
@@ -300,6 +345,12 @@ export default function App() {
       setToast(`启动扫描失败：${String(error)}`);
     }
   }, []);
+
+  const handleScanTargets = useCallback(() => {
+    for (const id of scanTargets) {
+      void handleScan(id);
+    }
+  }, [handleScan, scanTargets]);
 
   const handleAdd = useCallback(async () => {
     try {
@@ -413,7 +464,7 @@ export default function App() {
         </div>
         <div className="toolbar">
           <button type="button" className="icon-button" onClick={() => history.back()} title="后退">
-            ‹
+            <ArrowLeft aria-hidden="true" />
           </button>
           <button
             type="button"
@@ -421,34 +472,41 @@ export default function App() {
             onClick={() => history.forward()}
             title="前进"
           >
-            ›
+            <ArrowRight aria-hidden="true" />
           </button>
           <button
             type="button"
             className="icon-button"
             disabled={scanTargets.length === 0}
-            onClick={() => scanTargets.forEach((id) => void handleScan(id))}
+            onClick={handleScanTargets}
             title={allSelected ? "扫描全部目录" : "扫描当前目录"}
           >
-            ↻
+            <RefreshCw aria-hidden="true" />
           </button>
-          <input
-            className="search-input"
-            value={searchDraft}
-            onChange={(event) => setSearchDraft(event.target.value)}
-            placeholder="搜索文件名"
-          />
-          <select
-            className="control-select"
-            value={viewMode}
-            onChange={(event) => setViewMode(event.target.value as ViewMode)}
-            title="视图"
-          >
-            <option value="grid-lg">大网格</option>
-            <option value="grid-md">中网格</option>
-            <option value="grid-sm">小网格</option>
-            <option value="list">列表</option>
-          </select>
+          <label className="search-box">
+            <Search aria-hidden="true" />
+            <input
+              className="search-input"
+              value={searchDraft}
+              onChange={(event) => setSearchDraft(event.target.value)}
+              placeholder="搜索文件名、标签、地点..."
+            />
+          </label>
+          <span className="toolbar-divider" />
+          <label className="select-with-icon" title="视图">
+            <LayoutGrid aria-hidden="true" />
+            <select
+              className="control-select"
+              value={viewMode}
+              onChange={(event) => setViewMode(event.target.value as ViewMode)}
+              aria-label="视图"
+            >
+              <option value="grid-lg">大网格</option>
+              <option value="grid-md">中网格</option>
+              <option value="grid-sm">小网格</option>
+              <option value="list">列表</option>
+            </select>
+          </label>
           <select
             className="control-select"
             value={`${sortField}:${sortDir}`}
@@ -486,7 +544,7 @@ export default function App() {
             onClick={() => setActiveView((view) => (view === "settings" ? "browse" : "settings"))}
             title="设置"
           >
-            ⚙
+            <Settings aria-hidden="true" />
           </button>
         </div>
       </header>
@@ -495,12 +553,15 @@ export default function App() {
         <nav className="nav-group">
           <div className="section-label">我的相册</div>
           <button type="button" className="nav-item nav-item--muted">
+            <Clock3 aria-hidden="true" />
             最近添加
           </button>
           <button type="button" className="nav-item nav-item--muted">
+            <Star aria-hidden="true" />
             收藏
           </button>
           <button type="button" className="nav-item nav-item--muted">
+            <Camera aria-hidden="true" />
             截图
           </button>
         </nav>
@@ -526,12 +587,14 @@ export default function App() {
         <nav className="nav-group">
           <div className="section-label">标签</div>
           <button type="button" className="nav-item nav-item--muted">
+            <Tags aria-hidden="true" />
             MVP3 启用
           </button>
         </nav>
         <nav className="nav-group">
           <div className="section-label">智能相册</div>
           <button type="button" className="nav-item nav-item--muted">
+            <Sparkles aria-hidden="true" />
             MVP4 启用
           </button>
         </nav>
@@ -577,7 +640,7 @@ export default function App() {
                 title={allSelected ? "还没有图片" : "当前目录还没有图片"}
                 body="点击扫描后，图片会随着后台任务逐步出现在这里。"
                 actionLabel={allSelected ? "扫描全部目录" : "扫描目录"}
-                onAction={() => scanTargets.forEach((id) => void handleScan(id))}
+                onAction={handleScanTargets}
               />
             ) : (
               <ImageGrid
@@ -586,6 +649,7 @@ export default function App() {
                 selectedIds={selectedIds}
                 selectionMode={selectionMode}
                 onClickImage={handleImageClick}
+                onPreviewImage={(image) => openPreviewById(image.id)}
                 onEndReached={handleGridEndReached}
                 scrollerRef={handleGridScrollerRef}
               />
@@ -617,6 +681,9 @@ export default function App() {
           onRename={handleRename}
           onReveal={handleReveal}
           onCopyPaths={handleCopyPaths}
+          onPreview={() => {
+            if (primarySelectedId !== null) openPreviewById(primarySelectedId);
+          }}
         />
       </aside>
 
@@ -643,15 +710,25 @@ export default function App() {
       )}
       <div className="task-controls">
         <button type="button" onClick={() => void scanPause()} title="暂停队列">
+          <CirclePause aria-hidden="true" />
           暂停
         </button>
         <button type="button" onClick={() => void scanResume()} title="恢复队列">
+          <CirclePlay aria-hidden="true" />
           恢复
         </button>
         <button type="button" onClick={() => void scanCancel()} title="取消运行中任务">
+          <CircleX aria-hidden="true" />
           取消
         </button>
       </div>
+      <ImagePreviewLightbox
+        images={images}
+        index={previewIndex ?? 0}
+        open={previewIndex !== null}
+        onClose={() => setPreviewIndex(null)}
+        onIndexChange={setPreviewIndex}
+      />
     </div>
   );
 }
@@ -682,6 +759,10 @@ function FilterBar(props: FilterBarProps) {
 
   return (
     <section className="filter-bar">
+      <div className="filter-bar__title">
+        <SlidersHorizontal aria-hidden="true" />
+        <span>筛选</span>
+      </div>
       <div className="format-pills">
         {FORMATS.map((format) => (
           <button
@@ -745,6 +826,7 @@ interface ImageGridProps {
   selectedIds: number[];
   selectionMode: boolean;
   onClickImage: (image: ImageRecord, event: React.MouseEvent) => void;
+  onPreviewImage: (image: ImageRecord) => void;
   onEndReached: () => void;
   scrollerRef: (ref: HTMLElement | null) => void;
 }
@@ -755,6 +837,7 @@ const ImageGrid = memo(function ImageGrid({
   selectedIds,
   selectionMode,
   onClickImage,
+  onPreviewImage,
   onEndReached,
   scrollerRef,
 }: ImageGridProps) {
@@ -773,6 +856,7 @@ const ImageGrid = memo(function ImageGrid({
           selected={selectedIdSet.has(image.id)}
           selectionMode={selectionMode}
           onClickImage={onClickImage}
+          onPreviewImage={onPreviewImage}
         />
       )}
       listClassName={`image-grid image-grid--${viewMode}`}
@@ -787,6 +871,7 @@ interface ImageCardProps {
   selected: boolean;
   selectionMode: boolean;
   onClickImage: (image: ImageRecord, event: React.MouseEvent) => void;
+  onPreviewImage: (image: ImageRecord) => void;
 }
 
 const ImageCard = memo(function ImageCard({
@@ -794,22 +879,32 @@ const ImageCard = memo(function ImageCard({
   selected,
   selectionMode,
   onClickImage,
+  onPreviewImage,
 }: ImageCardProps) {
   return (
     <button
       type="button"
       className={`image-card${selected ? " image-card--selected" : ""}`}
       onClick={(event) => onClickImage(image, event)}
+      onDoubleClick={() => onPreviewImage(image)}
       title={image.fullPath}
       data-image-id={image.id}
     >
-      {selectionMode && <span className="image-card__check">{selected ? "✓" : ""}</span>}
+      {selectionMode && (
+        <span className="image-card__check">{selected ? <Check aria-hidden="true" /> : ""}</span>
+      )}
       <span className="image-card__thumb">
         {image.thumbStatus === "ready" ? (
           <img src={thumbUrl(image.id)} alt={image.filename} loading="lazy" />
         ) : (
-          <span className="image-card__placeholder">{thumbStatusText(image.thumbStatus)}</span>
+          <span className="image-card__placeholder">
+            <ImageIcon aria-hidden="true" />
+            {thumbStatusText(image.thumbStatus)}
+          </span>
         )}
+      </span>
+      <span className="image-card__quick" aria-hidden="true">
+        <Maximize2 />
       </span>
       <span className="image-card__name">{image.filename}</span>
       <span className="image-card__meta">
@@ -826,6 +921,7 @@ interface DetailPaneProps {
   onRename: (filename: string) => Promise<void>;
   onReveal: () => Promise<void>;
   onCopyPaths: () => Promise<void>;
+  onPreview: () => void;
 }
 
 function DetailPane({
@@ -835,6 +931,7 @@ function DetailPane({
   onRename,
   onReveal,
   onCopyPaths,
+  onPreview,
 }: DetailPaneProps) {
   const [editing, setEditing] = useState(false);
   const [draft, setDraft] = useState("");
@@ -849,9 +946,13 @@ function DetailPane({
     return (
       <section className="detail-pane">
         <div className="section-label">批量选择</div>
-        <h2>{selectedCount} 张图片</h2>
+        <h2>
+          <Images aria-hidden="true" />
+          {selectedCount} 张图片
+        </h2>
         <p className="muted">已加载选择大小：{formatBytes(totalSize)}</p>
         <button type="button" className="primary-action" onClick={() => void onCopyPaths()}>
+          <Copy aria-hidden="true" />
           复制路径
         </button>
       </section>
@@ -862,7 +963,10 @@ function DetailPane({
     return (
       <section className="detail-pane detail-pane--empty">
         <div className="section-label">图库状态</div>
-        <h2>未选择图片</h2>
+        <h2>
+          <Images aria-hidden="true" />
+          未选择图片
+        </h2>
         <p className="muted">选择一张图片后，这里会显示路径、尺寸、EXIF 与缩略图状态。</p>
       </section>
     );
@@ -870,13 +974,22 @@ function DetailPane({
 
   return (
     <section className="detail-pane">
-      <div className="detail-preview">
+      <button
+        type="button"
+        className="detail-preview"
+        onClick={onPreview}
+        onDoubleClick={onPreview}
+        title="打开原图预览"
+      >
         {image.thumbStatus === "ready" ? (
           <img src={thumbUrl(image.id, 512)} alt={image.filename} />
         ) : (
           <span>{thumbStatusText(image.thumbStatus)}</span>
         )}
-      </div>
+        <span className="detail-preview__hint">
+          <Maximize2 aria-hidden="true" />
+        </span>
+      </button>
 
       {editing ? (
         <form
@@ -900,12 +1013,15 @@ function DetailPane({
 
       <div className="detail-actions">
         <button type="button" onClick={() => setEditing(true)}>
+          <Pencil aria-hidden="true" />
           重命名
         </button>
         <button type="button" onClick={() => void onReveal()}>
+          <FolderOpen aria-hidden="true" />
           所在文件夹
         </button>
         <button type="button" onClick={() => void onCopyPaths()}>
+          <Copy aria-hidden="true" />
           复制路径
         </button>
       </div>
@@ -1123,6 +1239,16 @@ function thumbStatusText(status: string): string {
   if (status === "failed") return "缩略图失败";
   if (status === "unsupported") return "格式暂不支持";
   return "生成中";
+}
+
+function isTypingTarget(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return (
+    target.isContentEditable ||
+    target.tagName === "INPUT" ||
+    target.tagName === "TEXTAREA" ||
+    target.tagName === "SELECT"
+  );
 }
 
 function applyTheme(theme: string) {

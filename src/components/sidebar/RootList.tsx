@@ -1,5 +1,6 @@
 import type { RootSelection } from "@/hooks/useRoots";
 import type { Root } from "@/lib/tauri-types";
+import { Folder, HardDrive, Library, Plus, RefreshCw, Wifi, X } from "lucide-react";
 import { useCallback } from "react";
 
 interface Props {
@@ -38,7 +39,8 @@ export function RootList({
       <div className="rootlist__header">
         <span className="section-label">文件夹</span>
         <button type="button" className="rootlist__add" onClick={onAdd}>
-          + 添加
+          <Plus aria-hidden="true" />
+          添加
         </button>
       </div>
 
@@ -57,7 +59,9 @@ export function RootList({
               onClick={() => onSelect("all")}
               title="浏览全部目录"
             >
-              <span className="rootlist__icon">ALL</span>
+              <span className="rootlist__icon">
+                <Library aria-hidden="true" />
+              </span>
               <span className="rootlist__label">全部（{roots.length}）</span>
             </button>
           </li>
@@ -76,7 +80,15 @@ export function RootList({
                 onClick={() => onSelect(r.id)}
                 title={r.path}
               >
-                <span className="rootlist__icon">{r.rootType === "network" ? "NET" : "DIR"}</span>
+                <span className="rootlist__icon">
+                  {r.rootType === "network" ? (
+                    <Wifi aria-hidden="true" />
+                  ) : r.path.includes(":") ? (
+                    <HardDrive aria-hidden="true" />
+                  ) : (
+                    <Folder aria-hidden="true" />
+                  )}
+                </span>
                 <span className="rootlist__label">{display}</span>
               </button>
               <button
@@ -89,7 +101,7 @@ export function RootList({
                 aria-label={`扫描 ${display}`}
                 title="扫描"
               >
-                ↻
+                <RefreshCw aria-hidden="true" />
               </button>
               <button
                 type="button"
@@ -97,7 +109,7 @@ export function RootList({
                 onClick={(e) => handleRemove(e, r.id, display)}
                 aria-label={`移除 ${display}`}
               >
-                ×
+                <X aria-hidden="true" />
               </button>
             </li>
           );
