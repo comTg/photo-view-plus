@@ -1,16 +1,23 @@
 use std::fs::{self, File};
 use std::io::BufWriter;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, OnceLock};
 
 use async_trait::async_trait;
 use image::codecs::webp::WebPEncoder;
 use image::{DynamicImage, ImageEncoder};
 use sha1::{Digest, Sha1};
+use tokio::sync::Semaphore;
 
 use crate::db::Pool;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Task, TaskContext};
 use crate::repo::images_repo;
+
+const THUMB_SIZE: u32 = 256;
+const MAX_THUMBNAIL_CPU_WORKERS: usize = 6;
+
+static THUMBNAIL_CPU_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct ThumbnailTask {
@@ -60,9 +67,45 @@ impl Task for ThumbnailTask {
             return Ok(());
         }
 
+        let semaphore = thumbnail_cpu_semaphore();
+        let cancellation = ctx.cancellation_token();
+        let permit = tokio::select! {
+            permit = semaphore.acquire_owned() => {
+                permit.map_err(|_| AppError::Other("缩略图 CPU 限流器已关闭".to_string()))?
+            }
+            _ = cancellation.cancelled() => return Ok(()),
+        };
         let task = self.clone();
-        tokio::task::spawn_blocking(move || generate(task, ctx)).await?
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            generate(task, ctx)
+        })
+        .await?
     }
+}
+
+pub fn thumbnail_cpu_limit() -> usize {
+    let logical_cpus = std::thread::available_parallelism()
+        .map(|cpus| cpus.get())
+        .unwrap_or(4);
+    thumbnail_cpu_limit_for(logical_cpus)
+}
+
+fn thumbnail_cpu_limit_for(logical_cpus: usize) -> usize {
+    match logical_cpus {
+        0..=2 => 1,
+        _ => (logical_cpus / 2).clamp(2, MAX_THUMBNAIL_CPU_WORKERS),
+    }
+}
+
+fn thumbnail_cpu_semaphore() -> Arc<Semaphore> {
+    THUMBNAIL_CPU_SEMAPHORE
+        .get_or_init(|| {
+            let limit = thumbnail_cpu_limit();
+            tracing::info!(limit, "thumbnail CPU worker limit configured");
+            Arc::new(Semaphore::new(limit))
+        })
+        .clone()
 }
 
 pub fn thumb_hash_for(root_id: i64, rel_path: &str) -> String {
@@ -114,7 +157,7 @@ fn generate(task: ThumbnailTask, ctx: TaskContext) -> AppResult<()> {
     let oriented = apply_orientation(image, task.orientation);
     let width = i64::from(oriented.width());
     let height = i64::from(oriented.height());
-    let thumb = oriented.thumbnail(256, 256).to_rgba8();
+    let thumb = oriented.thumbnail(THUMB_SIZE, THUMB_SIZE).to_rgba8();
     let mut writer = BufWriter::new(File::create(&path)?);
     let encoder = WebPEncoder::new_lossless(&mut writer);
     encoder.write_image(
@@ -158,5 +201,15 @@ mod tests {
     fn thumb_path_uses_two_char_prefix() {
         let path = thumb_path(Path::new("thumbs"), "abcdef0123456789");
         assert!(path.ends_with(Path::new("ab").join("abcdef0123456789.webp")));
+    }
+
+    #[test]
+    fn thumbnail_cpu_limit_scales_with_available_parallelism() {
+        assert_eq!(thumbnail_cpu_limit_for(1), 1);
+        assert_eq!(thumbnail_cpu_limit_for(2), 1);
+        assert_eq!(thumbnail_cpu_limit_for(4), 2);
+        assert_eq!(thumbnail_cpu_limit_for(8), 4);
+        assert_eq!(thumbnail_cpu_limit_for(16), MAX_THUMBNAIL_CPU_WORKERS);
+        assert_eq!(thumbnail_cpu_limit_for(64), MAX_THUMBNAIL_CPU_WORKERS);
     }
 }
