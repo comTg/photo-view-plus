@@ -62,7 +62,8 @@ export function RootList({
               <span className="rootlist__icon">
                 <Library aria-hidden="true" />
               </span>
-              <span className="rootlist__label">全部（{roots.length}）</span>
+              <span className="rootlist__label">全部</span>
+              <span className="rootlist__count">{roots.length}</span>
             </button>
           </li>
         )}

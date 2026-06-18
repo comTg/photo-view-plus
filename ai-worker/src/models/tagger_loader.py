@@ -1,6 +1,11 @@
 from __future__ import annotations
 
+import importlib
+import io
+import os
 import sys
+import warnings
+from contextlib import redirect_stdout
 from pathlib import Path
 
 from PIL import Image, ImageStat
@@ -11,6 +16,8 @@ from .clip_loader import clip_runtime
 # RAM-plus 输入分辨率与最多保留标签数。
 RAM_IMAGE_SIZE = 384
 MAX_TAGS = 24
+BERT_TOKENIZER_DIRNAME = "bert-base-uncased"
+BERT_TOKENIZER_REQUIRED_FILES = ("vocab.txt",)
 
 # (英文 prompt, 中文展示名, category)
 # 仅在 RAM-plus 不可用时作为兜底：CLIP 文本编码器对英文 prompt 更准，所以打分用英文，
@@ -64,6 +71,8 @@ class TaggerRuntime:
             import torch  # type: ignore
 
             _patch_transformers_for_ram()
+            _quiet_ram_import_warnings()
+            _patch_ram_tokenizer()
             from ram import get_transform, inference_ram  # type: ignore
             from ram.models import ram_plus  # type: ignore
         except Exception as exc:
@@ -82,7 +91,12 @@ class TaggerRuntime:
             return
         try:
             device = "cuda" if torch.cuda.is_available() else "cpu"
-            model = ram_plus(pretrained=str(checkpoint), image_size=RAM_IMAGE_SIZE, vit="swin_l")
+            with redirect_stdout(io.StringIO()):
+                model = ram_plus(
+                    pretrained=str(checkpoint),
+                    image_size=RAM_IMAGE_SIZE,
+                    vit="swin_l",
+                )
             model = model.eval().to(device)
         except Exception as exc:
             # 加载失败（显存/权重损坏/库版本不匹配等）→ 退回占位实现，不拖垮 worker。
@@ -186,6 +200,93 @@ def _patch_transformers_for_ram() -> None:
     ):
         if not hasattr(mu, name) and hasattr(pu, name):
             setattr(mu, name, getattr(pu, name))
+
+
+def _patch_ram_tokenizer() -> None:
+    """Make RAM use a local BERT tokenizer and avoid HuggingFace HEAD requests at inference time."""
+    try:
+        from transformers import BertTokenizer
+    except Exception:
+        return
+
+    tokenizer_dir = _find_bert_tokenizer_dir()
+
+    def init_tokenizer(text_encoder_type: str = BERT_TOKENIZER_DIRNAME):
+        source = (
+            str(tokenizer_dir)
+            if text_encoder_type == BERT_TOKENIZER_DIRNAME and tokenizer_dir
+            else text_encoder_type
+        )
+        tokenizer = BertTokenizer.from_pretrained(source, local_files_only=True)
+        tokenizer.add_special_tokens({"bos_token": "[DEC]"})
+        tokenizer.add_special_tokens({"additional_special_tokens": ["[ENC]"]})
+        tokenizer.enc_token_id = tokenizer.additional_special_tokens_ids[0]
+        return tokenizer
+
+    # RAM imports init_tokenizer with `from .utils import *`, so patch both the source module and
+    # the already-imported module globals that RAM_plus/RAM call during model construction.
+    for module_name in ("ram.models.utils", "ram.models.ram_plus", "ram.models.ram"):
+        try:
+            module = importlib.import_module(module_name)
+            setattr(module, "init_tokenizer", init_tokenizer)
+        except Exception:
+            continue
+
+
+def _find_bert_tokenizer_dir() -> Path | None:
+    env_dir = os.environ.get("PVP_BERT_TOKENIZER_DIR")
+    candidates: list[Path] = []
+    if env_dir:
+        candidates.append(Path(env_dir))
+
+    ram_dir = model_path("ram-plus")
+    candidates.extend(
+        [
+            ram_dir / BERT_TOKENIZER_DIRNAME,
+            model_path(BERT_TOKENIZER_DIRNAME),
+        ]
+    )
+    candidates.extend(_hf_snapshot_dirs(BERT_TOKENIZER_DIRNAME))
+
+    for candidate in candidates:
+        if _has_bert_tokenizer_files(candidate):
+            return candidate
+    return None
+
+
+def _quiet_ram_import_warnings() -> None:
+    warnings.filterwarnings(
+        "ignore",
+        category=FutureWarning,
+        message=r"Importing from timm\.models\..* is deprecated.*",
+    )
+    try:
+        from transformers.utils import logging as transformers_logging
+
+        transformers_logging.set_verbosity_error()
+    except Exception:
+        pass
+
+
+def _hf_snapshot_dirs(repo_id: str) -> list[Path]:
+    cache_home = os.environ.get("HF_HOME")
+    hub = (
+        Path(cache_home) / "hub"
+        if cache_home
+        else Path.home() / ".cache" / "huggingface" / "hub"
+    )
+    snapshots = hub / f"models--{repo_id.replace('/', '--')}" / "snapshots"
+    if not snapshots.exists():
+        return []
+    return sorted(
+        (path for path in snapshots.iterdir() if path.is_dir()),
+        key=lambda path: path.stat().st_mtime,
+        reverse=True,
+    )
+
+
+def _has_bert_tokenizer_files(path: Path) -> bool:
+    return path.is_dir() and all((path / name).exists() for name in BERT_TOKENIZER_REQUIRED_FILES)
 
 
 def _find_ram_plus_checkpoint() -> Path | None:

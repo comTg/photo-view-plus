@@ -748,6 +748,20 @@ export default function App() {
           >
             <RefreshCw aria-hidden="true" />
           </button>
+          <div className="task-controls" aria-label="扫描任务控制">
+            <button type="button" onClick={() => void scanPause()} title="暂停队列">
+              <CirclePause aria-hidden="true" />
+              <span className="task-controls__label">暂停</span>
+            </button>
+            <button type="button" onClick={() => void scanResume()} title="恢复队列">
+              <CirclePlay aria-hidden="true" />
+              <span className="task-controls__label">恢复</span>
+            </button>
+            <button type="button" onClick={() => void scanCancel()} title="取消运行中任务">
+              <CircleX aria-hidden="true" />
+              <span className="task-controls__label">取消</span>
+            </button>
+          </div>
           <label className="search-box">
             <Search aria-hidden="true" />
             <input
@@ -828,15 +842,15 @@ export default function App() {
           <div className="section-label">我的相册</div>
           <button type="button" className="nav-item nav-item--muted">
             <Clock3 aria-hidden="true" />
-            最近添加
+            <span className="nav-item__label">最近添加</span>
           </button>
           <button type="button" className="nav-item nav-item--muted">
             <Star aria-hidden="true" />
-            收藏
+            <span className="nav-item__label">收藏</span>
           </button>
           <button type="button" className="nav-item nav-item--muted">
             <Camera aria-hidden="true" />
-            截图
+            <span className="nav-item__label">截图</span>
           </button>
         </nav>
         <RootList
@@ -863,7 +877,7 @@ export default function App() {
           {aiTags.length === 0 ? (
             <button type="button" className="nav-item nav-item--muted">
               <Tags aria-hidden="true" />
-              等待 AI 标签
+              <span className="nav-item__label">等待 AI 标签</span>
             </button>
           ) : (
             aiTags.slice(0, 12).map((tag) => (
@@ -875,7 +889,8 @@ export default function App() {
                 title={`${tag.name} · ${tag.imageCount}`}
               >
                 <Tags aria-hidden="true" />
-                {tag.name} · {tag.imageCount}
+                <span className="nav-item__label">{tag.name}</span>
+                <span className="nav-item__count">{tag.imageCount}</span>
               </button>
             ))
           )}
@@ -884,7 +899,7 @@ export default function App() {
           <div className="section-label">智能相册</div>
           <button type="button" className="nav-item nav-item--muted">
             <Sparkles aria-hidden="true" />
-            MVP4 启用
+            <span className="nav-item__label">MVP4 启用</span>
           </button>
         </nav>
       </aside>
@@ -1064,20 +1079,6 @@ export default function App() {
             : []
         }
       />
-      <div className="task-controls">
-        <button type="button" onClick={() => void scanPause()} title="暂停队列">
-          <CirclePause aria-hidden="true" />
-          暂停
-        </button>
-        <button type="button" onClick={() => void scanResume()} title="恢复队列">
-          <CirclePlay aria-hidden="true" />
-          恢复
-        </button>
-        <button type="button" onClick={() => void scanCancel()} title="取消运行中任务">
-          <CircleX aria-hidden="true" />
-          取消
-        </button>
-      </div>
       {previewIndex !== null && (
         <Suspense fallback={null}>
           <ImagePreviewLightbox
@@ -1216,34 +1217,36 @@ function AiSearchView({
         )}
       </div>
 
-      <div className="ai-results-header">
-        <h1>{title}</h1>
-        <span>{results.length.toLocaleString("zh-CN")} 张</span>
-      </div>
-      {results.length === 0 ? (
-        <EmptyState
-          title="等待 AI 搜索"
-          body="先处理 embedding，再输入自然语言或点击标签查看结果。"
-        />
-      ) : (
-        <div className="ai-result-grid">
-          {results.map((result) => (
-            <div className="ai-result-item" key={`${result.source}:${result.image.id}`}>
-              <ImageCard
-                image={result.image}
-                selected={false}
-                selectionMode={false}
-                onClickImage={(image) => onSelectImage(image)}
-                onPreviewImage={onPreviewImage}
-                onOpenContextMenu={() => undefined}
-              />
-              <span className="ai-result-score">
-                {result.source} · {(result.score * 100).toFixed(0)}
-              </span>
-            </div>
-          ))}
+      <div className="ai-results-panel">
+        <div className="ai-results-header">
+          <h1>{title}</h1>
+          <span>{results.length.toLocaleString("zh-CN")} 张</span>
         </div>
-      )}
+        {results.length === 0 ? (
+          <EmptyState
+            title="等待 AI 搜索"
+            body="先处理 embedding，再输入自然语言或点击标签查看结果。"
+          />
+        ) : (
+          <div className="ai-result-grid">
+            {results.map((result) => (
+              <div className="ai-result-item" key={`${result.source}:${result.image.id}`}>
+                <ImageCard
+                  image={result.image}
+                  selected={false}
+                  selectionMode={false}
+                  onClickImage={(image) => onSelectImage(image)}
+                  onPreviewImage={onPreviewImage}
+                  onOpenContextMenu={() => undefined}
+                />
+                <span className="ai-result-score">
+                  {result.source} · {(result.score * 100).toFixed(0)}
+                </span>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
     </section>
   );
 }
@@ -1275,47 +1278,52 @@ function FilterBar(props: FilterBarProps) {
           </button>
         ))}
       </div>
-      <label className="field-compact">
-        <span>最小 MB</span>
-        <input
-          value={props.sizeMinMb}
-          onChange={(event) => props.setSizeMinMb(event.target.value)}
-          inputMode="decimal"
-        />
-      </label>
-      <label className="field-compact">
-        <span>最大 MB</span>
-        <input
-          value={props.sizeMaxMb}
-          onChange={(event) => props.setSizeMaxMb(event.target.value)}
-          inputMode="decimal"
-        />
-      </label>
-      <label className="field-compact">
-        <span>开始日期</span>
-        <input
-          type="date"
-          value={props.takenFrom}
-          onChange={(event) => props.setTakenFrom(event.target.value)}
-        />
-      </label>
-      <label className="field-compact">
-        <span>结束日期</span>
-        <input
-          type="date"
-          value={props.takenTo}
-          onChange={(event) => props.setTakenTo(event.target.value)}
-        />
-      </label>
-      <select
-        className="control-select"
-        value={props.gpsFilter}
-        onChange={(event) => props.setGpsFilter(event.target.value as GpsFilter)}
-      >
-        <option value="any">GPS 不限</option>
-        <option value="yes">有 GPS</option>
-        <option value="no">无 GPS</option>
-      </select>
+      <div className="filter-bar__fields">
+        <label className="field-compact">
+          <span>最小 MB</span>
+          <input
+            value={props.sizeMinMb}
+            onChange={(event) => props.setSizeMinMb(event.target.value)}
+            inputMode="decimal"
+          />
+        </label>
+        <label className="field-compact">
+          <span>最大 MB</span>
+          <input
+            value={props.sizeMaxMb}
+            onChange={(event) => props.setSizeMaxMb(event.target.value)}
+            inputMode="decimal"
+          />
+        </label>
+        <label className="field-compact">
+          <span>开始日期</span>
+          <input
+            type="date"
+            value={props.takenFrom}
+            onChange={(event) => props.setTakenFrom(event.target.value)}
+          />
+        </label>
+        <label className="field-compact">
+          <span>结束日期</span>
+          <input
+            type="date"
+            value={props.takenTo}
+            onChange={(event) => props.setTakenTo(event.target.value)}
+          />
+        </label>
+        <label className="field-compact">
+          <span>GPS</span>
+          <select
+            className="control-select"
+            value={props.gpsFilter}
+            onChange={(event) => props.setGpsFilter(event.target.value as GpsFilter)}
+          >
+            <option value="any">GPS 不限</option>
+            <option value="yes">有 GPS</option>
+            <option value="no">无 GPS</option>
+          </select>
+        </label>
+      </div>
     </section>
   );
 }
@@ -1644,102 +1652,138 @@ function SettingsView({
 
   return (
     <section className="settings-view">
-      <h1>设置</h1>
+      <div className="settings-heading">
+        <div>
+          <span className="settings-eyebrow">偏好设置</span>
+          <h1>设置</h1>
+        </div>
+        <span className={`settings-status settings-status--${aiStatus?.status ?? "unknown"}`}>
+          AI {aiStatusText(aiStatus?.status)}
+        </span>
+      </div>
       <div className="settings-grid">
-        <label>
-          <span>语言</span>
-          <select
-            value={settings.locale}
-            onChange={(event) => void onPatch({ locale: event.target.value })}
-          >
-            <option value="zh-CN">中文</option>
-            <option value="en-US">English</option>
-          </select>
-        </label>
-        <label>
-          <span>主题</span>
-          <select
-            value={settings.theme}
-            onChange={(event) => void onPatch({ theme: event.target.value })}
-          >
-            <option value="system">跟随系统</option>
-            <option value="light">浅色</option>
-            <option value="dark">深色</option>
-          </select>
-        </label>
-        <label>
-          <span>缩略图缓存上限 GB</span>
-          <input
-            type="number"
-            min={1}
-            max={100}
-            value={settings.thumbCacheGb}
-            onChange={(event) => void onPatch({ thumbCacheGb: Number(event.target.value) })}
-          />
-        </label>
-        <label>
-          <span>本地盘扫描并发</span>
-          <input
-            type="number"
-            min={1}
-            max={16}
-            value={settings.localScanConcurrency}
-            onChange={(event) => void onPatch({ localScanConcurrency: Number(event.target.value) })}
-          />
-        </label>
-        <label>
-          <span>网络盘扫描并发</span>
-          <input
-            type="number"
-            min={1}
-            max={4}
-            value={settings.networkScanConcurrency}
-            onChange={(event) =>
-              void onPatch({ networkScanConcurrency: Number(event.target.value) })
-            }
-          />
-        </label>
-        <label>
-          <span>启用 AI 后台任务</span>
-          <input
-            type="checkbox"
-            checked={settings.aiEnabled}
-            onChange={(event) => void onPatch({ aiEnabled: event.target.checked })}
-          />
-        </label>
-        <label>
-          <span>AI 闲置停止分钟</span>
-          <input
-            type="number"
-            min={1}
-            max={120}
-            value={settings.aiIdleStopMinutes}
-            onChange={(event) => void onPatch({ aiIdleStopMinutes: Number(event.target.value) })}
-          />
-        </label>
-        <label>
-          <span>CLIP 模型</span>
-          <select
-            value={settings.aiClipModel}
-            onChange={(event) => void onPatch({ aiClipModel: event.target.value })}
-          >
-            <option value="clip-vit-b-32">clip-vit-b-32</option>
-            <option value="siglip-so400m">siglip-so400m</option>
-          </select>
-        </label>
-        <label>
-          <span>标签模型</span>
-          <select
-            value={settings.aiTaggerModel}
-            onChange={(event) => void onPatch({ aiTaggerModel: event.target.value })}
-          >
-            <option value="ram-plus">ram-plus</option>
-          </select>
-        </label>
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>常规</h2>
+          </div>
+          <div className="settings-field-grid">
+            <label className="settings-field">
+              <span>语言</span>
+              <select
+                value={settings.locale}
+                onChange={(event) => void onPatch({ locale: event.target.value })}
+              >
+                <option value="zh-CN">中文</option>
+                <option value="en-US">English</option>
+              </select>
+            </label>
+            <label className="settings-field">
+              <span>主题</span>
+              <select
+                value={settings.theme}
+                onChange={(event) => void onPatch({ theme: event.target.value })}
+              >
+                <option value="system">跟随系统</option>
+                <option value="light">浅色</option>
+                <option value="dark">深色</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>扫描与缓存</h2>
+          </div>
+          <div className="settings-field-grid">
+            <label className="settings-field">
+              <span>缩略图缓存上限 GB</span>
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={settings.thumbCacheGb}
+                onChange={(event) => void onPatch({ thumbCacheGb: Number(event.target.value) })}
+              />
+            </label>
+            <label className="settings-field">
+              <span>本地盘扫描并发</span>
+              <input
+                type="number"
+                min={1}
+                max={16}
+                value={settings.localScanConcurrency}
+                onChange={(event) =>
+                  void onPatch({ localScanConcurrency: Number(event.target.value) })
+                }
+              />
+            </label>
+            <label className="settings-field">
+              <span>网络盘扫描并发</span>
+              <input
+                type="number"
+                min={1}
+                max={4}
+                value={settings.networkScanConcurrency}
+                onChange={(event) =>
+                  void onPatch({ networkScanConcurrency: Number(event.target.value) })
+                }
+              />
+            </label>
+          </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>AI 设置</h2>
+          </div>
+          <label className="settings-toggle">
+            <span>启用 AI 后台任务</span>
+            <input
+              type="checkbox"
+              checked={settings.aiEnabled}
+              onChange={(event) => void onPatch({ aiEnabled: event.target.checked })}
+            />
+          </label>
+          <div className="settings-field-grid">
+            <label className="settings-field">
+              <span>闲置停止分钟</span>
+              <input
+                type="number"
+                min={1}
+                max={120}
+                value={settings.aiIdleStopMinutes}
+                onChange={(event) =>
+                  void onPatch({ aiIdleStopMinutes: Number(event.target.value) })
+                }
+              />
+            </label>
+            <label className="settings-field">
+              <span>CLIP 模型</span>
+              <select
+                value={settings.aiClipModel}
+                onChange={(event) => void onPatch({ aiClipModel: event.target.value })}
+              >
+                <option value="clip-vit-b-32">clip-vit-b-32</option>
+                <option value="siglip-so400m">siglip-so400m</option>
+              </select>
+            </label>
+            <label className="settings-field">
+              <span>标签模型</span>
+              <select
+                value={settings.aiTaggerModel}
+                onChange={(event) => void onPatch({ aiTaggerModel: event.target.value })}
+              >
+                <option value="ram-plus">ram-plus</option>
+              </select>
+            </label>
+          </div>
+        </section>
+
         <div className="settings-panel settings-panel--wide">
           <div className="settings-panel__header">
             <div>
-              <span className="section-label">AI Worker</span>
+              <span className="settings-eyebrow">AI Worker</span>
               <strong>{aiStatusText(aiStatus?.status)}</strong>
             </div>
             <div className="settings-panel__actions">

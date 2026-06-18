@@ -7,6 +7,15 @@ from typing import Any
 
 WORKER_ROOT = Path(__file__).resolve().parents[1]
 MANIFEST_PATH = WORKER_ROOT / "models.json"
+BERT_TOKENIZER_REPO = "bert-base-uncased"
+BERT_TOKENIZER_FILES = [
+    "config.json",
+    "tokenizer_config.json",
+    "tokenizer.json",
+    "vocab.txt",
+    "special_tokens_map.json",
+    "added_tokens.json",
+]
 
 
 def default_model_dir() -> Path:
@@ -66,5 +75,21 @@ def download_model(model_key: str) -> Path:
         local_dir=target,
         local_dir_use_symlinks=False,
         resume_download=True,
+    )
+    if model_key == "ram-plus":
+        download_bert_tokenizer(target / BERT_TOKENIZER_REPO)
+    return target
+
+
+def download_bert_tokenizer(target: Path) -> Path:
+    from huggingface_hub import snapshot_download
+
+    target.mkdir(parents=True, exist_ok=True)
+    snapshot_download(
+        repo_id=BERT_TOKENIZER_REPO,
+        local_dir=target,
+        local_dir_use_symlinks=False,
+        resume_download=True,
+        allow_patterns=BERT_TOKENIZER_FILES,
     )
     return target

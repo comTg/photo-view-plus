@@ -30,7 +30,7 @@ def main() -> None:
     import sys
 
     sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from src.model_registry import model_manifest
+    from src.model_registry import BERT_TOKENIZER_REPO, download_bert_tokenizer, model_manifest
 
     model = model_manifest()[args.model_key]
     target = args.dest / args.model_key
@@ -41,6 +41,8 @@ def main() -> None:
         local_dir_use_symlinks=False,
         resume_download=True,
     )
+    if args.model_key == "ram-plus":
+        download_bert_tokenizer(target / BERT_TOKENIZER_REPO)
     print(target)
 
 
