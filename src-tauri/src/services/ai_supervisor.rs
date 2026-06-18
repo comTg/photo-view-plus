@@ -492,7 +492,9 @@ where
 {
     tokio::spawn(async move {
         while let Ok(Some(line)) = lines.next_line().await {
-            tracing::debug!(stream, line, "AI worker output");
+            // 用 info 级别：worker 的 stdout/stderr（含 [tagger] 加载诊断、模型报错）才能进默认日志，
+            // 否则被 "warn,photo_view_plus_lib=info" 过滤掉、排查 AI 问题时啥也看不到。
+            tracing::info!(stream, line, "AI worker output");
         }
     });
 }

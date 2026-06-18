@@ -21,7 +21,7 @@
     "ai:dev": "cd ai-worker && uv run python -m src.main --host 127.0.0.1 --port 0",
     "ai:check": "cd ai-worker && uv run python scripts/check_runtime.py",
     "ai:download": "cd ai-worker && uv run --extra models python scripts/download_models.py",
-    "ai:install-ram": "cd ai-worker && uv sync --extra cuda --extra tagger && uv pip install --no-deps \"git+https://github.com/xinyu1205/recognize-anything.git\""
+    "ai:install-ram": "cd ai-worker && uv sync --extra cuda --extra tagger"
   },
   "dependencies": {
     "@tauri-apps/api": "^2.11.0",

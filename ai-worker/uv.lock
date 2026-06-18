@@ -152,6 +152,16 @@ nvtx = [
 ]
 
 [[package]]
+name = "fairscale"
+version = "0.4.13"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "torch" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/c1/08/b3334d7b543ac10dcb129cef4f84723ab696725512f18d69ab3a784b0bf5/fairscale-0.4.13.tar.gz", hash = "sha256:1b797825c427f5dba92253fd0d8daa574e8bd651a2423497775fab1b30cfb768", size = 266261, upload-time = "2022-12-11T18:09:16.892Z" }
+
+[[package]]
 name = "fastapi"
 version = "0.137.1"
 source = { registry = "https://pypi.org/simple" }
@@ -562,12 +572,15 @@ models = [
     { name = "huggingface-hub" },
 ]
 tagger = [
+    { name = "fairscale" },
+    { name = "ram" },
     { name = "scipy" },
     { name = "transformers" },
 ]
 
 [package.metadata]
 requires-dist = [
+    { name = "fairscale", marker = "extra == 'tagger'", specifier = ">=0.4.13" },
     { name = "fastapi", specifier = ">=0.115.0" },
     { name = "huggingface-hub", specifier = ">=0.24.0" },
     { name = "huggingface-hub", marker = "extra == 'models'", specifier = ">=0.24.0" },
@@ -575,6 +588,7 @@ requires-dist = [
     { name = "open-clip-torch", marker = "extra == 'cuda'", specifier = ">=2.26.0" },
     { name = "pillow", specifier = ">=10.4.0" },
     { name = "pydantic", specifier = ">=2.8.0" },
+    { name = "ram", marker = "extra == 'tagger'", git = "https://github.com/xinyu1205/recognize-anything.git" },
     { name = "scipy", marker = "extra == 'tagger'", specifier = ">=1.13.0" },
     { name = "torch", marker = "extra == 'cuda'", specifier = ">=2.6.0", index = "https://download.pytorch.org/whl/cu128" },
     { name = "torchvision", marker = "extra == 'cuda'", specifier = ">=0.21.0", index = "https://download.pytorch.org/whl/cu128" },
@@ -705,6 +719,11 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/45/91/47a6e1c42d9ee337c4839208f30d9f09caa9f720ec7582917b264defc875/pyyaml-6.0.3-cp311-cp311-win32.whl", hash = "sha256:8098f252adfa6c80ab48096053f512f2321f0b998f98150cea9bd23d83e1467b", size = 142543, upload-time = "2025-09-25T21:32:08.95Z" },
     { url = "https://files.pythonhosted.org/packages/da/e3/ea007450a105ae919a72393cb06f122f288ef60bba2dc64b26e2646fa315/pyyaml-6.0.3-cp311-cp311-win_amd64.whl", hash = "sha256:9f3bfb4965eb874431221a3ff3fdcddc7e74e3b07799e0e84ca4a0f867d449bf", size = 158763, upload-time = "2025-09-25T21:32:09.96Z" },
 ]
+
+[[package]]
+name = "ram"
+version = "0.0.1"
+source = { git = "https://github.com/xinyu1205/recognize-anything.git#7cb804a8609e9f4b1a50b7f31436d2df40bb9481" }
 
 [[package]]
 name = "regex"

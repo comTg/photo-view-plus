@@ -47,6 +47,14 @@ Thumbs.db
 coverage/
 .nyc_output/
 
+# Python (ai-worker)
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+.ruff_cache/
+.pytest_cache/
+
 # Project-local app data (dev profile)
 .app-data/
 

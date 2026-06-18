@@ -28,8 +28,15 @@ models = [
 # scripts/install_ram.py 或 docs/05。装：uv sync --extra cuda --extra tagger
 tagger = [
     # RAM 的 BERT 文本编码器是 transformers 4.x 时代的自定义实现，5.x 大改 API 大概率不兼容，钉到 4.x。
+    # （bert.py 还从 modeling_utils 导已迁走的函数，tagger_loader 里有 shim 兜底。）
     "transformers>=4.44.0,<5",
+    # swin_transformer.py 顶层 import scipy；ram_plus→utils→vit.py import fairscale 的 checkpoint_wrapper
+    # （训练用，推理不调用，但 import 时要在）。
     "scipy>=1.13.0",
+    "fairscale>=0.4.13",
+    # RAM 仓库不在 PyPI，包名是 ram（setup.cfg name=ram），从 git 装；其 setup.cfg 无
+    # install_requires，不会拉 requirements.txt 里钉死的老依赖（timm==0.4.12 等），可交给 uv 托管。
+    "ram @ git+https://github.com/xinyu1205/recognize-anything.git",
 ]
 
 [dependency-groups]
@@ -43,6 +50,10 @@ torchvision = { index = "pytorch-cu128" }
 name = "pytorch-cu128"
 url = "https://download.pytorch.org/whl/cu128"
 explicit = true
+
+[tool.hatch.metadata]
+# 允许 tagger extra 里的 `ram @ git+...` 这种 URL 直接引用依赖。
+allow-direct-references = true
 
 [tool.hatch.build.targets.wheel]
 packages = ["src"]

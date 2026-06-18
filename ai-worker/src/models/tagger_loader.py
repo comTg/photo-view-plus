@@ -62,10 +62,14 @@ class TaggerRuntime:
     def _load_ram_plus(self) -> None:
         try:
             import torch  # type: ignore
+
+            _patch_transformers_for_ram()
             from ram import get_transform, inference_ram  # type: ignore
             from ram.models import ram_plus  # type: ignore
-        except Exception:
-            # recognize-anything 未安装（未装 tagger extra）→ 静默退回占位实现，这是预期情况。
+        except Exception as exc:
+            # 未装 tagger extra / recognize-anything 时这里报 ImportError（预期，退回占位）；
+            # 其它 import 错误也打印出来，便于排查（之前静默，定位困难）。
+            print(f"[tagger] RAM 库不可用，使用占位标签：{exc}", file=sys.stderr, flush=True)
             return
         checkpoint = _find_ram_plus_checkpoint()
         if checkpoint is None:
@@ -165,6 +169,23 @@ def _split_tags(raw: str) -> list[str]:
             seen.add(part)
             ordered.append(part)
     return ordered
+
+
+def _patch_transformers_for_ram() -> None:
+    """RAM 的 bert.py 仍从 transformers.modeling_utils 导入若干已迁移到 pytorch_utils 的函数，
+    新版 transformers 不再 re-export。把它们补回 modeling_utils，使 RAM 在新版 transformers 下可 import。"""
+    try:
+        import transformers.modeling_utils as mu
+        import transformers.pytorch_utils as pu
+    except Exception:
+        return
+    for name in (
+        "apply_chunking_to_forward",
+        "find_pruneable_heads_and_indices",
+        "prune_linear_layer",
+    ):
+        if not hasattr(mu, name) and hasattr(pu, name):
+            setattr(mu, name, getattr(pu, name))
 
 
 def _find_ram_plus_checkpoint() -> Path | None:
