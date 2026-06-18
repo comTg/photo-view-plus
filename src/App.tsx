@@ -144,6 +144,7 @@ export default function App() {
   const [selectionMode, setSelectionMode] = useState(false);
   const lastSelectedId = useRef<number | null>(null);
   const [detail, setDetail] = useState<ImageRecord | null>(null);
+  const [previewImages, setPreviewImages] = useState<ImageRecord[]>([]);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [imageMenu, setImageMenu] = useState<{
     x: number;
@@ -353,11 +354,23 @@ export default function App() {
     selectedIds.length > 0 ? (selectedIds[selectedIds.length - 1] ?? null) : null;
 
   const openPreviewById = useCallback((imageId: number) => {
-    const index = imagesRef.current.findIndex((image) => image.id === imageId);
+    const currentImages = imagesRef.current;
+    const index = currentImages.findIndex((image) => image.id === imageId);
     if (index < 0) {
       setToast("当前图片还没有加载到预览列表");
       return;
     }
+    setPreviewImages(currentImages);
+    setPreviewIndex(index);
+  }, []);
+
+  const openPreviewInList = useCallback((image: ImageRecord, list: ImageRecord[]) => {
+    const index = list.findIndex((item) => item.id === image.id);
+    if (index < 0) {
+      setToast("当前图片还没有加载到预览列表");
+      return;
+    }
+    setPreviewImages(list);
     setPreviewIndex(index);
   }, []);
 
@@ -395,10 +408,10 @@ export default function App() {
   }, [openPreviewById, primarySelectedId, selectionMode]);
 
   useEffect(() => {
-    if (previewIndex !== null && previewIndex >= images.length) {
+    if (previewIndex !== null && previewIndex >= previewImages.length) {
       setPreviewIndex(null);
     }
-  }, [images.length, previewIndex]);
+  }, [previewImages.length, previewIndex]);
 
   const handleScan = useCallback(async (rootId: number) => {
     try {
@@ -718,6 +731,7 @@ export default function App() {
     () => images.filter((image) => selectedIds.includes(image.id)),
     [images, selectedIds],
   );
+  const aiResultImages = useMemo(() => aiResults.map((result) => result.image), [aiResults]);
   const showDetailPane = activeView === "browse";
 
   return (
@@ -936,7 +950,8 @@ export default function App() {
               setSelectedIds([image.id]);
               lastSelectedId.current = image.id;
             }}
-            onPreviewImage={(image) => openPreviewById(image.id)}
+            onPreviewImage={(image) => openPreviewInList(image, aiResultImages)}
+            onOpenContextMenu={handleOpenImageMenu}
             tags={aiTags}
             results={aiResults}
             title={aiResultsTitle}
@@ -1082,7 +1097,7 @@ export default function App() {
       {previewIndex !== null && (
         <Suspense fallback={null}>
           <ImagePreviewLightbox
-            images={images}
+            images={previewImages}
             index={previewIndex}
             open={true}
             onClose={() => setPreviewIndex(null)}
@@ -1118,6 +1133,7 @@ interface AiSearchViewProps {
   onSelectTag: (tag: AiTag) => Promise<void>;
   onSelectImage: (image: ImageRecord) => void;
   onPreviewImage: (image: ImageRecord) => void;
+  onOpenContextMenu: (image: ImageRecord, event: React.MouseEvent) => void;
   tags: AiTag[];
   results: AiSearchResult[];
   title: string;
@@ -1135,6 +1151,7 @@ function AiSearchView({
   onSelectTag,
   onSelectImage,
   onPreviewImage,
+  onOpenContextMenu,
   tags,
   results,
   title,
@@ -1237,7 +1254,7 @@ function AiSearchView({
                   selectionMode={false}
                   onClickImage={(image) => onSelectImage(image)}
                   onPreviewImage={onPreviewImage}
-                  onOpenContextMenu={() => undefined}
+                  onOpenContextMenu={onOpenContextMenu}
                 />
                 <span className="ai-result-score">
                   {result.source} · {(result.score * 100).toFixed(0)}
@@ -1252,13 +1269,7 @@ function AiSearchView({
 }
 
 function FilterBar(props: FilterBarProps) {
-  const toggleFormat = (format: string) => {
-    props.setFormats(
-      props.formats.includes(format)
-        ? props.formats.filter((item) => item !== format)
-        : [...props.formats, format],
-    );
-  };
+  const selectedFormat = props.formats.length === 1 ? (props.formats[0] ?? "") : "";
 
   return (
     <section className="filter-bar">
@@ -1266,19 +1277,25 @@ function FilterBar(props: FilterBarProps) {
         <SlidersHorizontal aria-hidden="true" />
         <span>筛选</span>
       </div>
-      <div className="format-pills">
-        {FORMATS.map((format) => (
-          <button
-            key={format}
-            type="button"
-            className={`pill${props.formats.includes(format) ? " pill--active" : ""}`}
-            onClick={() => toggleFormat(format)}
-          >
-            {format.toUpperCase()}
-          </button>
-        ))}
-      </div>
       <div className="filter-bar__fields">
+        <label className="field-compact">
+          <span>类型</span>
+          <select
+            className="control-select"
+            value={selectedFormat}
+            onChange={(event) => {
+              const format = event.target.value;
+              props.setFormats(format ? [format] : []);
+            }}
+          >
+            <option value="">全部类型</option>
+            {FORMATS.map((format) => (
+              <option key={format} value={format}>
+                {format.toUpperCase()}
+              </option>
+            ))}
+          </select>
+        </label>
         <label className="field-compact">
           <span>最小 MB</span>
           <input
