@@ -50,6 +50,10 @@ pub struct AiSupervisor {
     models_dir: PathBuf,
     client: AiHttpClient,
     inner: Mutex<AiSupervisorInner>,
+    /// 串行化 worker 启动。`spawn_worker` 要加载模型、耗时数秒，期间不能持 `inner` 锁
+    /// （否则阻塞 status/health 查询）；但若不加这把锁，并发的后台任务/重试会在
+    /// `child` 仍为 None 时各自拉起一个 Python 进程（thundering herd，曾一次炸出十几个）。
+    start_lock: Mutex<()>,
 }
 
 #[derive(Debug, Clone)]
@@ -90,13 +94,25 @@ impl AiSupervisor {
                 start_failures: 0,
                 start_cooldown_until: None,
             }),
+            start_lock: Mutex::new(()),
         })
     }
 
     pub async fn start(&self) -> AppResult<AiWorkerStatus> {
+        // 快速路径：已就绪直接返回，不去争 start_lock。
         {
             let mut inner = self.inner.lock().await;
             refresh_restart_window(&mut inner);
+            if inner.child.is_some() && inner.status.status == "ready" {
+                return Ok(inner.status.clone());
+            }
+        }
+
+        // 串行化真正的启动：N 个并发调用里只有一个会 spawn，其余在此排队；拿到锁后复检——
+        // 前一个已经把 worker 拉起来了就直接返回，绝不重复 spawn（修掉 thundering herd）。
+        let _start_guard = self.start_lock.lock().await;
+        {
+            let mut inner = self.inner.lock().await;
             if inner.child.is_some() && inner.status.status == "ready" {
                 return Ok(inner.status.clone());
             }
@@ -254,6 +270,16 @@ impl AiSupervisor {
     }
 
     async fn restart_after_failure(&self, reason: String) -> AppResult<AiWorkerStatus> {
+        // 与 start() 共用启动锁：避免监控线程的重启和后台任务的 start() 同时 spawn。
+        let _start_guard = self.start_lock.lock().await;
+        // 拿到锁后复检：等待期间可能已被其它路径重启成功，这次失败已过期，直接返回。
+        {
+            let inner = self.inner.lock().await;
+            if inner.child.is_some() && inner.status.status == "ready" {
+                return Ok(inner.status.clone());
+            }
+        }
+
         let _ = self.stop_inner(false).await;
 
         {

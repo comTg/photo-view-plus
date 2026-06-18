@@ -4,6 +4,7 @@ import { RootList } from "@/components/sidebar/RootList";
 import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useRoots } from "@/hooks/useRoots";
 import { useTauriEvent } from "@/lib/events";
+import { markBoot } from "@/lib/perf";
 import {
   aiImageTags,
   aiImagesByTag,
@@ -162,8 +163,12 @@ export default function App() {
   }, [roots.reload]);
 
   useEffect(() => {
+    markBoot("app-committed"); // App 首次挂载提交（React 已构建并提交 DOM）
     ping()
-      .then(setProfile)
+      .then((value) => {
+        markBoot("ping-resolved"); // 首个 invoke 往返完成：判断后端响应是否拖慢首屏
+        setProfile(value);
+      })
       .catch((error) => setBootError(String(error)));
     settingsGet()
       .then((loaded) => {

@@ -1,5 +1,6 @@
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
+use std::time::Duration;
 
 use http::header;
 use tauri::{Emitter, Manager};
@@ -21,9 +22,13 @@ pub mod utils;
 pub use error::{AppError, AppResult};
 
 use services::dedup_service::DedupCoordinator;
+use services::startup_gate::StartupGate;
 use utils::bk_tree::DhashIndex;
 
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
+
+/// 前端迟迟不发「首屏就绪」信号时，启动期重活最多等多久就自行放行。
+const STARTUP_GATE_FALLBACK: Duration = Duration::from_secs(30);
 
 pub fn run() {
     let profile = config::Profile::from_env();
@@ -84,13 +89,19 @@ pub fn run() {
             ));
             ai_pipeline.clone().spawn_loop(app.handle().clone());
 
-            // BK-tree 全量加载 + 重排上次未完成的缩略图都会查全库，放后台线程，
-            // 让 setup 尽快返回、窗口立即出图，不再白屏等待。
-            spawn_background_init(
+            let startup_gate = Arc::new(StartupGate::new());
+
+            // BK-tree 全量加载：一次性查全库，放后台线程，让 setup 尽快返回。
+            spawn_bktree_init(pool.clone(), dhash_index.clone());
+
+            // 重排上次未完成的缩略图会瞬间灌入数千个解码任务，和 dev 下 WebView/Vite
+            // 的首屏模块加载抢 CPU/磁盘（实测把白屏拖到近两分钟）。推迟到前端首屏绘制
+            // 之后（frontend_ready）或兜底超时再做。
+            spawn_deferred_thumbnail_requeue(
                 pool.clone(),
                 scheduler.clone(),
-                dhash_index.clone(),
                 paths.thumbs_dir.clone(),
+                startup_gate.clone(),
             );
 
             app.manage(paths);
@@ -100,11 +111,14 @@ pub fn run() {
             app.manage(dedup_coord);
             app.manage(ai_supervisor);
             app.manage(ai_pipeline);
+            app.manage(startup_gate);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             commands::system::ping,
             commands::system::db_status,
+            commands::system::ui_perf,
+            commands::system::frontend_ready,
             commands::roots::roots_add,
             commands::roots::roots_list,
             commands::roots::roots_remove,
@@ -151,34 +165,42 @@ pub fn run() {
         .unwrap_or_else(|error| eprintln!("error while running tauri application: {error}"));
 }
 
-/// 后台初始化：BK-tree 全量加载 + 重排未完成缩略图。两者都查全库，
-/// 不能放在 setup 主线程里跑，否则窗口会白屏到它们结束。
-fn spawn_background_init(
+/// BK-tree 全量加载：查全库，放后台线程，不能放在 setup 主线程里跑，否则窗口会白屏到它结束。
+fn spawn_bktree_init(pool: db::Pool, dhash_index: Arc<DhashIndex>) {
+    std::thread::spawn(move || match pool.get() {
+        Ok(conn) => match repo::images_repo::all_dhashes(&conn) {
+            Ok(entries) => {
+                let count = entries.len();
+                dhash_index.rebuild_from(entries);
+                tracing::info!(loaded = count, "dhash BK-tree loaded");
+            }
+            Err(error) => tracing::warn!(%error, "failed to load dhash BK-tree on startup"),
+        },
+        Err(error) => tracing::warn!(%error, "failed to get conn for BK-tree init"),
+    });
+}
+
+/// 重排上次未完成的缩略图（扫描中断会留下 thumb_status='pending' 的图，重复扫描不会
+/// 再触碰未改动文件，必须主动恢复）。但这会瞬间灌入大量解码任务，启动时会和首屏抢资源，
+/// 所以挂在 [`StartupGate`] 上——等前端首屏绘制完成或兜底超时后再做。
+fn spawn_deferred_thumbnail_requeue(
     pool: db::Pool,
     scheduler: queue::Scheduler,
-    dhash_index: Arc<DhashIndex>,
     thumbs_dir: PathBuf,
+    gate: Arc<StartupGate>,
 ) {
-    std::thread::spawn(move || {
-        match pool.get() {
-            Ok(conn) => match repo::images_repo::all_dhashes(&conn) {
-                Ok(entries) => {
-                    let count = entries.len();
-                    dhash_index.rebuild_from(entries);
-                    tracing::info!(loaded = count, "dhash BK-tree loaded");
-                }
-                Err(error) => tracing::warn!(%error, "failed to load dhash BK-tree on startup"),
-            },
-            Err(error) => tracing::warn!(%error, "failed to get conn for BK-tree init"),
-        }
-
-        // 扫描中断会留下 thumb_status='pending' 的图，重复扫描不会再触碰未改动文件，
-        // 必须主动恢复，否则它们永远停在"生成中"。
-        match services::thumbnail_service::requeue_pending_thumbnails(&pool, &scheduler, &thumbs_dir)
-        {
-            Ok(count) if count > 0 => tracing::info!(count, "requeued pending thumbnails"),
-            Ok(_) => {}
-            Err(error) => tracing::warn!(%error, "failed to requeue pending thumbnails"),
+    tauri::async_runtime::spawn(async move {
+        gate.wait(STARTUP_GATE_FALLBACK).await;
+        // 重排本身是同步阻塞（查 pending + 入队），丢到 blocking 线程，别占 async runtime。
+        let joined = tokio::task::spawn_blocking(move || {
+            services::thumbnail_service::requeue_pending_thumbnails(&pool, &scheduler, &thumbs_dir)
+        })
+        .await;
+        match joined {
+            Ok(Ok(count)) if count > 0 => tracing::info!(count, "requeued pending thumbnails"),
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "failed to requeue pending thumbnails"),
+            Err(error) => tracing::warn!(%error, "thumbnail requeue task join failed"),
         }
     });
 }
