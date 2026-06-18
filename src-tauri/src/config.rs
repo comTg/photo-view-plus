@@ -12,11 +12,19 @@ pub enum Profile {
 
 impl Profile {
     pub fn from_env() -> Self {
-        match std::env::var("PVP_PROFILE").as_deref() {
-            Ok("dev") => Self::Dev,
-            Ok("test") => Self::Test,
-            Ok("prod") => Self::Prod,
-            _ => Self::Dev,
+        std::env::var("PVP_PROFILE")
+            .ok()
+            .and_then(|value| Self::from_str(&value))
+            .or_else(|| Self::from_str(option_env!("PVP_BUILD_PROFILE").unwrap_or("dev")))
+            .unwrap_or(Self::Dev)
+    }
+
+    fn from_str(value: &str) -> Option<Self> {
+        match value.trim() {
+            "dev" => Some(Self::Dev),
+            "test" => Some(Self::Test),
+            "prod" => Some(Self::Prod),
+            _ => None,
         }
     }
 

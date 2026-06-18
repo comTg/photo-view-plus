@@ -16,14 +16,17 @@ use crate::repo::tags_repo::{self, NewTagScore};
 use crate::services::ai_client::{ClipEmbedItem, TaggerItem};
 use crate::services::ai_supervisor::AiSupervisor;
 use crate::services::settings_service;
+use crate::services::startup_gate::StartupGate;
 use crate::services::thumbnail_service;
 
 const EMBED_BATCH: i64 = 32;
 const TAG_BATCH: i64 = 16;
-/// 启动后到首次跑后台 AI 的静默期。worker 首启要 import torch/CUDA、加载 CLIP，
-/// 是开机最重的磁盘/CPU 尖峰；推迟到首屏渲染、首批缩略图之后，避免和冷启动的
-/// WebView2 / Vite 抢资源造成长时间白屏。手动“启动 / 处理待办”不受此延迟影响。
-const STARTUP_GRACE: Duration = Duration::from_secs(20);
+/// 前端迟迟不发「首屏就绪」信号时，后台 AI 最多等多久才自行放行。
+///
+/// 正常路径必须等 `frontend_ready`：worker 首启会 import torch/CUDA、加载模型，是开机
+/// 最重的磁盘/CPU 尖峰；固定 sleep 在首屏被拖慢时会提前到期，反而继续拉长白屏。
+/// 手动“启动 / 处理待办”不受此延迟影响。
+const STARTUP_AI_FALLBACK: Duration = Duration::from_secs(180);
 
 #[derive(Clone)]
 pub struct AiPipeline {
@@ -64,11 +67,15 @@ impl AiPipeline {
         self.vectors.clone()
     }
 
-    pub fn spawn_loop(self: Arc<Self>, app: tauri::AppHandle<tauri::Wry>) {
+    pub fn spawn_loop(
+        self: Arc<Self>,
+        app: tauri::AppHandle<tauri::Wry>,
+        startup_gate: Arc<StartupGate>,
+    ) {
         tauri::async_runtime::spawn(async move {
             // 启动后先让前端完成首屏，再开始后台 AI：启动 Python/CUDA worker 很重，
             // 不应和窗口首次渲染抢 CPU/磁盘/显存。
-            tokio::time::sleep(STARTUP_GRACE).await;
+            startup_gate.wait(STARTUP_AI_FALLBACK).await;
             let mut interval = tokio::time::interval(Duration::from_secs(2));
             loop {
                 interval.tick().await;

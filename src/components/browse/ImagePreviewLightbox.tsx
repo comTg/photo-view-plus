@@ -1,7 +1,9 @@
 import { originalUrl } from "@/lib/tauri";
 import type { ImageRecord } from "@/lib/tauri-types";
 import Lightbox, { type Slide } from "yet-another-react-lightbox";
+import "yet-another-react-lightbox/styles.css";
 import Counter from "yet-another-react-lightbox/plugins/counter";
+import "yet-another-react-lightbox/plugins/counter.css";
 import Fullscreen from "yet-another-react-lightbox/plugins/fullscreen";
 import Zoom from "yet-another-react-lightbox/plugins/zoom";
 

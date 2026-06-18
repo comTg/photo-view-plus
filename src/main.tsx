@@ -1,7 +1,5 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import "yet-another-react-lightbox/styles.css";
-import "yet-another-react-lightbox/plugins/counter.css";
 import App from "./App";
 import { markBoot, signalFrontendReady } from "./lib/perf";
 import "./styles/globals.css";

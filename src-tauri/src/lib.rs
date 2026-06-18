@@ -28,7 +28,10 @@ use utils::bk_tree::DhashIndex;
 static LOG_GUARD: OnceLock<WorkerGuard> = OnceLock::new();
 
 /// 前端迟迟不发「首屏就绪」信号时，启动期重活最多等多久就自行放行。
-const STARTUP_GATE_FALLBACK: Duration = Duration::from_secs(30);
+///
+/// 这个兜底只用于异常情况。正常路径必须等 `frontend_ready`，否则 Python/CUDA
+/// worker 或数千个缩略图任务会和 WebView/Vite 的冷启动抢 CPU/磁盘，把白屏继续拉长。
+const STARTUP_DEFERRED_WORK_FALLBACK: Duration = Duration::from_secs(180);
 
 pub fn run() {
     let profile = config::Profile::from_env();
@@ -80,6 +83,8 @@ pub fn run() {
             let dedup_coord = Arc::new(DedupCoordinator::new());
 
             // MVP3 AI worker supervisor：按需启动 Python 子进程，后台 monitor 只负责已启动后的健康检查。
+            let startup_gate = Arc::new(StartupGate::new());
+
             let ai_worker_dir = resolve_ai_worker_dir();
             let ai_supervisor = Arc::new(
                 services::ai_supervisor::AiSupervisor::new(ai_worker_dir, paths.models_dir.clone())
@@ -92,9 +97,9 @@ pub fn run() {
                 ai_supervisor.clone(),
                 &paths,
             ));
-            ai_pipeline.clone().spawn_loop(app.handle().clone());
-
-            let startup_gate = Arc::new(StartupGate::new());
+            ai_pipeline
+                .clone()
+                .spawn_loop(app.handle().clone(), startup_gate.clone());
 
             // BK-tree 全量加载：一次性查全库，放后台线程，让 setup 尽快返回。
             spawn_bktree_init(pool.clone(), dhash_index.clone());
@@ -195,7 +200,7 @@ fn spawn_deferred_thumbnail_requeue(
     gate: Arc<StartupGate>,
 ) {
     tauri::async_runtime::spawn(async move {
-        gate.wait(STARTUP_GATE_FALLBACK).await;
+        gate.wait(STARTUP_DEFERRED_WORK_FALLBACK).await;
         // 重排本身是同步阻塞（查 pending + 入队），丢到 blocking 线程，别占 async runtime。
         let joined = tokio::task::spawn_blocking(move || {
             services::thumbnail_service::requeue_pending_thumbnails(&pool, &scheduler, &thumbs_dir)

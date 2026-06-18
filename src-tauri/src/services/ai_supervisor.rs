@@ -393,10 +393,13 @@ impl AiSupervisor {
             .env("NUMEXPR_NUM_THREADS", &cpu_threads);
 
         // Windows：整个 Python 进程以「低于正常」优先级运行，即使 CPU 跑满也让位给前台 UI。
+        // 同时隐藏 console 子系统程序（python/uv）自己的控制台窗口；release 主进程本身无
+        // 控制台，但它拉起的 console 子进程默认仍会闪出黑窗。
         #[cfg(windows)]
         {
             const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
-            command.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+            const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+            command.creation_flags(BELOW_NORMAL_PRIORITY_CLASS | CREATE_NO_WINDOW);
         }
 
         let mut child = command.spawn()?;

@@ -1,5 +1,3 @@
-import { ImagePreviewLightbox } from "@/components/browse/ImagePreviewLightbox";
-import { DedupView } from "@/components/dedup/DedupView";
 import { RootList } from "@/components/sidebar/RootList";
 import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useRoots } from "@/hooks/useRoots";
@@ -76,12 +74,20 @@ import {
   Star,
   Tags,
 } from "lucide-react";
-import { memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VirtuosoGrid } from "react-virtuoso";
 
 const PAGE_SIZE = 200;
 const SCAN_REFRESH_MS = 1500;
 const FORMATS = ["jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "tiff", "gif"];
+const DedupView = lazy(() =>
+  import("@/components/dedup/DedupView").then((module) => ({ default: module.DedupView })),
+);
+const ImagePreviewLightbox = lazy(() =>
+  import("@/components/browse/ImagePreviewLightbox").then((module) => ({
+    default: module.ImagePreviewLightbox,
+  })),
+);
 
 type ViewMode = "grid-lg" | "grid-md" | "grid-sm" | "list";
 type GpsFilter = "any" | "yes" | "no";
@@ -900,7 +906,9 @@ export default function App() {
             onAiDownloadModel={handleAiDownloadModel}
           />
         ) : activeView === "dedup" ? (
-          <DedupView onToast={setToast} />
+          <Suspense fallback={<div className="loading-row">正在加载去重视图…</div>}>
+            <DedupView onToast={setToast} />
+          </Suspense>
         ) : activeView === "ai" ? (
           <AiSearchView
             query={aiSearchDraft}
@@ -1070,13 +1078,17 @@ export default function App() {
           取消
         </button>
       </div>
-      <ImagePreviewLightbox
-        images={images}
-        index={previewIndex ?? 0}
-        open={previewIndex !== null}
-        onClose={() => setPreviewIndex(null)}
-        onIndexChange={setPreviewIndex}
-      />
+      {previewIndex !== null && (
+        <Suspense fallback={null}>
+          <ImagePreviewLightbox
+            images={images}
+            index={previewIndex}
+            open={true}
+            onClose={() => setPreviewIndex(null)}
+            onIndexChange={setPreviewIndex}
+          />
+        </Suspense>
+      )}
     </div>
   );
 }
