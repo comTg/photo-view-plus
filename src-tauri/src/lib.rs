@@ -31,7 +31,7 @@ pub fn run() {
     tracing::info!(?profile, "PhotoView+ starting");
 
     tauri::Builder::default()
-        .register_uri_scheme_protocol("thumb", thumb_protocol)
+        .register_asynchronous_uri_scheme_protocol("thumb", thumb_protocol)
         .register_asynchronous_uri_scheme_protocol("original", original_protocol)
         .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_shell::init())
@@ -228,18 +228,30 @@ fn set_profile_window_title(app: &tauri::AppHandle<tauri::Wry>, profile: config:
     }
 }
 
+// 缩略图协议必须异步：同步处理器在 WebView 的 UI 线程上执行（WebResourceRequested
+// 就在该线程触发），而每次请求都要查 DB + 同步读 webp 文件。启动时网格会同时发出
+// 几十个缩略图请求，串行占住 UI 线程会让窗口长时间白屏。挪到后台线程响应即可，
+// 和 original_protocol 同构。
 fn thumb_protocol(
     ctx: tauri::UriSchemeContext<'_, tauri::Wry>,
     request: http::Request<Vec<u8>>,
-) -> http::Response<Vec<u8>> {
+    responder: tauri::UriSchemeResponder,
+) {
     let image_id = image_id_from_request(&request);
+    let app = ctx.app_handle().clone();
 
-    let Some(image_id) = image_id else {
-        return text_response(http::StatusCode::BAD_REQUEST, "invalid thumbnail image id");
-    };
+    std::thread::spawn(move || {
+        let response = match image_id {
+            Some(image_id) => thumb_response(&app, image_id),
+            None => text_response(http::StatusCode::BAD_REQUEST, "invalid thumbnail image id"),
+        };
+        responder.respond(response);
+    });
+}
 
-    let pool = ctx.app_handle().state::<db::Pool>();
-    let paths = ctx.app_handle().state::<config::AppPaths>();
+fn thumb_response(app: &tauri::AppHandle<tauri::Wry>, image_id: i64) -> http::Response<Vec<u8>> {
+    let pool = app.state::<db::Pool>();
+    let paths = app.state::<config::AppPaths>();
     let conn = match pool.get() {
         Ok(conn) => conn,
         Err(error) => {
@@ -253,6 +265,7 @@ fn thumb_protocol(
             return text_response(http::StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
         }
     };
+    drop(conn);
     let path = services::thumbnail_service::thumb_path(&paths.thumbs_dir, &hash);
     match std::fs::read(path) {
         Ok(bytes) => http::Response::builder()
