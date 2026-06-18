@@ -20,6 +20,37 @@ const MAX_THUMBNAIL_CPU_WORKERS: usize = 6;
 
 static THUMBNAIL_CPU_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
 
+/// 把当前线程切到 Windows「后台模式」：同时压低 CPU 与磁盘 I/O 优先级，让缩略图
+/// 解码/读原图不和前台 UI 抢资源（即使 CPU 跑满，前台也不卡）。Drop 时恢复。
+/// 非 Windows 上是空操作。必须在执行重活的那个线程上调用（spawn_blocking 线程）。
+struct BackgroundPriorityGuard;
+
+impl BackgroundPriorityGuard {
+    fn enter() -> Self {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
+            };
+            // 失败极少见（如线程已在后台模式），失败就按普通优先级跑，不影响正确性。
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
+        }
+        Self
+    }
+}
+
+impl Drop for BackgroundPriorityGuard {
+    fn drop(&mut self) {
+        #[cfg(windows)]
+        unsafe {
+            use windows_sys::Win32::System::Threading::{
+                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
+            };
+            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct ThumbnailTask {
     pool: Pool,
@@ -173,6 +204,8 @@ fn generate(task: ThumbnailTask, ctx: TaskContext) -> AppResult<()> {
     if ctx.is_cancelled() {
         return Ok(());
     }
+    // 解码 / 缩放 / WebP 编码 + 读原图都很重，整段降到后台优先级，避免拖卡前台 UI。
+    let _bg = BackgroundPriorityGuard::enter();
 
     let hash = thumb_hash_for(task.root_id, &task.rel_path);
     let path = thumb_path(&task.thumbs_dir, &hash);

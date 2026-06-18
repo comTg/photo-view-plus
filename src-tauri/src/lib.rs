@@ -62,6 +62,11 @@ pub fn run() {
             let mut task_caps = [usize::MAX; 8];
             task_caps[queue::Priority::P0 as usize] =
                 services::thumbnail_service::thumbnail_cpu_limit();
+            // AI 后台任务（P5 标签 / P6 embedding）每类最多 1 个在飞：单个 worker/GPU 本就
+            // 串行处理，放任并发只会让 worker 同时收到一堆请求、各开线程做 CPU 预处理，
+            // 叠加缩略图把机器拖卡（worker 的 /tagger/run 是同步端点，并发会进 FastAPI 线程池）。
+            task_caps[queue::Priority::P5 as usize] = 1;
+            task_caps[queue::Priority::P6 as usize] = 1;
             let scheduler = queue::Scheduler::start_with_caps(16, task_caps);
             let queue_app = app.handle().clone();
             scheduler.spawn_status_loop(move |status| {

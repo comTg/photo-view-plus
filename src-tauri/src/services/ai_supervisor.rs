@@ -383,6 +383,22 @@ impl AiSupervisor {
             .stderr(Stdio::piped())
             .kill_on_drop(true);
 
+        // 限制 worker 的 CPU 数学库线程：torch/numpy 默认按核数开 intra-op 线程，叠加缩略图
+        // 解码会把 CPU 打满、整机卡顿。这些环境变量必须在进程启动前设好才生效。
+        let cpu_threads = ai_worker_cpu_threads().to_string();
+        command
+            .env("OMP_NUM_THREADS", &cpu_threads)
+            .env("MKL_NUM_THREADS", &cpu_threads)
+            .env("OPENBLAS_NUM_THREADS", &cpu_threads)
+            .env("NUMEXPR_NUM_THREADS", &cpu_threads);
+
+        // Windows：整个 Python 进程以「低于正常」优先级运行，即使 CPU 跑满也让位给前台 UI。
+        #[cfg(windows)]
+        {
+            const BELOW_NORMAL_PRIORITY_CLASS: u32 = 0x0000_4000;
+            command.creation_flags(BELOW_NORMAL_PRIORITY_CLASS);
+        }
+
         let mut child = command.spawn()?;
         let pid = child.id();
         let stdout = child
@@ -495,6 +511,15 @@ fn python_candidate(program: PathBuf, label: &str) -> StartCandidate {
         ],
         label: label.to_string(),
     }
+}
+
+/// AI worker 的 CPU 数学库线程数上限：逻辑核数的一半，夹在 [1, 4]。
+/// 目的不是榨满 CPU，而是给前台 UI 和缩略图解码留余量；CUDA 推理时 CPU 只做预处理，
+/// 4 线程足够，CPU 回退时也不会把整机拖死。
+fn ai_worker_cpu_threads() -> usize {
+    std::thread::available_parallelism()
+        .map(|n| (n.get() / 2).clamp(1, 4))
+        .unwrap_or(2)
 }
 
 fn parse_port_line(line: &str) -> Option<u16> {
