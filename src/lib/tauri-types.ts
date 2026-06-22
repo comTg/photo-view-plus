@@ -73,6 +73,9 @@ export interface ImageRecord {
   hashStatus: string;
   tagStatus: string;
   embeddingStatus: string;
+  ocrStatus: string;
+  ocrText: string | null;
+  faceStatus: string;
 }
 
 export interface ImagePage {
@@ -176,6 +179,10 @@ export interface AppSettings {
   aiIdleStopMinutes: number;
   aiClipModel: string;
   aiTaggerModel: string;
+  ocrEnabled: boolean;
+  faceEnabled: boolean;
+  gpsEnabled: boolean;
+  fileWatcherEnabled: boolean;
 }
 
 export interface AppSettingsPatch {
@@ -188,6 +195,108 @@ export interface AppSettingsPatch {
   aiIdleStopMinutes?: number;
   aiClipModel?: string;
   aiTaggerModel?: string;
+  ocrEnabled?: boolean;
+  faceEnabled?: boolean;
+  gpsEnabled?: boolean;
+  fileWatcherEnabled?: boolean;
+}
+
+// ===== MVP4 高级管理 =====
+
+export interface TimelineBucket {
+  year: number;
+  month: number;
+  count: number;
+  startTs: number;
+  endTs: number;
+  samples: ImageRecord[];
+}
+
+export interface MapImagePoint {
+  image: ImageRecord;
+  lat: number;
+  lng: number;
+}
+
+export interface OcrStatus {
+  pending: number;
+  ready: number;
+  failed: number;
+  disabled: number;
+}
+
+export interface FaceStatus {
+  pending: number;
+  ready: number;
+  failed: number;
+  disabled: number;
+  clusters: number;
+  faces: number;
+}
+
+export interface FaceBox {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+export interface Face {
+  id: number;
+  imageId: number;
+  clusterId: number | null;
+  bbox: FaceBox;
+  confidence: number;
+  embeddingRef: string | null;
+}
+
+export interface FaceCluster {
+  id: number;
+  label: string | null;
+  sampleImageId: number | null;
+  faceCount: number;
+  createdAt: number;
+}
+
+export interface SmartAlbum {
+  id: number;
+  name: string;
+  filterJson: string;
+  icon: string | null;
+  sortOrder: number;
+  createdAt: number;
+}
+
+export interface SmartAlbumInput {
+  name: string;
+  filterJson: string;
+  icon?: string | null;
+  sortOrder?: number | null;
+}
+
+export interface WatcherStatus {
+  running: boolean;
+  watchedRoots: number[];
+  skippedNetworkRoots: number[];
+  lastError: string | null;
+}
+
+export interface BackupExportArgs {
+  destination: string;
+  includeThumbs?: boolean;
+  includeModels?: boolean;
+}
+
+export interface BackupExportResult {
+  path: string;
+  files: number;
+  bytes: number;
+}
+
+export interface BackupImportResult {
+  restoredDir: string;
+  files: number;
+  bytes: number;
 }
 
 // ===== MVP3 AI worker =====

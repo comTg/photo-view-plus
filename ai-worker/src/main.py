@@ -9,8 +9,10 @@ import uvicorn
 from fastapi import FastAPI
 
 from .api.clip import router as clip_router
+from .api.face import router as face_router
 from .api.health import router as health_router
 from .api.models import router as models_router
+from .api.ocr import router as ocr_router
 from .api.tagger import router as tagger_router
 
 
@@ -19,6 +21,8 @@ app.include_router(health_router)
 app.include_router(clip_router)
 app.include_router(tagger_router)
 app.include_router(models_router)
+app.include_router(ocr_router)
+app.include_router(face_router)
 
 
 def parse_args() -> argparse.Namespace:

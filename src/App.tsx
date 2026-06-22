@@ -18,10 +18,23 @@ import {
   aiWorkerStart,
   aiWorkerStatus,
   aiWorkerStop,
+  faceClusterRename,
+  faceRun,
+  faceStatus,
+  facesCluster,
+  facesImagesForCluster,
+  facesListClusters,
   imagesGetDetail,
+  imagesMapPoints,
   imagesQuery,
   imagesRename,
   imagesRevealInDir,
+  imagesSearchText,
+  imagesTimeline,
+  libraryBackupExport,
+  libraryBackupImport,
+  ocrRun,
+  ocrStatus,
   ping,
   queueStatus,
   scanCancel,
@@ -30,7 +43,14 @@ import {
   scanStart,
   settingsGet,
   settingsUpdate,
+  smartAlbumDelete,
+  smartAlbumList,
+  smartAlbumQuery,
+  smartAlbumSave,
   thumbUrl,
+  watcherStart,
+  watcherStatus,
+  watcherStop,
 } from "@/lib/tauri";
 import type {
   AiDiagnostics,
@@ -39,20 +59,32 @@ import type {
   AiTag,
   AiWorkerStatus,
   AppSettings,
+  BackupExportResult,
+  FaceCluster,
+  FaceStatus,
   ImageQueryParams,
   ImageRecord,
   ImageTag,
+  MapImagePoint,
+  OcrStatus,
   QueueStatus,
   ScanDone,
   ScanErrorEvent,
   ScanProgress,
+  SmartAlbum,
   SortDir,
   SortField,
+  TimelineBucket,
+  WatcherStatus,
 } from "@/lib/tauri-types";
-import { open } from "@tauri-apps/plugin-dialog";
+import { open, save } from "@tauri-apps/plugin-dialog";
+import L from "leaflet";
+import "leaflet/dist/leaflet.css";
 import {
+  Archive,
   ArrowLeft,
   ArrowRight,
+  Calendar,
   Camera,
   Check,
   CirclePause,
@@ -60,19 +92,23 @@ import {
   CircleX,
   Clock3,
   Copy,
+  FileText,
   FolderOpen,
   Image as ImageIcon,
   Images,
   LayoutGrid,
+  Map as MapIcon,
   Maximize2,
   Pencil,
   RefreshCw,
   Search,
   Settings,
+  Shield,
   SlidersHorizontal,
   Sparkles,
   Star,
   Tags,
+  Users,
 } from "lucide-react";
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { VirtuosoGrid } from "react-virtuoso";
@@ -91,7 +127,7 @@ const ImagePreviewLightbox = lazy(() =>
 
 type ViewMode = "grid-lg" | "grid-md" | "grid-sm" | "list";
 type GpsFilter = "any" | "yes" | "no";
-type ActiveView = "browse" | "dedup" | "ai" | "settings";
+type ActiveView = "browse" | "dedup" | "ai" | "timeline" | "map" | "people" | "mvp4" | "settings";
 type LoadMode = "reset" | "more" | "refresh";
 
 export default function App() {
@@ -109,6 +145,17 @@ export default function App() {
   const [aiResults, setAiResults] = useState<AiSearchResult[]>([]);
   const [aiResultsTitle, setAiResultsTitle] = useState("语义搜索");
   const [aiBusy, setAiBusy] = useState(false);
+  const [ocrState, setOcrState] = useState<OcrStatus | null>(null);
+  const [faceState, setFaceState] = useState<FaceStatus | null>(null);
+  const [faceClusters, setFaceClusters] = useState<FaceCluster[]>([]);
+  const [smartAlbums, setSmartAlbums] = useState<SmartAlbum[]>([]);
+  const [watcherState, setWatcherState] = useState<WatcherStatus | null>(null);
+  const [timelineBuckets, setTimelineBuckets] = useState<TimelineBucket[]>([]);
+  const [mapPoints, setMapPoints] = useState<MapImagePoint[]>([]);
+  const [advancedQuery, setAdvancedQuery] = useState("");
+  const [advancedImages, setAdvancedImages] = useState<ImageRecord[]>([]);
+  const [advancedTitle, setAdvancedTitle] = useState("MVP4 高级管理");
+  const [advancedBusy, setAdvancedBusy] = useState(false);
 
   const roots = useRoots();
   const selection = roots.selection;
@@ -518,16 +565,31 @@ export default function App() {
     [primarySelectedId],
   );
 
-  const handleSettingsPatch = useCallback(async (patch: Partial<AppSettings>) => {
+  const handleWatcherToggle = useCallback(async (enabled: boolean) => {
     try {
-      const updated = await settingsUpdate(patch);
-      setSettings(updated);
-      applyTheme(updated.theme);
-      setToast("设置已保存");
+      const status = enabled ? await watcherStart() : await watcherStop();
+      setWatcherState(status);
     } catch (error) {
-      setToast(`保存设置失败：${String(error)}`);
+      setToast(`切换文件监听失败：${String(error)}`);
     }
   }, []);
+
+  const handleSettingsPatch = useCallback(
+    async (patch: Partial<AppSettings>) => {
+      try {
+        const updated = await settingsUpdate(patch);
+        setSettings(updated);
+        applyTheme(updated.theme);
+        if (typeof patch.fileWatcherEnabled === "boolean") {
+          void handleWatcherToggle(patch.fileWatcherEnabled);
+        }
+        setToast("设置已保存");
+      } catch (error) {
+        setToast(`保存设置失败：${String(error)}`);
+      }
+    },
+    [handleWatcherToggle],
+  );
 
   const handleAiStart = useCallback(async () => {
     setAiBusy(true);
@@ -581,6 +643,219 @@ export default function App() {
     const [pipeline, tags] = await Promise.all([aiPipelineStatus(), aiTagsList(80)]);
     setAiPipeline(pipeline);
     setAiTags(tags);
+  }, []);
+
+  const refreshMvp4State = useCallback(async () => {
+    const [ocr, face, clusters, albums, watcher] = await Promise.all([
+      ocrStatus().catch(() => null),
+      faceStatus().catch(() => null),
+      facesListClusters().catch(() => []),
+      smartAlbumList().catch(() => []),
+      watcherStatus().catch(() => null),
+    ]);
+    setOcrState(ocr);
+    setFaceState(face);
+    setFaceClusters(clusters);
+    setSmartAlbums(albums);
+    setWatcherState(watcher);
+  }, []);
+
+  useEffect(() => {
+    void refreshMvp4State();
+  }, [refreshMvp4State]);
+
+  const handleOcrSearch = useCallback(async () => {
+    const query = advancedQuery.trim();
+    if (!query) {
+      setToast("请输入要搜索的 OCR 文本");
+      return;
+    }
+    setAdvancedBusy(true);
+    try {
+      const page = await imagesSearchText(query, 0, 200);
+      setAdvancedImages(page.items);
+      setAdvancedTitle(`全文搜索：${query}`);
+      setActiveView("mvp4");
+    } catch (error) {
+      setToast(`全文搜索失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, [advancedQuery]);
+
+  const handleOcrRun = useCallback(async () => {
+    setAdvancedBusy(true);
+    try {
+      const count = await ocrRun(selectedIds.length > 0 ? selectedIds : undefined);
+      await refreshMvp4State();
+      setToast(`已排入 OCR 任务：${count} 张`);
+    } catch (error) {
+      setToast(`启动 OCR 失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, [refreshMvp4State, selectedIds]);
+
+  const handleFaceRun = useCallback(async () => {
+    setAdvancedBusy(true);
+    try {
+      const count = await faceRun(selectedIds.length > 0 ? selectedIds : undefined);
+      await refreshMvp4State();
+      setToast(`已排入人脸识别任务：${count} 张`);
+    } catch (error) {
+      setToast(`启动人脸识别失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, [refreshMvp4State, selectedIds]);
+
+  const handleFacesCluster = useCallback(async () => {
+    setAdvancedBusy(true);
+    try {
+      const count = await facesCluster();
+      await refreshMvp4State();
+      setToast(`已重建人物聚类：${count} 个`);
+    } catch (error) {
+      setToast(`聚类失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, [refreshMvp4State]);
+
+  const handleOpenCluster = useCallback(async (cluster: FaceCluster) => {
+    setAdvancedBusy(true);
+    try {
+      const page = await facesImagesForCluster(cluster.id, 0, 200);
+      setAdvancedImages(page.items);
+      setAdvancedTitle(cluster.label ?? `人物 #${cluster.id}`);
+      setActiveView("people");
+    } catch (error) {
+      setToast(`读取人物图片失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, []);
+
+  const handleRenameCluster = useCallback(
+    async (cluster: FaceCluster) => {
+      const next = window.prompt("人物名称", cluster.label ?? `人物 #${cluster.id}`);
+      if (next === null) return;
+      try {
+        await faceClusterRename(cluster.id, next.trim() || null);
+        await refreshMvp4State();
+        setToast("人物名称已保存");
+      } catch (error) {
+        setToast(`保存人物名称失败：${String(error)}`);
+      }
+    },
+    [refreshMvp4State],
+  );
+
+  const handleLoadTimeline = useCallback(async () => {
+    setAdvancedBusy(true);
+    try {
+      const buckets = await imagesTimeline(120);
+      setTimelineBuckets(buckets);
+      setActiveView("timeline");
+    } catch (error) {
+      setToast(`读取时间轴失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, []);
+
+  const handleLoadMap = useCallback(async () => {
+    setAdvancedBusy(true);
+    try {
+      const points = await imagesMapPoints(3000);
+      setMapPoints(points);
+      setActiveView("map");
+    } catch (error) {
+      setToast(`读取地图失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, []);
+
+  const handleSaveSmartAlbum = useCallback(async () => {
+    const filter = buildQuery(0, PAGE_SIZE);
+    const name = `智能相册 ${new Date().toLocaleString("zh-CN")}`;
+    try {
+      const album = await smartAlbumSave({
+        name,
+        filterJson: JSON.stringify(filter),
+        icon: "sparkles",
+      });
+      await refreshMvp4State();
+      setToast(`已保存：${album.name}`);
+    } catch (error) {
+      setToast(`保存智能相册失败：${String(error)}`);
+    }
+  }, [buildQuery, refreshMvp4State]);
+
+  const handleApplySmartAlbum = useCallback(async (album: SmartAlbum) => {
+    setAdvancedBusy(true);
+    try {
+      const page = await smartAlbumQuery(album.id, 0, 200);
+      setAdvancedImages(page.items);
+      setAdvancedTitle(`智能相册：${album.name}`);
+      setActiveView("mvp4");
+    } catch (error) {
+      setToast(`打开智能相册失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, []);
+
+  const handleDeleteSmartAlbum = useCallback(
+    async (album: SmartAlbum) => {
+      try {
+        await smartAlbumDelete(album.id);
+        await refreshMvp4State();
+        setToast(`已删除智能相册：${album.name}`);
+      } catch (error) {
+        setToast(`删除智能相册失败：${String(error)}`);
+      }
+    },
+    [refreshMvp4State],
+  );
+
+  const handleBackupExport = useCallback(async () => {
+    const destination = await save({
+      defaultPath: "photo-view-plus-backup.zip",
+      filters: [{ name: "Zip", extensions: ["zip"] }],
+    });
+    if (!destination) return;
+    setAdvancedBusy(true);
+    try {
+      const result: BackupExportResult = await libraryBackupExport({
+        destination,
+        includeThumbs: false,
+        includeModels: false,
+      });
+      setToast(`备份完成：${result.files} 个文件，${formatBytes(result.bytes)}`);
+    } catch (error) {
+      setToast(`备份失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
+  }, []);
+
+  const handleBackupImport = useCallback(async () => {
+    const picked = await open({
+      multiple: false,
+      filters: [{ name: "Zip", extensions: ["zip"] }],
+    });
+    if (!picked || typeof picked !== "string") return;
+    setAdvancedBusy(true);
+    try {
+      const result = await libraryBackupImport(picked);
+      setToast(`已导入到暂存目录：${result.restoredDir}`);
+    } catch (error) {
+      setToast(`导入失败：${String(error)}`);
+    } finally {
+      setAdvancedBusy(false);
+    }
   }, []);
 
   const handleAiSearch = useCallback(async () => {
@@ -842,6 +1117,42 @@ export default function App() {
           </button>
           <button
             type="button"
+            className={`toolbar-button${activeView === "timeline" ? " toolbar-button--active" : ""}`}
+            onClick={() => void handleLoadTimeline()}
+            title="时间轴"
+          >
+            <Calendar aria-hidden="true" />
+            时间轴
+          </button>
+          <button
+            type="button"
+            className={`toolbar-button${activeView === "map" ? " toolbar-button--active" : ""}`}
+            onClick={() => void handleLoadMap()}
+            title="地图"
+          >
+            <MapIcon aria-hidden="true" />
+            地图
+          </button>
+          <button
+            type="button"
+            className={`toolbar-button${activeView === "people" ? " toolbar-button--active" : ""}`}
+            onClick={() => setActiveView((view) => (view === "people" ? "browse" : "people"))}
+            title="人物"
+          >
+            <Users aria-hidden="true" />
+            人物
+          </button>
+          <button
+            type="button"
+            className={`toolbar-button${activeView === "mvp4" ? " toolbar-button--active" : ""}`}
+            onClick={() => setActiveView((view) => (view === "mvp4" ? "browse" : "mvp4"))}
+            title="高级管理"
+          >
+            <Shield aria-hidden="true" />
+            管理
+          </button>
+          <button
+            type="button"
             className="icon-button"
             onClick={() => setActiveView((view) => (view === "settings" ? "browse" : "settings"))}
             title="设置"
@@ -911,10 +1222,25 @@ export default function App() {
         </nav>
         <nav className="nav-group">
           <div className="section-label">智能相册</div>
-          <button type="button" className="nav-item nav-item--muted">
-            <Sparkles aria-hidden="true" />
-            <span className="nav-item__label">MVP4 启用</span>
-          </button>
+          {smartAlbums.length === 0 ? (
+            <button type="button" className="nav-item nav-item--muted">
+              <Sparkles aria-hidden="true" />
+              <span className="nav-item__label">尚未保存</span>
+            </button>
+          ) : (
+            smartAlbums.slice(0, 12).map((album) => (
+              <button
+                key={album.id}
+                type="button"
+                className="nav-item"
+                onClick={() => void handleApplySmartAlbum(album)}
+                title={album.name}
+              >
+                <Sparkles aria-hidden="true" />
+                <span className="nav-item__label">{album.name}</span>
+              </button>
+            ))
+          )}
         </nav>
       </aside>
 
@@ -958,6 +1284,82 @@ export default function App() {
             pipeline={aiPipeline}
             workerStatus={aiStatus}
             busy={aiBusy}
+          />
+        ) : activeView === "timeline" ? (
+          <TimelineView
+            buckets={timelineBuckets}
+            busy={advancedBusy}
+            onRefresh={handleLoadTimeline}
+            onSelectImage={(image) => {
+              setSelectedIds([image.id]);
+              lastSelectedId.current = image.id;
+            }}
+            onPreviewImage={(image, list) => openPreviewInList(image, list)}
+            onOpenContextMenu={handleOpenImageMenu}
+          />
+        ) : activeView === "map" ? (
+          <MapView
+            points={mapPoints}
+            busy={advancedBusy}
+            onRefresh={handleLoadMap}
+            onSelectImage={(image) => {
+              setSelectedIds([image.id]);
+              lastSelectedId.current = image.id;
+            }}
+            onPreviewImage={(image) =>
+              openPreviewInList(
+                image,
+                mapPoints.map((point) => point.image),
+              )
+            }
+            onOpenContextMenu={handleOpenImageMenu}
+          />
+        ) : activeView === "people" ? (
+          <PeopleView
+            clusters={faceClusters}
+            images={advancedImages}
+            title={advancedTitle}
+            busy={advancedBusy}
+            onRunFaces={handleFaceRun}
+            onCluster={handleFacesCluster}
+            onOpenCluster={handleOpenCluster}
+            onRenameCluster={handleRenameCluster}
+            onSelectImage={(image) => {
+              setSelectedIds([image.id]);
+              lastSelectedId.current = image.id;
+            }}
+            onPreviewImage={(image) => openPreviewInList(image, advancedImages)}
+            onOpenContextMenu={handleOpenImageMenu}
+          />
+        ) : activeView === "mvp4" ? (
+          <AdvancedView
+            query={advancedQuery}
+            onQueryChange={setAdvancedQuery}
+            onSearch={handleOcrSearch}
+            onRunOcr={handleOcrRun}
+            onRunFaces={handleFaceRun}
+            onClusterFaces={handleFacesCluster}
+            onSaveSmartAlbum={handleSaveSmartAlbum}
+            onDeleteSmartAlbum={handleDeleteSmartAlbum}
+            onApplySmartAlbum={handleApplySmartAlbum}
+            onRefresh={refreshMvp4State}
+            onBackupExport={handleBackupExport}
+            onBackupImport={handleBackupImport}
+            onWatcherToggle={handleWatcherToggle}
+            ocr={ocrState}
+            face={faceState}
+            watcher={watcherState}
+            smartAlbums={smartAlbums}
+            images={advancedImages}
+            title={advancedTitle}
+            busy={advancedBusy}
+            settings={settings}
+            onSelectImage={(image) => {
+              setSelectedIds([image.id]);
+              lastSelectedId.current = image.id;
+            }}
+            onPreviewImage={(image) => openPreviewInList(image, advancedImages)}
+            onOpenContextMenu={handleOpenImageMenu}
           />
         ) : (
           <div className="browse-view">
@@ -1142,6 +1544,65 @@ interface AiSearchViewProps {
   busy: boolean;
 }
 
+interface TimelineViewProps {
+  buckets: TimelineBucket[];
+  busy: boolean;
+  onRefresh: () => Promise<void>;
+  onSelectImage: (image: ImageRecord) => void;
+  onPreviewImage: (image: ImageRecord, list: ImageRecord[]) => void;
+  onOpenContextMenu: (image: ImageRecord, event: React.MouseEvent) => void;
+}
+
+interface MapViewProps {
+  points: MapImagePoint[];
+  busy: boolean;
+  onRefresh: () => Promise<void>;
+  onSelectImage: (image: ImageRecord) => void;
+  onPreviewImage: (image: ImageRecord) => void;
+  onOpenContextMenu: (image: ImageRecord, event: React.MouseEvent) => void;
+}
+
+interface PeopleViewProps {
+  clusters: FaceCluster[];
+  images: ImageRecord[];
+  title: string;
+  busy: boolean;
+  onRunFaces: () => Promise<void>;
+  onCluster: () => Promise<void>;
+  onOpenCluster: (cluster: FaceCluster) => Promise<void>;
+  onRenameCluster: (cluster: FaceCluster) => Promise<void>;
+  onSelectImage: (image: ImageRecord) => void;
+  onPreviewImage: (image: ImageRecord) => void;
+  onOpenContextMenu: (image: ImageRecord, event: React.MouseEvent) => void;
+}
+
+interface AdvancedViewProps {
+  query: string;
+  onQueryChange: (value: string) => void;
+  onSearch: () => Promise<void>;
+  onRunOcr: () => Promise<void>;
+  onRunFaces: () => Promise<void>;
+  onClusterFaces: () => Promise<void>;
+  onSaveSmartAlbum: () => Promise<void>;
+  onDeleteSmartAlbum: (album: SmartAlbum) => Promise<void>;
+  onApplySmartAlbum: (album: SmartAlbum) => Promise<void>;
+  onRefresh: () => Promise<void>;
+  onBackupExport: () => Promise<void>;
+  onBackupImport: () => Promise<void>;
+  onWatcherToggle: (enabled: boolean) => Promise<void>;
+  ocr: OcrStatus | null;
+  face: FaceStatus | null;
+  watcher: WatcherStatus | null;
+  smartAlbums: SmartAlbum[];
+  images: ImageRecord[];
+  title: string;
+  busy: boolean;
+  settings: AppSettings | null;
+  onSelectImage: (image: ImageRecord) => void;
+  onPreviewImage: (image: ImageRecord) => void;
+  onOpenContextMenu: (image: ImageRecord, event: React.MouseEvent) => void;
+}
+
 function AiSearchView({
   query,
   onQueryChange,
@@ -1265,6 +1726,484 @@ function AiSearchView({
         )}
       </div>
     </section>
+  );
+}
+
+function TimelineView({
+  buckets,
+  busy,
+  onRefresh,
+  onSelectImage,
+  onPreviewImage,
+  onOpenContextMenu,
+}: TimelineViewProps) {
+  return (
+    <section className="timeline-view">
+      <div className="advanced-toolbar">
+        <div>
+          <span className="settings-eyebrow">时间轴</span>
+          <h1>按拍摄月份浏览</h1>
+        </div>
+        <button
+          type="button"
+          className="toolbar-button"
+          disabled={busy}
+          onClick={() => void onRefresh()}
+        >
+          <RefreshCw aria-hidden="true" />
+          刷新
+        </button>
+      </div>
+      {buckets.length === 0 ? (
+        <EmptyState
+          title="还没有可分桶的图片"
+          body="扫描完成后，时间轴会按拍摄时间或修改时间自动分组。"
+        />
+      ) : (
+        <div className="timeline-list">
+          {buckets.map((bucket) => (
+            <section className="timeline-bucket" key={`${bucket.year}-${bucket.month}`}>
+              <div className="timeline-marker">
+                <strong>
+                  {bucket.year}-{String(bucket.month).padStart(2, "0")}
+                </strong>
+                <span>{bucket.count.toLocaleString("zh-CN")} 张</span>
+              </div>
+              <div className="timeline-samples">
+                {bucket.samples.map((image) => (
+                  <ImageCard
+                    key={image.id}
+                    image={image}
+                    selected={false}
+                    selectionMode={false}
+                    onClickImage={(item) => onSelectImage(item)}
+                    onPreviewImage={(item) => onPreviewImage(item, bucket.samples)}
+                    onOpenContextMenu={onOpenContextMenu}
+                  />
+                ))}
+              </div>
+            </section>
+          ))}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function MapView({
+  points,
+  busy,
+  onRefresh,
+  onSelectImage,
+  onPreviewImage,
+  onOpenContextMenu,
+}: MapViewProps) {
+  const mapRef = useRef<HTMLDivElement | null>(null);
+  const leafletRef = useRef<L.Map | null>(null);
+  const layerRef = useRef<L.LayerGroup | null>(null);
+
+  useEffect(() => {
+    if (!mapRef.current || leafletRef.current) return;
+    const map = L.map(mapRef.current, { zoomControl: true }).setView([31.2304, 121.4737], 3);
+    L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
+      attribution: "&copy; OpenStreetMap",
+      maxZoom: 19,
+    }).addTo(map);
+    const layer = L.layerGroup().addTo(map);
+    leafletRef.current = map;
+    layerRef.current = layer;
+    return () => {
+      map.remove();
+      leafletRef.current = null;
+      layerRef.current = null;
+    };
+  }, []);
+
+  useEffect(() => {
+    const map = leafletRef.current;
+    const layer = layerRef.current;
+    if (!map || !layer) return;
+    layer.clearLayers();
+    const bounds: L.LatLngTuple[] = [];
+    for (const point of points) {
+      const latLng: L.LatLngTuple = [point.lat, point.lng];
+      bounds.push(latLng);
+      L.circleMarker(latLng, {
+        radius: 7,
+        color: "#2f6fd6",
+        weight: 2,
+        fillColor: "#6aa4ff",
+        fillOpacity: 0.82,
+      })
+        .bindPopup(point.image.filename)
+        .on("click", () => onSelectImage(point.image))
+        .addTo(layer);
+    }
+    if (bounds.length > 0) {
+      map.fitBounds(bounds, { padding: [28, 28], maxZoom: 12 });
+    }
+  }, [onSelectImage, points]);
+
+  return (
+    <section className="map-view">
+      <div className="advanced-toolbar">
+        <div>
+          <span className="settings-eyebrow">地图</span>
+          <h1>GPS 图片地图</h1>
+        </div>
+        <button
+          type="button"
+          className="toolbar-button"
+          disabled={busy}
+          onClick={() => void onRefresh()}
+        >
+          <RefreshCw aria-hidden="true" />
+          刷新
+        </button>
+      </div>
+      <div className="map-layout">
+        <div className="leaflet-map" ref={mapRef} />
+        <div className="map-side-list">
+          {points.length === 0 ? (
+            <p className="muted">还没有带 GPS 的图片。</p>
+          ) : (
+            points
+              .slice(0, 80)
+              .map((point) => (
+                <ImageCard
+                  key={point.image.id}
+                  image={point.image}
+                  selected={false}
+                  selectionMode={false}
+                  onClickImage={(image) => onSelectImage(image)}
+                  onPreviewImage={onPreviewImage}
+                  onOpenContextMenu={onOpenContextMenu}
+                />
+              ))
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function PeopleView({
+  clusters,
+  images,
+  title,
+  busy,
+  onRunFaces,
+  onCluster,
+  onOpenCluster,
+  onRenameCluster,
+  onSelectImage,
+  onPreviewImage,
+  onOpenContextMenu,
+}: PeopleViewProps) {
+  return (
+    <section className="people-view">
+      <div className="advanced-toolbar">
+        <div>
+          <span className="settings-eyebrow">人物</span>
+          <h1>{title}</h1>
+        </div>
+        <div className="settings-panel__actions">
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={busy}
+            onClick={() => void onRunFaces()}
+          >
+            <Users aria-hidden="true" />
+            识别人脸
+          </button>
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={busy}
+            onClick={() => void onCluster()}
+          >
+            <Sparkles aria-hidden="true" />
+            重建聚类
+          </button>
+        </div>
+      </div>
+      <div className="people-layout">
+        <aside className="people-clusters">
+          {clusters.length === 0 ? (
+            <p className="muted">启用人脸识别后，这里会显示人物聚类。</p>
+          ) : (
+            clusters.map((cluster) => (
+              <div className="people-cluster-row" key={cluster.id}>
+                <button type="button" onClick={() => void onOpenCluster(cluster)}>
+                  <Users aria-hidden="true" />
+                  <span>{cluster.label ?? `人物 #${cluster.id}`}</span>
+                  <small>{cluster.faceCount}</small>
+                </button>
+                <button type="button" onClick={() => void onRenameCluster(cluster)}>
+                  <Pencil aria-hidden="true" />
+                </button>
+              </div>
+            ))
+          )}
+        </aside>
+        <div className="advanced-image-grid">
+          {images.length === 0 ? (
+            <EmptyState title="选择一个人物" body="点击左侧人物聚类后，这里显示对应图片。" />
+          ) : (
+            images.map((image) => (
+              <ImageCard
+                key={image.id}
+                image={image}
+                selected={false}
+                selectionMode={false}
+                onClickImage={onSelectImage}
+                onPreviewImage={onPreviewImage}
+                onOpenContextMenu={onOpenContextMenu}
+              />
+            ))
+          )}
+        </div>
+      </div>
+    </section>
+  );
+}
+
+function AdvancedView({
+  query,
+  onQueryChange,
+  onSearch,
+  onRunOcr,
+  onRunFaces,
+  onClusterFaces,
+  onSaveSmartAlbum,
+  onDeleteSmartAlbum,
+  onApplySmartAlbum,
+  onRefresh,
+  onBackupExport,
+  onBackupImport,
+  onWatcherToggle,
+  ocr,
+  face,
+  watcher,
+  smartAlbums,
+  images,
+  title,
+  busy,
+  settings,
+  onSelectImage,
+  onPreviewImage,
+  onOpenContextMenu,
+}: AdvancedViewProps) {
+  return (
+    <section className="advanced-view">
+      <div className="advanced-toolbar">
+        <div>
+          <span className="settings-eyebrow">MVP4</span>
+          <h1>高级管理</h1>
+        </div>
+        <button
+          type="button"
+          className="toolbar-button"
+          disabled={busy}
+          onClick={() => void onRefresh()}
+        >
+          <RefreshCw aria-hidden="true" />
+          刷新
+        </button>
+      </div>
+
+      <div className="advanced-grid">
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>OCR 全文搜索</h2>
+          </div>
+          <label className="ai-search-box advanced-search">
+            <Search aria-hidden="true" />
+            <input
+              value={query}
+              onChange={(event) => onQueryChange(event.target.value)}
+              onKeyDown={(event) => {
+                if (event.key === "Enter") {
+                  event.preventDefault();
+                  void onSearch();
+                }
+              }}
+              placeholder="搜索截图或海报文字，例如 Error / 报错"
+            />
+          </label>
+          <div className="settings-panel__actions">
+            <button
+              type="button"
+              className="primary-action"
+              disabled={busy}
+              onClick={() => void onSearch()}
+            >
+              <Search aria-hidden="true" />
+              搜索文字
+            </button>
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={busy}
+              onClick={() => void onRunOcr()}
+            >
+              <FileText aria-hidden="true" />
+              运行 OCR
+            </button>
+          </div>
+          <StatusLine
+            label="OCR"
+            value={
+              ocr ? `${ocr.pending} 待处理 · ${ocr.ready} 已完成 · ${ocr.failed} 失败` : "未知"
+            }
+          />
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>人物聚类</h2>
+          </div>
+          <div className="settings-panel__actions">
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={busy}
+              onClick={() => void onRunFaces()}
+            >
+              <Users aria-hidden="true" />
+              识别人脸
+            </button>
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={busy}
+              onClick={() => void onClusterFaces()}
+            >
+              <Sparkles aria-hidden="true" />
+              重建聚类
+            </button>
+          </div>
+          <StatusLine
+            label="人脸"
+            value={
+              face
+                ? `${face.faces} 张脸 · ${face.clusters} 个人物 · ${face.pending} 待处理`
+                : "未知"
+            }
+          />
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>智能相册</h2>
+          </div>
+          <button
+            type="button"
+            className="primary-action"
+            disabled={busy}
+            onClick={() => void onSaveSmartAlbum()}
+          >
+            <Sparkles aria-hidden="true" />
+            保存当前筛选
+          </button>
+          <div className="smart-album-list">
+            {smartAlbums.length === 0 ? (
+              <span className="muted">暂无智能相册</span>
+            ) : (
+              smartAlbums.map((album) => (
+                <div className="smart-album-row" key={album.id}>
+                  <button type="button" onClick={() => void onApplySmartAlbum(album)}>
+                    {album.name}
+                  </button>
+                  <button type="button" onClick={() => void onDeleteSmartAlbum(album)}>
+                    删除
+                  </button>
+                </div>
+              ))
+            )}
+          </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>文件监听与备份</h2>
+          </div>
+          <label className="settings-toggle">
+            <span>文件监听</span>
+            <input
+              type="checkbox"
+              checked={settings?.fileWatcherEnabled ?? false}
+              onChange={(event) => void onWatcherToggle(event.target.checked)}
+            />
+          </label>
+          <StatusLine
+            label="Watcher"
+            value={
+              watcher
+                ? `${watcher.running ? "运行中" : "已停止"} · ${watcher.watchedRoots.length} 个本地目录`
+                : "未知"
+            }
+          />
+          <div className="settings-panel__actions">
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={busy}
+              onClick={() => void onBackupExport()}
+            >
+              <Archive aria-hidden="true" />
+              导出备份
+            </button>
+            <button
+              type="button"
+              className="toolbar-button"
+              disabled={busy}
+              onClick={() => void onBackupImport()}
+            >
+              <FolderOpen aria-hidden="true" />
+              导入暂存
+            </button>
+          </div>
+        </section>
+      </div>
+
+      <div className="advanced-results">
+        <div className="ai-results-header">
+          <h1>{title}</h1>
+          <span>{images.length.toLocaleString("zh-CN")} 张</span>
+        </div>
+        {images.length === 0 ? (
+          <EmptyState
+            title="等待高级查询"
+            body="运行 OCR、打开智能相册或选择人物后，结果会显示在这里。"
+          />
+        ) : (
+          <div className="advanced-image-grid">
+            {images.map((image) => (
+              <ImageCard
+                key={image.id}
+                image={image}
+                selected={false}
+                selectionMode={false}
+                onClickImage={onSelectImage}
+                onPreviewImage={onPreviewImage}
+                onOpenContextMenu={onOpenContextMenu}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    </section>
+  );
+}
+
+function StatusLine({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="status-line">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </div>
   );
 }
 
@@ -1589,6 +2528,14 @@ function DetailPane({
         }
       />
       <DetailRow label="缩略图" value={thumbStatusText(image.thumbStatus)} />
+      <DetailRow label="OCR" value={mvp4StatusText(image.ocrStatus)} />
+      <DetailRow label="人脸" value={mvp4StatusText(image.faceStatus)} />
+      {image.ocrText && (
+        <div className="detail-ocr-text">
+          <span>OCR 文本</span>
+          <p>{image.ocrText}</p>
+        </div>
+      )}
 
       <div className="section-label section-label--spaced">标签</div>
       <div className="tag-row">
@@ -1795,6 +2742,44 @@ function SettingsView({
               </select>
             </label>
           </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>隐私</h2>
+          </div>
+          <label className="settings-toggle">
+            <span>启用 OCR</span>
+            <input
+              type="checkbox"
+              checked={settings.ocrEnabled}
+              onChange={(event) => void onPatch({ ocrEnabled: event.target.checked })}
+            />
+          </label>
+          <label className="settings-toggle">
+            <span>启用人脸识别</span>
+            <input
+              type="checkbox"
+              checked={settings.faceEnabled}
+              onChange={(event) => void onPatch({ faceEnabled: event.target.checked })}
+            />
+          </label>
+          <label className="settings-toggle">
+            <span>显示 GPS 地图</span>
+            <input
+              type="checkbox"
+              checked={settings.gpsEnabled}
+              onChange={(event) => void onPatch({ gpsEnabled: event.target.checked })}
+            />
+          </label>
+          <label className="settings-toggle">
+            <span>本地文件监听</span>
+            <input
+              type="checkbox"
+              checked={settings.fileWatcherEnabled}
+              onChange={(event) => void onPatch({ fileWatcherEnabled: event.target.checked })}
+            />
+          </label>
         </section>
 
         <div className="settings-panel settings-panel--wide">
@@ -2028,6 +3013,13 @@ function thumbStatusText(status: string): string {
   if (status === "failed") return "缩略图失败";
   if (status === "unsupported") return "格式暂不支持";
   return "生成中";
+}
+
+function mvp4StatusText(status: string): string {
+  if (status === "ready") return "已完成";
+  if (status === "pending") return "待处理";
+  if (status === "failed") return "失败";
+  return "未启用";
 }
 
 function aiStatusText(status: string | null | undefined): string {

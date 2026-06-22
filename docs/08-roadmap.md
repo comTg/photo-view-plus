@@ -10,7 +10,7 @@
 | **M1** | MVP1 基础浏览 | `docs/03` § 0 全部验收过 | 待验收 | W24-W26（约 2-3 周） |
 | **M2** | MVP2 去重 | `docs/04` § 0 全部验收过 | 待开始 | W27-W28（约 2 周） |
 | **M3** | MVP3 AI 与搜索 | `docs/05` § 0 全部验收过 | 待开始 | W29-W33（约 4-5 周） |
-| **M4** | MVP4 高级管理 | `docs/06` § 0 全部验收过 | 待开始 | W34-W37（约 3-4 周） |
+| **M4** | MVP4 高级管理 | `docs/06` § 0 全部验收过 | 待验收 | W34-W37（约 3-4 周） |
 | **M5** | 1.0 RC | 性能基准达标、安装包签名、用户文档 | 待开始 | W38 |
 
 > 周数为 ISO 周；时间预估为单人全职粗估，按"全职 1 人 + 没大坑"算。AI 阶段坑多，留缓冲。
@@ -73,7 +73,19 @@
 - [ ] T16 大样本端到端验收待用户用真实图库手动验证（当前 smoke 见 `tests/ai_bench.md`）
 
 ### M4 MVP4（详见 `docs/06` § 2）
-- [ ] T1-T13 共 13 个任务
+- [x] T1 migration 0004 / 0005（OCR / face / FTS5 / smart_albums）
+- [x] T2 OCR 服务（worker `/ocr/run`，RapidOCR 可选依赖，P4 队列，默认隐私关闭）
+- [x] T3 全文索引（SQLite FTS5，filename + ocr_text，同步触发器）
+- [x] T4 人脸检测（worker `/face/detect`，InsightFace 可选依赖，P7 队列，默认隐私关闭）
+- [x] T5 人脸 embedding + 聚类（LanceDB `face_embeddings` + Rust cosine connected components）
+- [x] T6 人脸 UI（人物聚类列表、命名、按 cluster 查看图片）
+- [x] T7 时间轴视图（按年月分桶，样本图墙）
+- [x] T8 地图视图（Leaflet + OpenStreetMap，GPS 图片点）
+- [x] T9 智能相册（保存 / 列表 / 删除 / 应用当前筛选 JSON）
+- [x] T10 文件监听（notify，本地 root 递归监听；网络盘跳过）
+- [x] T11 隐私设置面板（OCR / 人脸默认 OFF，GPS / watcher 可控）
+- [x] T12 稳定性基础（备份导出 zip；导入到运行中安全的暂存目录）
+- [ ] T13 端到端验收待用户用真实 Windows + 模型环境验证
 
 ### M5 1.0 RC
 - [ ] 性能基准（见 § 4）全部达标
@@ -214,9 +226,22 @@
   - **5 万图扫描+哈希性能**：与 MVP1 T16 一起在 Windows 实机测。
 - 后果：M2 主体功能完整可用；Windows 实机验收（T14）后可关闭 M2，开始 M3。
 
+### ADR-009 · MVP4 人脸聚类与地图/备份实现
+- 状态：待实机验收（M4）
+- 时间：2026-06-18
+- 上下文：MVP4 需要 OCR、人脸、时间轴、地图、智能相册、文件监听和备份恢复闭环，但真实 OCR/InsightFace 模型依赖体积大，且运行中覆盖 SQLite/LanceDB 有损坏风险。
+- 决定：
+  - OCR 使用 worker `/ocr/run`，优先 RapidOCR；缺依赖时 endpoint 返回空 fallback，不拖死主程序。
+  - 人脸使用 worker `/face/detect`，优先 InsightFace buffalo_l；embedding 写 LanceDB `face_embeddings`，聚类先用 Rust 侧余弦阈值连通分量，保留用户命名并支持重建。
+  - 地图视图引入 Leaflet + OSM 瓦片，先用 circle marker；大量点聚合留 1.0 前做 markercluster。
+  - 文件监听用 notify，只监听本地 root；网络盘仍按 docs/07 走手动/定时 rescan。
+  - 备份导出 SQLite/WAL/LanceDB/config 到 zip；导入先解压到 `restore-staging`，不在应用运行中覆盖活动库。
+- 后果：
+  - 功能面已闭合，前端可操作；OCR/人脸准确率、文件监听 5s 入库、地图瓦片网络可用性仍需 Windows 实机与真实模型验收。
+  - 聚类算法可用但不是最终高精度方案；后续可替换为 HDBSCAN/Chinese Whispers，不改变 DB/UI 契约。
+
 后续每个 MVP 完成时追加新的 ADR：
 - ADR-008 · MVP3 CLIP vs SigLIP 选型（待填）
-- ADR-009 · MVP4 人脸聚类算法对比（待填）
 
 ## 6. 未决议题（讨论后再写 ADR）
 

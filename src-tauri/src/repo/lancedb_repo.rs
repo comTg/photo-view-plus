@@ -16,6 +16,7 @@ use serde::Serialize;
 use crate::error::{AppError, AppResult};
 
 const TABLE_NAME: &str = "image_embeddings_clip";
+const FACE_TABLE_NAME: &str = "face_embeddings";
 const VECTOR_COLUMN: &str = "embedding";
 pub const CLIP_DIMS: i32 = 512;
 
@@ -23,6 +24,13 @@ pub const CLIP_DIMS: i32 = 512;
 pub struct EmbeddingRecord {
     pub image_id: i64,
     pub model: String,
+    pub embedding: Vec<f32>,
+    pub created_at: i64,
+}
+
+#[derive(Debug, Clone)]
+pub struct FaceEmbeddingRecord {
+    pub face_id: i64,
     pub embedding: Vec<f32>,
     pub created_at: i64,
 }
@@ -157,6 +165,49 @@ impl LanceDbRepo {
         table.count_rows(None).await.map_err(lance_error)
     }
 
+    pub async fn upsert_face_embeddings(&self, records: &[FaceEmbeddingRecord]) -> AppResult<()> {
+        if records.is_empty() {
+            return Ok(());
+        }
+        validate_face_records(records)?;
+        let table = self.open_or_create_face_table().await?;
+        let ids = records
+            .iter()
+            .map(|record| record.face_id)
+            .collect::<Vec<_>>();
+        let predicate = format!("face_id IN ({})", join_i64(&ids));
+        let _ = table.delete(predicate.as_str()).await;
+        let batch = face_records_to_batch(records)?;
+        let schema = batch.schema();
+        let data = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
+        let reader: Box<dyn RecordBatchReader + Send> = Box::new(data);
+        table.add(reader).execute().await.map_err(lance_error)?;
+        Ok(())
+    }
+
+    pub async fn list_face_embeddings(&self) -> AppResult<Vec<(i64, Vec<f32>)>> {
+        let table = match self.open_face_table().await {
+            Ok(table) => table,
+            Err(_) => return Ok(Vec::new()),
+        };
+        let stream = table.query().execute().await.map_err(lance_error)?;
+        let batches = stream.try_collect::<Vec<_>>().await.map_err(lance_error)?;
+        let mut out = Vec::new();
+        for batch in &batches {
+            let face_ids = batch
+                .column_by_name("face_id")
+                .and_then(|column| column.as_any().downcast_ref::<Int64Array>())
+                .ok_or_else(|| AppError::Other("LanceDB 结果缺少 face_id 列".to_string()))?;
+            for row in 0..batch.num_rows() {
+                if face_ids.is_null(row) {
+                    continue;
+                }
+                out.push((face_ids.value(row), vector_from_batch(batch, row)?));
+            }
+        }
+        Ok(out)
+    }
+
     async fn open_table(&self) -> AppResult<lancedb::Table> {
         let db = self.connection().await?;
         db.open_table(TABLE_NAME)
@@ -175,12 +226,46 @@ impl LanceDbRepo {
             .await
             .map_err(lance_error)
     }
+
+    async fn open_face_table(&self) -> AppResult<lancedb::Table> {
+        let db = self.connection().await?;
+        db.open_table(FACE_TABLE_NAME)
+            .execute()
+            .await
+            .map_err(lance_error)
+    }
+
+    async fn open_or_create_face_table(&self) -> AppResult<lancedb::Table> {
+        let db = self.connection().await?;
+        if let Ok(table) = db.open_table(FACE_TABLE_NAME).execute().await {
+            return Ok(table);
+        }
+        db.create_empty_table(FACE_TABLE_NAME, face_embedding_schema())
+            .execute()
+            .await
+            .map_err(lance_error)
+    }
 }
 
 fn embedding_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("image_id", DataType::Int64, false),
         Field::new("model", DataType::Utf8, false),
+        Field::new(
+            VECTOR_COLUMN,
+            DataType::FixedSizeList(
+                Arc::new(Field::new("item", DataType::Float32, true)),
+                CLIP_DIMS,
+            ),
+            false,
+        ),
+        Field::new("created_at", DataType::Int64, false),
+    ]))
+}
+
+fn face_embedding_schema() -> SchemaRef {
+    Arc::new(Schema::new(vec![
+        Field::new("face_id", DataType::Int64, false),
         Field::new(
             VECTOR_COLUMN,
             DataType::FixedSizeList(
@@ -223,6 +308,34 @@ fn records_to_batch(records: &[EmbeddingRecord]) -> AppResult<RecordBatch> {
     .map_err(|error| AppError::Other(error.to_string()))
 }
 
+fn face_records_to_batch(records: &[FaceEmbeddingRecord]) -> AppResult<RecordBatch> {
+    let schema = face_embedding_schema();
+    let face_ids = Int64Array::from_iter_values(records.iter().map(|record| record.face_id));
+    let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        records.iter().map(|record| {
+            Some(
+                record
+                    .embedding
+                    .iter()
+                    .copied()
+                    .map(Some)
+                    .collect::<Vec<_>>(),
+            )
+        }),
+        CLIP_DIMS,
+    );
+    let created_at = Int64Array::from_iter_values(records.iter().map(|record| record.created_at));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(face_ids),
+            Arc::new(embeddings),
+            Arc::new(created_at),
+        ],
+    )
+    .map_err(|error| AppError::Other(error.to_string()))
+}
+
 fn vector_from_batch(batch: &RecordBatch, row: usize) -> AppResult<Vec<f32>> {
     let vectors = batch
         .column_by_name(VECTOR_COLUMN)
@@ -245,6 +358,20 @@ fn validate_records(records: &[EmbeddingRecord]) -> AppResult<()> {
             return Err(AppError::Other(format!(
                 "image {} embedding 维度错误：expected {}, got {}",
                 record.image_id,
+                CLIP_DIMS,
+                record.embedding.len()
+            )));
+        }
+    }
+    Ok(())
+}
+
+fn validate_face_records(records: &[FaceEmbeddingRecord]) -> AppResult<()> {
+    for record in records {
+        if record.embedding.len() != CLIP_DIMS as usize {
+            return Err(AppError::Other(format!(
+                "face {} embedding 维度错误：expected {}, got {}",
+                record.face_id,
                 CLIP_DIMS,
                 record.embedding.len()
             )));

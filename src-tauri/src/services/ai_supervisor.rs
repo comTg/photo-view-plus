@@ -12,8 +12,8 @@ use tokio::time::Instant;
 
 use crate::error::{AppError, AppResult};
 use crate::services::ai_client::{
-    AiHttpClient, ClipEmbedItem, ClipEmbedResponse, TaggerItem, TaggerResponse, TextEncodeResponse,
-    WorkerHealth,
+    AiHttpClient, ClipEmbedItem, ClipEmbedResponse, FaceDetectItem, FaceDetectResponse, OcrItem,
+    OcrResponse, TaggerItem, TaggerResponse, TextEncodeResponse, WorkerHealth,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -214,6 +214,16 @@ impl AiSupervisor {
     pub async fn tag_images(&self, items: Vec<TaggerItem>) -> AppResult<TaggerResponse> {
         let port = self.ready_port().await?;
         self.client.tag_images(port, items).await
+    }
+
+    pub async fn run_ocr(&self, items: Vec<OcrItem>) -> AppResult<OcrResponse> {
+        let port = self.ready_port().await?;
+        self.client.run_ocr(port, items).await
+    }
+
+    pub async fn detect_faces(&self, items: Vec<FaceDetectItem>) -> AppResult<FaceDetectResponse> {
+        let port = self.ready_port().await?;
+        self.client.detect_faces(port, items).await
     }
 
     pub fn spawn_monitor(self: std::sync::Arc<Self>, app: tauri::AppHandle<tauri::Wry>) {

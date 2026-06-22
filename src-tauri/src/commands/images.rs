@@ -8,7 +8,10 @@ use tauri::State;
 use crate::config::AppPaths;
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
-use crate::repo::images_repo::{self, ImagePage, ImageQueryParams, ImageRecord, RenameRecordPatch};
+use crate::repo::images_repo::{
+    self, ImagePage, ImageQueryParams, ImageRecord, MapImagePoint, RenameRecordPatch,
+    TimelineBucket,
+};
 use crate::services::thumbnail_service;
 
 #[derive(Debug, Deserialize)]
@@ -28,6 +31,36 @@ pub fn images_query(pool: State<'_, Pool>, params: ImageQueryParams) -> Result<I
 pub fn images_get_detail(pool: State<'_, Pool>, id: i64) -> Result<Option<ImageRecord>, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;
     images_repo::get_detail(&conn, id).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn images_search_text(
+    pool: State<'_, Pool>,
+    q: String,
+    offset: Option<i64>,
+    limit: Option<i64>,
+) -> Result<ImagePage, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    images_repo::search_text(&conn, &q, limit.unwrap_or(200), offset.unwrap_or(0))
+        .map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn images_timeline(
+    pool: State<'_, Pool>,
+    limit: Option<i64>,
+) -> Result<Vec<TimelineBucket>, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    images_repo::timeline_buckets(&conn, limit.unwrap_or(120)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn images_map_points(
+    pool: State<'_, Pool>,
+    limit: Option<i64>,
+) -> Result<Vec<MapImagePoint>, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    images_repo::map_points(&conn, limit.unwrap_or(2000)).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

@@ -98,6 +98,90 @@ pub struct TaggerResponse {
     pub fallback: bool,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrItem {
+    pub id: i64,
+    pub thumb_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrRequest {
+    pub items: Vec<OcrItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrLine {
+    pub bbox: serde_json::Value,
+    pub content: String,
+    pub confidence: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrResult {
+    pub id: i64,
+    pub text: String,
+    pub lines: Vec<OcrLine>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct OcrResponse {
+    pub items: Vec<OcrResult>,
+    pub model: String,
+    pub fallback: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceDetectItem {
+    pub id: i64,
+    pub thumb_path: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceDetectRequest {
+    pub items: Vec<FaceDetectItem>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceBox {
+    pub x: f64,
+    pub y: f64,
+    pub w: f64,
+    pub h: f64,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceDetection {
+    pub bbox: FaceBox,
+    pub confidence: f64,
+    pub embedding: Option<Vec<f32>>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceDetectResult {
+    pub id: i64,
+    pub faces: Vec<FaceDetection>,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct FaceDetectResponse {
+    pub items: Vec<FaceDetectResult>,
+    pub model: String,
+    pub fallback: bool,
+}
+
 impl AiHttpClient {
     pub fn new() -> AppResult<Self> {
         let client = reqwest::Client::builder()
@@ -173,6 +257,36 @@ impl AiHttpClient {
             .client
             .post(url)
             .json(&TaggerRequest { items })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn run_ocr(&self, port: u16, items: Vec<OcrItem>) -> AppResult<OcrResponse> {
+        let url = endpoint(port, "/ocr/run");
+        Ok(self
+            .client
+            .post(url)
+            .json(&OcrRequest { items })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn detect_faces(
+        &self,
+        port: u16,
+        items: Vec<FaceDetectItem>,
+    ) -> AppResult<FaceDetectResponse> {
+        let url = endpoint(port, "/face/detect");
+        Ok(self
+            .client
+            .post(url)
+            .json(&FaceDetectRequest { items })
             .send()
             .await?
             .error_for_status()?

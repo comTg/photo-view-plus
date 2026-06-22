@@ -1,8 +1,13 @@
 pub mod ai;
+pub mod backup;
 pub mod dedup;
+pub mod face;
 pub mod images;
+pub mod ocr;
 pub mod roots;
 pub mod scan;
 pub mod settings;
+pub mod smart_album;
 pub mod system;
 pub mod trash;
+pub mod watcher;

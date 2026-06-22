@@ -12,7 +12,8 @@ const IMAGE_SELECT: &str = "\
            i.camera_make, i.camera_model, i.thumb_status, i.thumb_hash, i.thumb_error,
            i.indexed_at, i.deleted_at, r.path,
            i.blake3, i.phash, i.dhash, i.hash_status,
-           i.tag_status, i.embedding_status
+           i.tag_status, i.embedding_status,
+           i.ocr_status, i.ocr_text, i.face_status
     FROM images i
     JOIN roots r ON r.id = i.root_id";
 
@@ -49,6 +50,9 @@ pub struct ImageRecord {
     pub hash_status: String,
     pub tag_status: String,
     pub embedding_status: String,
+    pub ocr_status: String,
+    pub ocr_text: Option<String>,
+    pub face_status: String,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -58,6 +62,25 @@ pub struct ImagePage {
     pub total: i64,
     pub offset: i64,
     pub limit: i64,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TimelineBucket {
+    pub year: i64,
+    pub month: i64,
+    pub count: i64,
+    pub start_ts: i64,
+    pub end_ts: i64,
+    pub samples: Vec<ImageRecord>,
+}
+
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MapImagePoint {
+    pub image: ImageRecord,
+    pub lat: f64,
+    pub lng: f64,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -278,6 +301,7 @@ pub fn upsert_scanned_image(
                  thumb_status = 'pending', thumb_hash = NULL, thumb_error = NULL,
                  blake3 = NULL, phash = NULL, dhash = NULL, hash_status = 'pending',
                  tag_status = 'pending', embedding_status = 'pending',
+                 ocr_status = 'disabled', ocr_text = NULL, face_status = 'disabled',
                  indexed_at = ?13, deleted_at = NULL
              WHERE id = ?14",
             params![
@@ -498,6 +522,80 @@ pub fn set_embedding_status(conn: &Connection, id: i64, status: &str) -> AppResu
     Ok(())
 }
 
+pub fn set_ocr_status(conn: &Connection, id: i64, status: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET ocr_status = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![status, id],
+    )?;
+    Ok(())
+}
+
+pub fn set_ocr_result(conn: &Connection, id: i64, text: &str, status: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images
+         SET ocr_status = ?1, ocr_text = ?2
+         WHERE id = ?3 AND deleted_at IS NULL",
+        params![status, text, id],
+    )?;
+    Ok(())
+}
+
+pub fn set_face_status(conn: &Connection, id: i64, status: &str) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images SET face_status = ?1 WHERE id = ?2 AND deleted_at IS NULL",
+        params![status, id],
+    )?;
+    Ok(())
+}
+
+pub fn mark_ocr_pending(conn: &Connection, image_ids: Option<&[i64]>) -> AppResult<usize> {
+    if let Some(ids) = image_ids.filter(|ids| !ids.is_empty()) {
+        let sql = format!(
+            "UPDATE images
+             SET ocr_status = 'pending'
+             WHERE deleted_at IS NULL AND thumb_status = 'ready' AND id IN ({})",
+            placeholders(ids.len())
+        );
+        Ok(conn.execute(
+            &sql,
+            params_from_iter(ids.iter().copied().map(Value::Integer)),
+        )?)
+    } else {
+        Ok(conn.execute(
+            "UPDATE images
+             SET ocr_status = 'pending'
+             WHERE deleted_at IS NULL
+               AND thumb_status = 'ready'
+               AND ocr_status IN ('disabled', 'failed')",
+            [],
+        )?)
+    }
+}
+
+pub fn mark_face_pending(conn: &Connection, image_ids: Option<&[i64]>) -> AppResult<usize> {
+    if let Some(ids) = image_ids.filter(|ids| !ids.is_empty()) {
+        let sql = format!(
+            "UPDATE images
+             SET face_status = 'pending'
+             WHERE deleted_at IS NULL AND thumb_status = 'ready' AND id IN ({})",
+            placeholders(ids.len())
+        );
+        Ok(conn.execute(
+            &sql,
+            params_from_iter(ids.iter().copied().map(Value::Integer)),
+        )?)
+    } else {
+        Ok(conn.execute(
+            "UPDATE images
+             SET face_status = 'pending'
+             WHERE deleted_at IS NULL
+               AND thumb_status = 'ready'
+               AND face_status IN ('disabled', 'failed')",
+            [],
+        )?)
+    }
+}
+
 /// 还没算 BLAKE3 的图（未删除）。
 ///
 /// 不再按 `hash_status='failed'` 排除：`hash_status` 是 blake3/dhash 共用列，按它排除会让
@@ -579,6 +677,175 @@ pub fn pending_tag_images(conn: &Connection, limit: i64) -> AppResult<Vec<ImageR
         out.push(row?);
     }
     Ok(out)
+}
+
+pub fn pending_ocr_images(conn: &Connection, limit: i64) -> AppResult<Vec<ImageRecord>> {
+    let sql = format!(
+        "{IMAGE_SELECT}
+         WHERE i.deleted_at IS NULL
+           AND i.thumb_status = 'ready'
+           AND i.ocr_status = 'pending'
+         ORDER BY i.indexed_at ASC, i.id ASC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit.clamp(1, 128)], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn pending_face_images(conn: &Connection, limit: i64) -> AppResult<Vec<ImageRecord>> {
+    let sql = format!(
+        "{IMAGE_SELECT}
+         WHERE i.deleted_at IS NULL
+           AND i.thumb_status = 'ready'
+           AND i.face_status = 'pending'
+         ORDER BY i.indexed_at ASC, i.id ASC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit.clamp(1, 128)], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn search_text(conn: &Connection, q: &str, limit: i64, offset: i64) -> AppResult<ImagePage> {
+    let query = fts_query(q);
+    if query.is_empty() {
+        return Ok(ImagePage {
+            items: Vec::new(),
+            total: 0,
+            offset: offset.max(0),
+            limit: limit.clamp(1, 500),
+        });
+    }
+
+    let limit = limit.clamp(1, 500);
+    let offset = offset.max(0);
+    let total: i64 = conn.query_row(
+        "SELECT COUNT(*)
+         FROM images_fts f
+         JOIN images i ON i.id = f.rowid
+         WHERE images_fts MATCH ?1 AND i.deleted_at IS NULL",
+        [query.as_str()],
+        |row| row.get(0),
+    )?;
+
+    let sql = format!(
+        "{IMAGE_SELECT}
+         JOIN images_fts f ON f.rowid = i.id
+         WHERE images_fts MATCH ?1 AND i.deleted_at IS NULL
+         ORDER BY rank
+         LIMIT ?2 OFFSET ?3"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![query, limit, offset], row_to_record)?;
+    let mut items = Vec::new();
+    for row in rows {
+        items.push(row?);
+    }
+    Ok(ImagePage {
+        items,
+        total,
+        offset,
+        limit,
+    })
+}
+
+pub fn timeline_buckets(conn: &Connection, limit: i64) -> AppResult<Vec<TimelineBucket>> {
+    let mut stmt = conn.prepare(
+        "SELECT
+             CAST(strftime('%Y', ts, 'unixepoch', 'localtime') AS INTEGER) AS year,
+             CAST(strftime('%m', ts, 'unixepoch', 'localtime') AS INTEGER) AS month,
+             COUNT(*) AS count,
+             MIN(ts) AS start_ts,
+             MAX(ts) AS end_ts
+         FROM (
+             SELECT id, COALESCE(taken_at, mtime) AS ts
+             FROM images
+             WHERE deleted_at IS NULL
+         )
+         GROUP BY year, month
+         ORDER BY year DESC, month DESC
+         LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([limit.clamp(1, 240)], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+            row.get::<_, i64>(3)?,
+            row.get::<_, i64>(4)?,
+        ))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (year, month, count, start_ts, end_ts) = row?;
+        let samples = timeline_samples(conn, year, month, 50)?;
+        out.push(TimelineBucket {
+            year,
+            month,
+            count,
+            start_ts,
+            end_ts,
+            samples,
+        });
+    }
+    Ok(out)
+}
+
+pub fn map_points(conn: &Connection, limit: i64) -> AppResult<Vec<MapImagePoint>> {
+    let sql = format!(
+        "{IMAGE_SELECT}
+         WHERE i.deleted_at IS NULL
+           AND i.gps_lat IS NOT NULL
+           AND i.gps_lng IS NOT NULL
+         ORDER BY COALESCE(i.taken_at, i.mtime) DESC, i.id DESC
+         LIMIT ?1"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map([limit.clamp(1, 5000)], row_to_record)?;
+    let mut out = Vec::new();
+    for row in rows {
+        let image = row?;
+        let Some(lat) = image.gps_lat else {
+            continue;
+        };
+        let Some(lng) = image.gps_lng else {
+            continue;
+        };
+        out.push(MapImagePoint { image, lat, lng });
+    }
+    Ok(out)
+}
+
+fn timeline_samples(
+    conn: &Connection,
+    year: i64,
+    month: i64,
+    limit: i64,
+) -> AppResult<Vec<ImageRecord>> {
+    let sql = format!(
+        "{IMAGE_SELECT}
+         WHERE i.deleted_at IS NULL
+           AND CAST(strftime('%Y', COALESCE(i.taken_at, i.mtime), 'unixepoch', 'localtime') AS INTEGER) = ?1
+           AND CAST(strftime('%m', COALESCE(i.taken_at, i.mtime), 'unixepoch', 'localtime') AS INTEGER) = ?2
+         ORDER BY COALESCE(i.taken_at, i.mtime) DESC, i.id DESC
+         LIMIT ?3"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params![year, month, limit.clamp(1, 100)], row_to_record)?;
+    let mut samples = Vec::new();
+    for row in rows {
+        samples.push(row?);
+    }
+    Ok(samples)
 }
 
 pub fn ids_for_tag(conn: &Connection, tag_id: i64, limit: i64, offset: i64) -> AppResult<Vec<i64>> {
@@ -860,6 +1127,9 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
         hash_status: row.get(24)?,
         tag_status: row.get(25)?,
         embedding_status: row.get(26)?,
+        ocr_status: row.get(27)?,
+        ocr_text: row.get(28)?,
+        face_status: row.get(29)?,
     })
 }
 
@@ -875,6 +1145,16 @@ fn escape_like(input: &str) -> String {
         .replace('\\', "\\\\")
         .replace('%', "\\%")
         .replace('_', "\\_")
+}
+
+fn fts_query(input: &str) -> String {
+    input
+        .split_whitespace()
+        .map(|token| token.trim_matches('"').replace('"', "\"\""))
+        .filter(|token| !token.is_empty())
+        .map(|token| format!("\"{token}\""))
+        .collect::<Vec<_>>()
+        .join(" AND ")
 }
 
 #[cfg(test)]

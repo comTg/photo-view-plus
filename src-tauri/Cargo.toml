@@ -59,6 +59,10 @@ lancedb = "0.30"
 arrow-array = "58"
 arrow-schema = "58"
 
+# MVP4: advanced library management
+notify = "8"
+zip = "4"
+
 # Windows：线程优先级（缩略图解码切后台模式，不抢前台 UI 的 CPU/磁盘）
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.59", features = ["Win32_Foundation", "Win32_System_Threading"] }

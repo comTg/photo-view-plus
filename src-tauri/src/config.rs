@@ -94,6 +94,10 @@ pub struct AppSettings {
     pub ai_idle_stop_minutes: u16,
     pub ai_clip_model: String,
     pub ai_tagger_model: String,
+    pub ocr_enabled: bool,
+    pub face_enabled: bool,
+    pub gps_enabled: bool,
+    pub file_watcher_enabled: bool,
 }
 
 impl Default for AppSettings {
@@ -108,6 +112,10 @@ impl Default for AppSettings {
             ai_idle_stop_minutes: 10,
             ai_clip_model: "clip-vit-b-32".to_string(),
             ai_tagger_model: "ram-plus".to_string(),
+            ocr_enabled: false,
+            face_enabled: false,
+            gps_enabled: true,
+            file_watcher_enabled: true,
         }
     }
 }
@@ -124,6 +132,10 @@ pub struct AppSettingsPatch {
     pub ai_idle_stop_minutes: Option<u16>,
     pub ai_clip_model: Option<String>,
     pub ai_tagger_model: Option<String>,
+    pub ocr_enabled: Option<bool>,
+    pub face_enabled: Option<bool>,
+    pub gps_enabled: Option<bool>,
+    pub file_watcher_enabled: Option<bool>,
 }
 
 impl AppSettings {
@@ -154,6 +166,18 @@ impl AppSettings {
         }
         if let Some(ai_tagger_model) = patch.ai_tagger_model {
             self.ai_tagger_model = sanitize_model_key(ai_tagger_model, "ram-plus");
+        }
+        if let Some(ocr_enabled) = patch.ocr_enabled {
+            self.ocr_enabled = ocr_enabled;
+        }
+        if let Some(face_enabled) = patch.face_enabled {
+            self.face_enabled = face_enabled;
+        }
+        if let Some(gps_enabled) = patch.gps_enabled {
+            self.gps_enabled = gps_enabled;
+        }
+        if let Some(file_watcher_enabled) = patch.file_watcher_enabled {
+            self.file_watcher_enabled = file_watcher_enabled;
         }
     }
 }

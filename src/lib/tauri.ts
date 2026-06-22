@@ -9,6 +9,9 @@ import type {
   AiWorkerStatus,
   AppSettings,
   AppSettingsPatch,
+  BackupExportArgs,
+  BackupExportResult,
+  BackupImportResult,
   DbStatus,
   DedupBatchResolveArgs,
   DedupBatchResolveResult,
@@ -21,19 +24,28 @@ import type {
   DedupStartResult,
   DedupStatus,
   DuplicateGroupPage,
+  Face,
+  FaceCluster,
+  FaceStatus,
   ImagePage,
   ImageQueryParams,
   ImageRecord,
   ImageTag,
+  MapImagePoint,
+  OcrStatus,
   QueueStatus,
   RemoveResult,
   RenameImageArgs,
   Root,
   ScanStartResult,
   ScanTaskStatus,
+  SmartAlbum,
+  SmartAlbumInput,
+  TimelineBucket,
   UndoEntry,
   UndoOutcome,
   UpdateRootArgs,
+  WatcherStatus,
 } from "./tauri-types";
 
 // 系统
@@ -94,6 +106,22 @@ export async function imagesQuery(params: ImageQueryParams): Promise<ImagePage> 
 
 export async function imagesGetDetail(id: number): Promise<ImageRecord | null> {
   return invoke<ImageRecord | null>("images_get_detail", { id });
+}
+
+export async function imagesSearchText(
+  q: string,
+  offset?: number,
+  limit?: number,
+): Promise<ImagePage> {
+  return invoke<ImagePage>("images_search_text", { q, offset, limit });
+}
+
+export async function imagesTimeline(limit?: number): Promise<TimelineBucket[]> {
+  return invoke<TimelineBucket[]>("images_timeline", { limit });
+}
+
+export async function imagesMapPoints(limit?: number): Promise<MapImagePoint[]> {
+  return invoke<MapImagePoint[]>("images_map_points", { limit });
 }
 
 export async function imagesRename(args: RenameImageArgs): Promise<ImageRecord | null> {
@@ -188,6 +216,87 @@ export async function aiImagesByTag(
   limit?: number,
 ): Promise<ImagePage> {
   return invoke<ImagePage>("ai_images_by_tag", { tagId, offset, limit });
+}
+
+// MVP4
+export async function ocrRun(imageIds?: number[]): Promise<number> {
+  return invoke<number>("ocr_run", { args: imageIds ? { imageIds } : null });
+}
+
+export async function ocrStatus(): Promise<OcrStatus> {
+  return invoke<OcrStatus>("ocr_status");
+}
+
+export async function faceRun(imageIds?: number[]): Promise<number> {
+  return invoke<number>("face_run", { args: imageIds ? { imageIds } : null });
+}
+
+export async function faceStatus(): Promise<FaceStatus> {
+  return invoke<FaceStatus>("face_status");
+}
+
+export async function facesCluster(): Promise<number> {
+  return invoke<number>("faces_cluster");
+}
+
+export async function facesListClusters(): Promise<FaceCluster[]> {
+  return invoke<FaceCluster[]>("faces_list_clusters");
+}
+
+export async function facesForImage(imageId: number): Promise<Face[]> {
+  return invoke<Face[]>("faces_for_image", { imageId });
+}
+
+export async function facesImagesForCluster(
+  clusterId: number,
+  offset?: number,
+  limit?: number,
+): Promise<ImagePage> {
+  return invoke<ImagePage>("faces_images_for_cluster", { clusterId, offset, limit });
+}
+
+export async function faceClusterRename(clusterId: number, label: string | null): Promise<void> {
+  return invoke<void>("face_cluster_rename", { args: { clusterId, label } });
+}
+
+export async function smartAlbumSave(input: SmartAlbumInput): Promise<SmartAlbum> {
+  return invoke<SmartAlbum>("smart_album_save", { input });
+}
+
+export async function smartAlbumList(): Promise<SmartAlbum[]> {
+  return invoke<SmartAlbum[]>("smart_album_list");
+}
+
+export async function smartAlbumDelete(id: number): Promise<boolean> {
+  return invoke<boolean>("smart_album_delete", { id });
+}
+
+export async function smartAlbumQuery(
+  id: number,
+  offset?: number,
+  limit?: number,
+): Promise<ImagePage> {
+  return invoke<ImagePage>("smart_album_query", { id, offset, limit });
+}
+
+export async function watcherStart(): Promise<WatcherStatus> {
+  return invoke<WatcherStatus>("watcher_start");
+}
+
+export async function watcherStop(): Promise<WatcherStatus> {
+  return invoke<WatcherStatus>("watcher_stop");
+}
+
+export async function watcherStatus(): Promise<WatcherStatus> {
+  return invoke<WatcherStatus>("watcher_status");
+}
+
+export async function libraryBackupExport(args: BackupExportArgs): Promise<BackupExportResult> {
+  return invoke<BackupExportResult>("library_backup_export", { args });
+}
+
+export async function libraryBackupImport(source: string): Promise<BackupImportResult> {
+  return invoke<BackupImportResult>("library_backup_import", { source });
 }
 
 // Dedup

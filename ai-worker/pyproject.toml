@@ -21,6 +21,14 @@ cuda = [
 models = [
     "huggingface_hub>=0.24.0",
 ]
+ocr = [
+    "rapidocr-onnxruntime>=1.4.0",
+]
+face = [
+    "insightface>=0.7.3",
+    "numpy>=1.26.0",
+    "onnxruntime-gpu>=1.20.0",
+]
 # RAM-plus（Recognize Anything Plus）多标签识别，原生中文标签。
 # 注意：recognize-anything 不在 PyPI，且其 setup.py 钉死 timm==0.4.12 等老版本，
 # 直接作为依赖会破坏 torch 2.11 / open_clip 环境。所以这里只放它运行时真正需要的

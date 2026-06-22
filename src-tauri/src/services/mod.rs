@@ -1,11 +1,15 @@
 pub mod ai_client;
 pub mod ai_pipeline;
 pub mod ai_supervisor;
+pub mod backup_service;
 pub mod dedup_service;
+pub mod face_service;
 pub mod hash_service;
+pub mod ocr_service;
 pub mod phash_service;
 pub mod scan_service;
 pub mod settings_service;
 pub mod startup_gate;
 pub mod thumbnail_service;
 pub mod trash_service;
+pub mod watcher_service;

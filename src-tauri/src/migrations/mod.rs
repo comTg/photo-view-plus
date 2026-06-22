@@ -26,6 +26,16 @@ const MIGRATIONS: &[Migration] = &[
         name: "ai_columns",
         sql: include_str!("../../migrations/0003_ai_columns.sql"),
     },
+    Migration {
+        version: 4,
+        name: "ocr_face",
+        sql: include_str!("../../migrations/0004_ocr_face.sql"),
+    },
+    Migration {
+        version: 5,
+        name: "smart_albums",
+        sql: include_str!("../../migrations/0005_smart_albums.sql"),
+    },
 ];
 
 struct Migration {

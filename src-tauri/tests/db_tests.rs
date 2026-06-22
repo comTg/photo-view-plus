@@ -5,6 +5,7 @@
 //! 4. 外键约束生效：删除 root 级联删 images
 //! 5. WAL 模式与 PRAGMA 生效
 
+use photo_view_plus_lib::repo::smart_albums_repo::{self, SmartAlbumInput};
 use photo_view_plus_lib::repo::tags_repo::{self, NewTagScore};
 use photo_view_plus_lib::*;
 use rusqlite::params;
@@ -57,8 +58,8 @@ fn test_003_current_version_after_init() {
     let conn = pool.get().unwrap();
     let version = migrations::current_version(&conn).unwrap();
     assert!(
-        version >= 3,
-        "expected version >= 3 after MVP3 schema, got {version}"
+        version >= 5,
+        "expected version >= 5 after MVP4 schema, got {version}"
     );
 }
 
@@ -134,6 +135,49 @@ fn test_007_mvp3_tags_schema_and_repo_roundtrip() {
 
     let cloud = tags_repo::list_tags(&conn, 10).unwrap();
     assert_eq!(cloud.len(), 2);
+}
+
+#[test]
+fn test_008_mvp4_ocr_face_fts_and_smart_album_schema() {
+    let (pool, _dir) = fresh();
+    let conn = pool.get().unwrap();
+
+    for table in ["faces", "face_clusters", "smart_albums"] {
+        assert!(
+            db::table_exists(&conn, table).unwrap(),
+            "table {table} should exist after MVP4 migrations"
+        );
+    }
+
+    conn.execute(
+        "INSERT INTO roots(path, type, created_at) VALUES (?1, 'local', 0)",
+        params!["/tmp/mvp4"],
+    )
+    .unwrap();
+    let root_id = conn.last_insert_rowid();
+    conn.execute(
+        "INSERT INTO images(root_id, rel_path, filename, extension, size_bytes, mtime, indexed_at, ocr_text)
+         VALUES (?1, 'error.png', 'error.png', 'png', 100, 0, 0, 'Fatal Error 报错')",
+        params![root_id],
+    )
+    .unwrap();
+    let image_id = conn.last_insert_rowid();
+    let page = photo_view_plus_lib::repo::images_repo::search_text(&conn, "Error", 10, 0).unwrap();
+    assert_eq!(page.total, 1);
+    assert_eq!(page.items[0].id, image_id);
+
+    let album = smart_albums_repo::save(
+        &conn,
+        &SmartAlbumInput {
+            name: "PNG".to_string(),
+            filter_json: r#"{"formats":["png"],"offset":0,"limit":200}"#.to_string(),
+            icon: Some("sparkles".to_string()),
+            sort_order: Some(1),
+        },
+    )
+    .unwrap();
+    assert_eq!(album.name, "PNG");
+    assert_eq!(smart_albums_repo::list(&conn).unwrap().len(), 1);
 }
 
 #[test]

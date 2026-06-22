@@ -70,6 +70,8 @@ pub fn run() {
             // 叠加缩略图把机器拖卡（worker 的 /tagger/run 是同步端点，并发会进 FastAPI 线程池）。
             task_caps[queue::Priority::P5 as usize] = 1;
             task_caps[queue::Priority::P6 as usize] = 1;
+            task_caps[queue::Priority::P4 as usize] = 1;
+            task_caps[queue::Priority::P7 as usize] = 1;
             let scheduler = queue::Scheduler::start_with_caps(16, task_caps);
             let queue_app = app.handle().clone();
             scheduler.spawn_status_loop(move |status| {
@@ -101,6 +103,23 @@ pub fn run() {
                 .clone()
                 .spawn_loop(app.handle().clone(), startup_gate.clone());
 
+            // MVP4 文件监听：只监听本地 root；网络盘仍按 docs/07 走定时/手动 rescan。
+            let watcher_service = Arc::new(services::watcher_service::WatcherService::new(
+                pool.clone(),
+                scheduler.clone(),
+                app.handle().clone(),
+                paths.clone(),
+            ));
+            match services::settings_service::read(&paths) {
+                Ok(settings) if settings.file_watcher_enabled => {
+                    if let Err(error) = watcher_service.start() {
+                        tracing::warn!(%error, "failed to start file watcher");
+                    }
+                }
+                Ok(_) => {}
+                Err(error) => tracing::warn!(%error, "failed to read settings for watcher"),
+            }
+
             // BK-tree 全量加载：一次性查全库，放后台线程，让 setup 尽快返回。
             spawn_bktree_init(pool.clone(), dhash_index.clone());
 
@@ -122,6 +141,7 @@ pub fn run() {
             app.manage(ai_supervisor);
             app.manage(ai_pipeline);
             app.manage(startup_gate);
+            app.manage(watcher_service);
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
@@ -141,6 +161,9 @@ pub fn run() {
             commands::scan::queue_status,
             commands::images::images_query,
             commands::images::images_get_detail,
+            commands::images::images_search_text,
+            commands::images::images_timeline,
+            commands::images::images_map_points,
             commands::images::images_rename,
             commands::images::images_reveal_in_dir,
             commands::images::thumbs_path,
@@ -170,6 +193,25 @@ pub fn run() {
             commands::ai::ai_image_tags,
             commands::ai::ai_images_by_tag,
             commands::ai::ai_retag_all,
+            commands::ocr::ocr_run,
+            commands::ocr::ocr_status,
+            commands::face::face_run,
+            commands::face::faces_cluster,
+            commands::face::face_status,
+            commands::face::faces_list_clusters,
+            commands::face::faces_for_image,
+            commands::face::faces_images_for_cluster,
+            commands::face::face_cluster_rename,
+            commands::face::face_clusters_merge,
+            commands::smart_album::smart_album_save,
+            commands::smart_album::smart_album_list,
+            commands::smart_album::smart_album_delete,
+            commands::smart_album::smart_album_query,
+            commands::watcher::watcher_start,
+            commands::watcher::watcher_stop,
+            commands::watcher::watcher_status,
+            commands::backup::library_backup_export,
+            commands::backup::library_backup_import,
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| eprintln!("error while running tauri application: {error}"));
@@ -422,9 +464,8 @@ fn init_tracing(profile: config::Profile) {
     // 依赖（尤其是 LanceDB）在 info 级别极其啰嗦：每次 embedding upsert 会刷十几行
     // lance::* 事件，写满日志文件、也让 dev 下同步写 stdout 的 fmt layer 互相抢锁。
     // 默认只放行本项目 crate 的 info，其余依赖压到 warn；需要排障时用 PVP_LOG 覆盖。
-    let filter = EnvFilter::try_from_env("PVP_LOG").unwrap_or_else(|_| {
-        EnvFilter::new("warn,photo_view_plus_lib=info,photo_view_plus=info")
-    });
+    let filter = EnvFilter::try_from_env("PVP_LOG")
+        .unwrap_or_else(|_| EnvFilter::new("warn,photo_view_plus_lib=info,photo_view_plus=info"));
     let stdout_layer = tracing_subscriber::fmt::layer();
 
     if let Some(log_dir) = log_dir_for(profile) {
