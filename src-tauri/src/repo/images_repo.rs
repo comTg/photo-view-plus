@@ -382,6 +382,16 @@ pub fn update_thumbnail_failed(
     Ok(())
 }
 
+pub fn update_thumbnail_pending(conn: &Connection, id: i64) -> AppResult<()> {
+    conn.execute(
+        "UPDATE images
+         SET thumb_status = 'pending', thumb_hash = NULL, thumb_error = NULL
+         WHERE id = ?1",
+        [id],
+    )?;
+    Ok(())
+}
+
 pub fn mark_deleted(conn: &Connection, root_id: i64, rel_path: &str, now: i64) -> AppResult<()> {
     conn.execute(
         "UPDATE images SET deleted_at = ?1 WHERE root_id = ?2 AND rel_path = ?3",

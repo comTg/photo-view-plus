@@ -18,6 +18,7 @@ import {
   aiWorkerStart,
   aiWorkerStatus,
   aiWorkerStop,
+  bustThumbnailCache,
   faceClusterRename,
   faceRun,
   faceStatus,
@@ -27,6 +28,7 @@ import {
   imagesGetDetail,
   imagesMapPoints,
   imagesQuery,
+  imagesRegenerateThumbnail,
   imagesRename,
   imagesRevealInDir,
   imagesSearchText,
@@ -191,6 +193,8 @@ export default function App() {
   const [selectionMode, setSelectionMode] = useState(false);
   const lastSelectedId = useRef<number | null>(null);
   const [detail, setDetail] = useState<ImageRecord | null>(null);
+  const [thumbnailRefreshIds, setThumbnailRefreshIds] = useState<number[]>([]);
+  const thumbnailRefreshIdsRef = useRef(new Set<number>());
   const [previewImages, setPreviewImages] = useState<ImageRecord[]>([]);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [imageMenu, setImageMenu] = useState<{
@@ -390,12 +394,59 @@ export default function App() {
   const handleAiStatus = useCallback((payload: AiWorkerStatus) => setAiStatus(payload), []);
   const handleAiProgress = useCallback((payload: AiPipelineStatus) => setAiPipeline(payload), []);
 
+  const replaceImageRecord = useCallback((updated: ImageRecord) => {
+    const replace = (image: ImageRecord) => (image.id === updated.id ? updated : image);
+    setImages((prev) => prev.map(replace));
+    setDetail((prev) => (prev?.id === updated.id ? updated : prev));
+    setPreviewImages((prev) => prev.map(replace));
+    setAiResults((prev) =>
+      prev.map((result) =>
+        result.image.id === updated.id ? { ...result, image: updated } : result,
+      ),
+    );
+    setTimelineBuckets((prev) =>
+      prev.map((bucket) => ({ ...bucket, samples: bucket.samples.map(replace) })),
+    );
+    setMapPoints((prev) =>
+      prev.map((point) => (point.image.id === updated.id ? { ...point, image: updated } : point)),
+    );
+    setAdvancedImages((prev) => prev.map(replace));
+  }, []);
+
+  const setThumbnailRefreshing = useCallback((imageId: number, refreshing: boolean) => {
+    if (refreshing) {
+      thumbnailRefreshIdsRef.current.add(imageId);
+    } else {
+      thumbnailRefreshIdsRef.current.delete(imageId);
+    }
+    setThumbnailRefreshIds([...thumbnailRefreshIdsRef.current]);
+  }, []);
+
+  const handleThumbnailUpdated = useCallback(
+    (updated: ImageRecord) => {
+      const wasManualRefresh = thumbnailRefreshIdsRef.current.has(updated.id);
+      bustThumbnailCache(updated.id);
+      replaceImageRecord(updated);
+      setThumbnailRefreshing(updated.id, false);
+      if (!wasManualRefresh) return;
+      if (updated.thumbStatus === "ready") {
+        setToast("缩略图已重新生成");
+      } else if (updated.thumbStatus === "pending") {
+        setToast("缩略图任务已取消，可再次重试");
+      } else {
+        setToast(`缩略图生成失败：${updated.thumbError ?? thumbStatusText(updated.thumbStatus)}`);
+      }
+    },
+    [replaceImageRecord, setThumbnailRefreshing],
+  );
+
   useTauriEvent<ScanProgress>("scan:progress", handleScanProgress);
   useTauriEvent<ScanDone>("scan:done", handleScanDone);
   useTauriEvent<ScanErrorEvent>("scan:error", handleScanError);
   useTauriEvent<QueueStatus>("queue:status", handleQueueStatus);
   useTauriEvent<AiWorkerStatus>("ai:worker_status", handleAiStatus);
   useTauriEvent<AiPipelineStatus>("ai:progress", handleAiProgress);
+  useTauriEvent<ImageRecord>("thumbnail:updated", handleThumbnailUpdated);
 
   const primarySelectedId =
     selectedIds.length > 0 ? (selectedIds[selectedIds.length - 1] ?? null) : null;
@@ -541,13 +592,40 @@ export default function App() {
     event.stopPropagation();
     setSelectedIds((prev) => (prev.includes(image.id) ? prev : [image.id]));
     lastSelectedId.current = image.id;
-    setImageMenu({ ...menuPosition(event), image });
+    setImageMenu({ ...menuPosition(event, 220, 132), image });
   }, []);
 
   const handleCopyImagePath = useCallback(async (image: ImageRecord) => {
     await navigator.clipboard.writeText(image.fullPath);
     setToast("已复制图片路径");
   }, []);
+
+  const handleRegenerateThumbnail = useCallback(
+    async (image: ImageRecord) => {
+      if (thumbnailRefreshIdsRef.current.has(image.id)) return;
+      setThumbnailRefreshing(image.id, true);
+      const pending: ImageRecord = {
+        ...image,
+        thumbStatus: "pending",
+        thumbHash: null,
+        thumbError: null,
+      };
+      replaceImageRecord(pending);
+      try {
+        const queued = await imagesRegenerateThumbnail(image.id);
+        // 小图可能在 invoke 返回前就已经完成；此时完成事件已写回 ready，不能再用 pending 覆盖。
+        if (thumbnailRefreshIdsRef.current.has(image.id)) {
+          replaceImageRecord(queued);
+          setToast("已加入缩略图生成队列");
+        }
+      } catch (error) {
+        setThumbnailRefreshing(image.id, false);
+        replaceImageRecord(image);
+        setToast(`重刷缩略图失败：${String(error)}`);
+      }
+    },
+    [replaceImageRecord, setThumbnailRefreshing],
+  );
 
   const handleRename = useCallback(
     async (newFilename: string) => {
@@ -1441,6 +1519,10 @@ export default function App() {
             onRename={handleRename}
             onReveal={handleReveal}
             onCopyPaths={handleCopyPaths}
+            thumbnailRefreshing={detail ? thumbnailRefreshIds.includes(detail.id) : false}
+            onRegenerateThumbnail={() => {
+              if (detail) void handleRegenerateThumbnail(detail);
+            }}
             onPreview={() => {
               if (primarySelectedId !== null) openPreviewById(primarySelectedId);
             }}
@@ -1491,6 +1573,14 @@ export default function App() {
                   id: "copy-path",
                   label: "复制完整路径",
                   onSelect: () => void handleCopyImagePath(imageMenu.image),
+                },
+                {
+                  id: "regenerate-thumbnail",
+                  label: thumbnailRefreshIds.includes(imageMenu.image.id)
+                    ? "正在重新生成缩略图…"
+                    : "重新生成缩略图",
+                  disabled: thumbnailRefreshIds.includes(imageMenu.image.id),
+                  onSelect: () => void handleRegenerateThumbnail(imageMenu.image),
                 },
               ]
             : []
@@ -1801,6 +1891,11 @@ function MapView({
   const mapRef = useRef<HTMLDivElement | null>(null);
   const leafletRef = useRef<L.Map | null>(null);
   const layerRef = useRef<L.LayerGroup | null>(null);
+  const onSelectImageRef = useRef(onSelectImage);
+
+  useEffect(() => {
+    onSelectImageRef.current = onSelectImage;
+  }, [onSelectImage]);
 
   useEffect(() => {
     if (!mapRef.current || leafletRef.current) return;
@@ -1836,13 +1931,13 @@ function MapView({
         fillOpacity: 0.82,
       })
         .bindPopup(point.image.filename)
-        .on("click", () => onSelectImage(point.image))
+        .on("click", () => onSelectImageRef.current(point.image))
         .addTo(layer);
     }
     if (bounds.length > 0) {
       map.fitBounds(bounds, { padding: [28, 28], maxZoom: 12 });
     }
-  }, [onSelectImage, points]);
+  }, [points]);
 
   return (
     <section className="map-view">
@@ -2356,7 +2451,11 @@ const ImageCard = memo(function ImageCard({
       className={`image-card${selected ? " image-card--selected" : ""}`}
       onClick={(event) => onClickImage(image, event)}
       onContextMenu={(event) => onOpenContextMenu(image, event)}
-      onDoubleClick={() => onPreviewImage(image)}
+      onDoubleClickCapture={(event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        onPreviewImage(image);
+      }}
       title={image.fullPath}
       data-image-id={image.id}
     >
@@ -2393,6 +2492,8 @@ interface DetailPaneProps {
   onRename: (filename: string) => Promise<void>;
   onReveal: () => Promise<void>;
   onCopyPaths: () => Promise<void>;
+  thumbnailRefreshing: boolean;
+  onRegenerateThumbnail: () => void;
   onPreview: () => void;
   onTagImage: () => Promise<void>;
   onFindSimilar: () => void;
@@ -2407,6 +2508,8 @@ function DetailPane({
   onRename,
   onReveal,
   onCopyPaths,
+  thumbnailRefreshing,
+  onRegenerateThumbnail,
   onPreview,
   onTagImage,
   onFindSimilar,
@@ -2501,6 +2604,13 @@ function DetailPane({
         <button type="button" onClick={() => void onCopyPaths()}>
           <Copy aria-hidden="true" />
           复制路径
+        </button>
+        <button type="button" disabled={thumbnailRefreshing} onClick={onRegenerateThumbnail}>
+          <RefreshCw
+            aria-hidden="true"
+            className={thumbnailRefreshing ? "icon--spinning" : undefined}
+          />
+          {thumbnailRefreshing ? "生成中…" : "重刷缩略图"}
         </button>
       </div>
 

@@ -3,11 +3,13 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
+use tokio::sync::mpsc;
 
 use crate::config::AppPaths;
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
+use crate::queue::Scheduler;
 use crate::repo::images_repo::{
     self, ImagePage, ImageQueryParams, ImageRecord, MapImagePoint, RenameRecordPatch,
     TimelineBucket,
@@ -94,6 +96,41 @@ pub fn images_reveal_in_dir(pool: State<'_, Pool>, id: i64) -> Result<(), String
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("图片不存在：{id}"))?;
     reveal_path(Path::new(&detail.full_path)).map_err(|e| e.to_string())
+}
+
+#[tauri::command]
+pub fn images_regenerate_thumbnail(
+    pool: State<'_, Pool>,
+    scheduler: State<'_, Scheduler>,
+    paths: State<'_, AppPaths>,
+    app: AppHandle,
+    id: i64,
+) -> Result<ImageRecord, String> {
+    let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
+    let pending = thumbnail_service::enqueue_thumbnail_regeneration(
+        pool.inner(),
+        scheduler.inner(),
+        &paths.thumbs_dir,
+        id,
+        completion_tx,
+    )
+    .map_err(|e| e.to_string())?;
+
+    let pool = pool.inner().clone();
+    tauri::async_runtime::spawn(async move {
+        if completion_rx.recv().await.is_none() {
+            return;
+        }
+        let updated = pool
+            .get()
+            .ok()
+            .and_then(|conn| images_repo::get_detail(&conn, id).ok().flatten());
+        if let Some(updated) = updated {
+            let _ = app.emit("thumbnail:updated", updated);
+        }
+    });
+
+    Ok(pending)
 }
 
 fn rename_image(pool: &Pool, args: RenameImageArgs) -> AppResult<Option<ImageRecord>> {

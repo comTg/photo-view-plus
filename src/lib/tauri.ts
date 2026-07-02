@@ -132,12 +132,23 @@ export async function imagesRevealInDir(id: number): Promise<void> {
   return invoke<void>("images_reveal_in_dir", { id });
 }
 
+export async function imagesRegenerateThumbnail(id: number): Promise<ImageRecord> {
+  return invoke<ImageRecord>("images_regenerate_thumbnail", { id });
+}
+
 export async function thumbsPath(imageId: number, size?: number): Promise<string | null> {
   return invoke<string | null>("thumbs_path", { imageId, size });
 }
 
+const thumbnailCacheVersions = new Map<number, number>();
+
+export function bustThumbnailCache(imageId: number): void {
+  thumbnailCacheVersions.set(imageId, Date.now());
+}
+
 export function thumbUrl(imageId: number, size = 256): string {
-  return `http://thumb.localhost/${imageId}?size=${size}`;
+  const version = thumbnailCacheVersions.get(imageId);
+  return `http://thumb.localhost/${imageId}?size=${size}${version ? `&v=${version}` : ""}`;
 }
 
 export function originalUrl(imageId: number): string {

@@ -155,6 +155,7 @@
 - 失败处理：
   - 解码失败 → `thumb_status='failed'`，记 error 列（新加在 0001？决定加 `thumb_error TEXT`）
   - 不支持格式 → `thumb_status='unsupported'`
+- 支持用户从详情面板或图片右键菜单手动重新生成单张缩略图：先重置为 `pending`，再进入同一个 P0 队列；任务完成后发送 `thumbnail:updated`
 - 优先级 P0，与扫描 P1 并发跑（扫描喂入新文件，缩略图立刻拣起来做）
 - CPU 限流：缩略图生成是完整解码 + resize + WebP 编码，必须有专用 CPU semaphore；默认按逻辑核数取一半，1-2 核为 1，封顶 6，避免大图库首扫把 CPU 长时间打满导致 UI 卡顿
 
@@ -253,7 +254,7 @@
 - 快捷键：Click / Shift+Click / Ctrl+Click / Ctrl+A
 - 选中态写 `appStore.selection: number[]`
 - 操作：复制路径（拼系统路径）、打开所在文件夹（`tauri-plugin-shell` 的 `revealItemInDir`）
-- 上下文菜单（右键）：同样的两项
+- 上下文菜单（右键）：同样的两项，并提供“重新生成缩略图”
 
 **验收**：选 100 张后批量"复制路径"剪贴板得到 100 行。
 
@@ -263,6 +264,7 @@
 
 具体：
 - `<DetailPane>` 分块：缩略图、基本、EXIF、（占位）标签、（占位）相似
+- 文件信息操作区提供“重新生成缩略图”，显示排队/处理中状态，并在完成后绕过 WebView 的旧缩略图缓存
 - 文件名编辑：双击进入编辑态，回车提交；调 `images_rename` 命令，写 OS + DB + undo_log
 - 地图：MVP1 用文字"上海 徐汇区"（暂留经纬度，反查城市可走 EXIF GPS → 离线 GeoIP？先空，标 TODO）
 

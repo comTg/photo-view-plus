@@ -7,7 +7,8 @@ use async_trait::async_trait;
 use image::codecs::webp::WebPEncoder;
 use image::{DynamicImage, ImageEncoder};
 use sha1::{Digest, Sha1};
-use tokio::sync::Semaphore;
+use tauri::{AppHandle, Emitter};
+use tokio::sync::{mpsc, Semaphore};
 
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
@@ -61,6 +62,8 @@ pub struct ThumbnailTask {
     orientation: Option<i64>,
     thumbs_dir: PathBuf,
     is_network: bool,
+    completion: Option<mpsc::UnboundedSender<i64>>,
+    event_app: Option<AppHandle>,
 }
 
 impl ThumbnailTask {
@@ -84,7 +87,19 @@ impl ThumbnailTask {
             orientation,
             thumbs_dir,
             is_network,
+            completion: None,
+            event_app: None,
         }
+    }
+
+    pub fn with_completion(mut self, completion: mpsc::UnboundedSender<i64>) -> Self {
+        self.completion = Some(completion);
+        self
+    }
+
+    pub fn with_event_app(mut self, app: AppHandle) -> Self {
+        self.event_app = Some(app);
+        self
     }
 }
 
@@ -99,10 +114,41 @@ impl Task for ThumbnailTask {
     }
 
     async fn run(&self, ctx: TaskContext) -> AppResult<()> {
-        if ctx.is_cancelled() {
-            return Ok(());
+        let result = self.run_inner(ctx).await;
+        if let Err(error) = &result {
+            if let Ok(conn) = self.pool.get() {
+                let _ = images_repo::update_thumbnail_failed(
+                    &conn,
+                    self.image_id,
+                    "failed",
+                    &error.to_string(),
+                );
+            }
         }
+        if let Some(completion) = &self.completion {
+            let _ = completion.send(self.image_id);
+        }
+        self.emit_updated();
+        result
+    }
+}
 
+impl ThumbnailTask {
+    fn emit_updated(&self) {
+        let Some(app) = &self.event_app else {
+            return;
+        };
+        let updated = self
+            .pool
+            .get()
+            .ok()
+            .and_then(|conn| images_repo::get_detail(&conn, self.image_id).ok().flatten());
+        if let Some(updated) = updated {
+            let _ = app.emit("thumbnail:updated", updated);
+        }
+    }
+
+    async fn run_inner(&self, ctx: TaskContext) -> AppResult<()> {
         let semaphore = thumbnail_cpu_semaphore();
         let cancellation = ctx.cancellation_token();
         let permit = tokio::select! {
@@ -125,6 +171,46 @@ impl Task for ThumbnailTask {
         })
         .await?
     }
+}
+
+pub fn enqueue_thumbnail_regeneration(
+    pool: &Pool,
+    scheduler: &Scheduler,
+    thumbs_dir: &Path,
+    image_id: i64,
+    completion: mpsc::UnboundedSender<i64>,
+) -> AppResult<images_repo::ImageRecord> {
+    let conn = pool.get()?;
+    let mut image = images_repo::get_detail(&conn, image_id)?
+        .ok_or_else(|| AppError::Other(format!("图片不存在：{image_id}")))?;
+    images_repo::update_thumbnail_pending(&conn, image_id)?;
+    drop(conn);
+
+    let is_network = crate::utils::path_normalize::is_network_path(Path::new(&image.root_path));
+    let task = ThumbnailTask::new(
+        pool.clone(),
+        image.id,
+        image.root_id,
+        image.rel_path.clone(),
+        PathBuf::from(&image.full_path),
+        image.orientation,
+        thumbs_dir.to_path_buf(),
+        is_network,
+    )
+    .with_completion(completion);
+
+    if let Err(error) = scheduler.enqueue(task) {
+        if let Ok(conn) = pool.get() {
+            let _ =
+                images_repo::update_thumbnail_failed(&conn, image_id, "failed", &error.to_string());
+        }
+        return Err(error);
+    }
+
+    image.thumb_status = "pending".to_string();
+    image.thumb_hash = None;
+    image.thumb_error = None;
+    Ok(image)
 }
 
 pub fn thumbnail_cpu_limit() -> usize {
@@ -157,6 +243,7 @@ pub fn requeue_pending_thumbnails(
     pool: &Pool,
     scheduler: &Scheduler,
     thumbs_dir: &Path,
+    app: &AppHandle,
 ) -> AppResult<usize> {
     let conn = pool.get()?;
     let pending = images_repo::pending_thumbnail_images(&conn)?;
@@ -165,16 +252,19 @@ pub fn requeue_pending_thumbnails(
     let mut count = 0usize;
     for img in pending {
         let is_network = crate::utils::path_normalize::is_network_path(Path::new(&img.root_path));
-        scheduler.enqueue(ThumbnailTask::new(
-            pool.clone(),
-            img.id,
-            img.root_id,
-            img.rel_path,
-            PathBuf::from(img.full_path),
-            img.orientation,
-            thumbs_dir.to_path_buf(),
-            is_network,
-        ))?;
+        scheduler.enqueue(
+            ThumbnailTask::new(
+                pool.clone(),
+                img.id,
+                img.root_id,
+                img.rel_path,
+                PathBuf::from(img.full_path),
+                img.orientation,
+                thumbs_dir.to_path_buf(),
+                is_network,
+            )
+            .with_event_app(app.clone()),
+        )?;
         count += 1;
     }
     if count > 0 {

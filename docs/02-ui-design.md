@@ -85,6 +85,7 @@ PhotoView                 ← App 名 / 设置入口
 文件名（可编辑）
 路径 · D:\Photos\2026\06\IMG_001.jpg
 大小 · 4.2 MB · 4032×3024 · JPEG
+[ 重新生成缩略图 ]
 
 [ 基本信息 ]
 拍摄时间   2026-06-15 18:32
@@ -105,6 +106,7 @@ PhotoView                 ← App 名 / 设置入口
 - 空状态：没选图时显示库统计（总数、总大小、按格式占比环形图）
 - 多选时显示批量统计（"已选 23 张 · 共 84MB"）
 - 用户编辑（文件名、标签）走 invoke，写入数据库 + undo_log
+- “重新生成缩略图”从详情面板或图片右键菜单触发，统一进入 P0 后台队列；完成后通过事件刷新当前图片并绕过旧缓存
 - EXIF 字段缺失时整条隐藏，不显示空字段
 
 ## 2. 四个子界面（设计稿底部小图）
@@ -272,7 +274,8 @@ roots_list, roots_add, roots_remove, roots_update
 scan_start, scan_pause, scan_cancel, scan_status
 images_query(params), images_get_detail, images_update_meta
 thumbs_path(image_id, size)
-events: scan:progress, scan:done, scan:error
+images_regenerate_thumbnail(image_id)
+events: scan:progress, scan:done, scan:error, thumbnail:updated
 
 // MVP2
 hash_start, phash_start, dedup_groups, dedup_resolve, dedup_undo, trash_move

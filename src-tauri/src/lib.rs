@@ -131,6 +131,7 @@ pub fn run() {
                 scheduler.clone(),
                 paths.thumbs_dir.clone(),
                 startup_gate.clone(),
+                app.handle().clone(),
             );
 
             app.manage(paths);
@@ -166,6 +167,7 @@ pub fn run() {
             commands::images::images_map_points,
             commands::images::images_rename,
             commands::images::images_reveal_in_dir,
+            commands::images::images_regenerate_thumbnail,
             commands::images::thumbs_path,
             commands::settings::settings_get,
             commands::settings::settings_update,
@@ -240,12 +242,18 @@ fn spawn_deferred_thumbnail_requeue(
     scheduler: queue::Scheduler,
     thumbs_dir: PathBuf,
     gate: Arc<StartupGate>,
+    app: tauri::AppHandle,
 ) {
     tauri::async_runtime::spawn(async move {
         gate.wait(STARTUP_DEFERRED_WORK_FALLBACK).await;
         // 重排本身是同步阻塞（查 pending + 入队），丢到 blocking 线程，别占 async runtime。
         let joined = tokio::task::spawn_blocking(move || {
-            services::thumbnail_service::requeue_pending_thumbnails(&pool, &scheduler, &thumbs_dir)
+            services::thumbnail_service::requeue_pending_thumbnails(
+                &pool,
+                &scheduler,
+                &thumbs_dir,
+                &app,
+            )
         })
         .await;
         match joined {
