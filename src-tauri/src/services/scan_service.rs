@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::File;
-use std::io::BufReader;
+use std::io::{BufReader, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::time::{Instant, SystemTime, UNIX_EPOCH};
 
@@ -632,16 +632,26 @@ fn emit_scan_error(task: &ScanRootTask, error: String, file: Option<String>) {
 
 fn probe_image(path: &Path) -> ImageProbe {
     let mut probe = ImageProbe::default();
-    if let Ok((width, height)) = image::image_dimensions(path) {
-        probe.width = Some(i64::from(width));
-        probe.height = Some(i64::from(height));
-    }
-
+    // 只打开一次文件：尺寸与 EXIF 复用同一句柄（网络盘上省一次往返，见 docs/09 P2-5）。
     let file = match File::open(path) {
         Ok(file) => file,
         Err(_) => return probe,
     };
     let mut reader = BufReader::new(file);
+
+    // 尺寸：从图头解析（不全解码）。等价于旧的 image::image_dimensions
+    // （其内部同样是 with_guessed_format + into_dimensions），只是不再单独开文件。
+    if let Ok(guessed) = image::ImageReader::new(&mut reader).with_guessed_format() {
+        if let Ok((width, height)) = guessed.into_dimensions() {
+            probe.width = Some(i64::from(width));
+            probe.height = Some(i64::from(height));
+        }
+    }
+
+    // EXIF 需从文件头重新读，先 seek 回起点。
+    if reader.seek(SeekFrom::Start(0)).is_err() {
+        return probe;
+    }
     let exif = match Reader::new().read_from_container(&mut reader) {
         Ok(exif) => exif,
         Err(_) => return probe,
@@ -745,5 +755,26 @@ mod tests {
     fn parse_exif_datetime_returns_timestamp() {
         assert!(parse_exif_datetime("2026:06:16 12:34:56").is_some());
         assert!(parse_exif_datetime("not a date").is_none());
+    }
+
+    // P2-5：单次打开后仍能正确解析尺寸（守护把 image_dimensions 换成复用句柄的 ImageReader 的行为）。
+    #[test]
+    fn probe_image_reads_dimensions_single_open() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let jpg = dir.path().join("probe.jpg");
+        image::RgbImage::from_fn(48, 32, |x, _| image::Rgb([(x % 256) as u8, 10, 20]))
+            .save(&jpg)
+            .expect("write jpg");
+        let probe = probe_image(&jpg);
+        assert_eq!(probe.width, Some(48));
+        assert_eq!(probe.height, Some(32));
+
+        let png = dir.path().join("probe.png");
+        image::RgbImage::from_fn(20, 10, |_, y| image::Rgb([5, (y % 256) as u8, 30]))
+            .save(&png)
+            .expect("write png");
+        let probe = probe_image(&png);
+        assert_eq!(probe.width, Some(20));
+        assert_eq!(probe.height, Some(10));
     }
 }

@@ -17,6 +17,20 @@ const IMAGE_SELECT: &str = "\
     FROM images i
     JOIN roots r ON r.id = i.root_id";
 
+/// 画廊列表专用投影：与 `IMAGE_SELECT` 列布局完全一致，但把无界的 `ocr_text` 用 `NULL`
+/// 占位——列表/瀑布流不需要 OCR 全文，避免每行读取（大文本走 overflow page）。列顺序不变，
+/// 复用同一个 `row_to_record`（ocr_text 读到 NULL → None）。详情走 `get_detail`（仍取全文）。见 docs/09 P2-6。
+const IMAGE_SELECT_LIST: &str = "\
+    SELECT i.id, i.root_id, i.rel_path, i.filename, i.extension, i.size_bytes, i.mtime,
+           i.width, i.height, i.orientation, i.taken_at, i.gps_lat, i.gps_lng,
+           i.camera_make, i.camera_model, i.thumb_status, i.thumb_hash, i.thumb_error,
+           i.indexed_at, i.deleted_at, r.path,
+           i.blake3, i.phash, i.dhash, i.hash_status,
+           i.tag_status, i.embedding_status,
+           i.ocr_status, NULL, i.face_status
+    FROM images i
+    JOIN roots r ON r.id = i.root_id";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageRecord {
@@ -166,7 +180,8 @@ pub fn query(conn: &Connection, params: &ImageQueryParams) -> AppResult<ImagePag
     page_values.push(Value::Integer(limit));
     page_values.push(Value::Integer(offset));
 
-    let sql = format!("{IMAGE_SELECT} {where_sql} {order_sql} LIMIT ? OFFSET ?");
+    // 列表用 IMAGE_SELECT_LIST（ocr_text 置 NULL），不读无界全文（P2-6）。
+    let sql = format!("{IMAGE_SELECT_LIST} {where_sql} {order_sql} LIMIT ? OFFSET ?");
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(params_from_iter(page_values.iter()), row_to_record)?;
 
@@ -611,47 +626,76 @@ pub fn mark_face_pending(conn: &Connection, image_ids: Option<&[i64]>) -> AppRes
 
 /// 还没算 BLAKE3 的图（未删除）。
 ///
-/// 不再按 `hash_status='failed'` 排除：`hash_status` 是 blake3/dhash 共用列，按它排除会让
-/// 一种哈希的失败连累另一种，且失败永不重试。改为只看 `blake3 IS NULL` —— 失败（常是网络
-/// 抖动）下次点去重会自动重试；真正坏的文件每次快速失败一次，代价可忽略（去重是手动触发）。
-pub fn pending_blake3_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
-    let sql = format!("{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.blake3 IS NULL");
+/// 哈希 / 缩略图流水线入队用的轻量投影：只取排任务所需字段，避免把 30 列的
+/// `ImageRecord`（含无界 `ocr_text`）在 fresh 库上整表读进内存。见 docs/09 P1-4。
+#[derive(Debug, Clone)]
+pub struct PendingImage {
+    pub id: i64,
+    pub root_id: i64,
+    pub rel_path: String,
+    pub root_path: String,
+    pub full_path: String,
+    pub orientation: Option<i64>,
+    pub thumb_hash: Option<String>,
+}
+
+/// 窄投影列集（6 列），列顺序与 `row_to_pending` 严格对应。
+const PENDING_SELECT: &str = "\
+    SELECT i.id, i.root_id, i.rel_path, r.path, i.orientation, i.thumb_hash
+    FROM images i
+    JOIN roots r ON r.id = i.root_id";
+
+fn row_to_pending(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingImage> {
+    let root_path: String = row.get(3)?;
+    let rel_path: String = row.get(2)?;
+    // 与 row_to_record 一致：full_path = root_path / rel_path。
+    let full_path = PathBuf::from(&root_path)
+        .join(&rel_path)
+        .to_string_lossy()
+        .to_string();
+    Ok(PendingImage {
+        id: row.get(0)?,
+        root_id: row.get(1)?,
+        rel_path,
+        root_path,
+        full_path,
+        orientation: row.get(4)?,
+        thumb_hash: row.get(5)?,
+    })
+}
+
+fn query_pending(conn: &Connection, where_sql: &str) -> AppResult<Vec<PendingImage>> {
+    let sql = format!("{PENDING_SELECT} {where_sql}");
     let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], row_to_record)?;
+    let rows = stmt.query_map([], row_to_pending)?;
     let mut out = Vec::new();
     for row in rows {
         out.push(row?);
     }
     Ok(out)
+}
+
+/// 不再按 `hash_status='failed'` 排除：`hash_status` 是 blake3/dhash 共用列，按它排除会让
+/// 一种哈希的失败连累另一种，且失败永不重试。改为只看 `blake3 IS NULL` —— 失败（常是网络
+/// 抖动）下次点去重会自动重试；真正坏的文件每次快速失败一次，代价可忽略（去重是手动触发）。
+pub fn pending_blake3_images(conn: &Connection) -> AppResult<Vec<PendingImage>> {
+    query_pending(conn, "WHERE i.deleted_at IS NULL AND i.blake3 IS NULL")
 }
 
 /// 缩略图仍处于 pending 的图。扫描中断（应用退出）会留下一批 thumb_status='pending'
 /// 的记录，而重复扫描会跳过未改动文件、不再为它们排缩略图，所以需要在启动时主动重排，
 /// 否则这些图会永远停在"生成中"。
-pub fn pending_thumbnail_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
-    let sql = format!("{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.thumb_status = 'pending'");
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], row_to_record)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
+pub fn pending_thumbnail_images(conn: &Connection) -> AppResult<Vec<PendingImage>> {
+    query_pending(conn, "WHERE i.deleted_at IS NULL AND i.thumb_status = 'pending'")
 }
 
 /// 缩略图已就绪但还没算 dHash 的图（视觉哈希依赖 thumb）。
-pub fn pending_dhash_images(conn: &Connection) -> AppResult<Vec<ImageRecord>> {
+pub fn pending_dhash_images(conn: &Connection) -> AppResult<Vec<PendingImage>> {
     // 同 pending_blake3_images：不按共用的 hash_status 排除，失败可重试、不连累 blake3。
-    let sql = format!(
-        "{IMAGE_SELECT} WHERE i.deleted_at IS NULL AND i.dhash IS NULL AND i.thumb_status = 'ready'"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map([], row_to_record)?;
-    let mut out = Vec::new();
-    for row in rows {
-        out.push(row?);
-    }
-    Ok(out)
+    query_pending(
+        conn,
+        "WHERE i.deleted_at IS NULL AND i.dhash IS NULL AND i.thumb_status = 'ready'",
+    )
 }
 
 /// 缩略图已就绪但还没生成 CLIP embedding 的图。

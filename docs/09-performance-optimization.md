@@ -34,24 +34,24 @@
 | P1-1 | DB | hash 流水线 pending 查询索引错配（phash/dhash 错位） | P1 | ✅ |
 | P1-2 | DB | 日期/时间线/地图共用的 `COALESCE(taken_at,mtime)` 绕过索引 | P1 | ✅ |
 | P1-3 | 后端 | 缩略图全分辨率解码（无降采样 / 不读 EXIF 预览） | P1 | ✅ |
-| P1-4 | 后端 | `pending_*` 查询拉全 30 列 `ImageRecord` | P1 | ⬜ |
+| P1-4 | 后端 | `pending_*` 查询拉全 30 列 `ImageRecord` | P1 | ✅ |
 | P1-5 | 前端 | refresh 模式全量重拉已加载图片（扫描期每 1.5s） | P1 | ⬜ |
 | P1-6 | 前端 | `replaceImageRecord` 每事件触碰 6 个 state 数组 | P1 | ⬜ |
 | P1-7 | 前端 | 二级视图（人脸/OCR/相册/AI 搜索）未虚拟化 | P1 | ⬜ |
-| P2-1 | 后端 | 去重分组 insert 无事务（第二处写放大） | P2 | ⬜ |
+| P2-1 | 后端 | 去重分组 insert 无事务（第二处写放大） | P2 | ✅ |
 | P2-2 | 后端 | `batch_resolve` N+1（逐 item `get_detail`） | P2 | ⬜ |
 | P2-3 | 后端 | 热路径缺 `prepare_cached`，每次重编译 SQL | P2 | ✅ |
 | P2-4 | 后端 | `get_detail` 仅为发 `thumbnail:updated` 事件跑 30 列 JOIN | P2 | ⬜ |
-| P2-5 | 后端 | `probe_image` 双开文件（尺寸 + EXIF 各一次） | P2 | ⬜ |
-| P2-6 | DB | `IMAGE_SELECT` 每行都带无界 `ocr_text` | P2 | ⬜ |
+| P2-5 | 后端 | `probe_image` 双开文件（尺寸 + EXIF 各一次） | P2 | ✅ |
+| P2-6 | DB | `IMAGE_SELECT` 每行都带无界 `ocr_text` | P2 | ✅ |
 | P2-7 | 前端 | MapView 一次建 3000 个 Leaflet marker，无聚类 | P2 | ⬜ |
 | P3-1 | 前端 | 缩略图缺 `decoding="async"` | P3 | ✅ |
 | P3-2 | 前端 | `selectedRecords` 用 `includes` 是 O(n·m) | P3 | ✅ |
 | P3-3 | 前端 | Lightbox `slides` 未 memo | P3 | ✅ |
-| P3-4 | 前端 | `globals.css` 中 `.image-card`/`.image-grid` 等重复定义 | P3 | ⬜ |
+| P3-4 | 前端 | `globals.css` 中 `.image-card`/`.image-grid` 等重复定义 | P3 | ⏭️ 暂缓 |
 | P3-5 | 后端 | 缩略图协议每请求 `std::thread::spawn`，无线程池 | P3 | ⬜ |
 | P3-6 | 后端 | LanceDB 从不建 ANN 索引，`top_k` 暴力扫描 | P3 | ⬜ |
-| P3-7 | 后端 | BLAKE3 双 4MB 缓冲冗余 | P3 | ⬜ |
+| P3-7 | 后端 | BLAKE3 双 4MB 缓冲冗余 | P3 | ✅ |
 
 > 已确认合规、无需改动：主画廊 `VirtuosoGrid` 虚拟化 + 分页；缩略图走 `thumb.localhost` 协议（带 `Cache-Control`，非 base64）；SQLite WAL + 连接池；扫描/哈希/缩略图均 `spawn_blocking` 且遵守并发红线（网络 4 / 本地 8）；视觉去重用 BK-tree；路径按 `roots.id + rel_path` 存、缩略图不入主表、外键索引齐全。
 
@@ -190,9 +190,12 @@
 - **问题**：`pending_blake3/thumbnail/dhash_images` 都跑 30 列 `IMAGE_SELECT` + JOIN，仅为入队却 materialize 整表进内存。调用方只需 `id/full_path/root_path/orientation/thumb_hash`。
 - **位置**：[images_repo.rs:614](../src-tauri/src/repo/images_repo.rs#L614)、[:628](../src-tauri/src/repo/images_repo.rs#L628)、[:640](../src-tauri/src/repo/images_repo.rs#L640)；调用方 [dedup_service.rs:260-300](../src-tauri/src/services/dedup_service.rs#L260-L300)
 - **方案**：新增窄投影查询 + 轻量 struct，只取任务所需字段。
-- **验证**：`cargo test`；fresh 库跑哈希流水线，确认入队正常、内存下降。
-- **状态**：⬜ 待办
-- **实测 / 备注**：_（完成后填写）_
+- **状态**：✅ 已完成（2026-07-02）
+- **实测 / 备注**：
+  - 改动文件：[images_repo.rs](../src-tauri/src/repo/images_repo.rs)。新增轻量 `PendingImage`（`id/root_id/rel_path/root_path/full_path/orientation/thumb_hash`）+ `PENDING_SELECT`（**6 列**，vs `IMAGE_SELECT` 30 列，丢弃无界 `ocr_text` 及所有 hash/status/gps/exif 列）+ `row_to_pending`（full_path 算法与 `row_to_record` 一致）+ `query_pending` 辅助。`pending_blake3_images` / `pending_thumbnail_images` / `pending_dhash_images` 全部改用它。
+  - 三个调用方（dedup blake3/dhash 入队、缩略图启动重排）字段需求都被 `PendingImage` 覆盖，**无需改调用方**。
+  - **效果**：fresh 库上入队哈希/缩略图任务时不再把整表 30 列 materialize 进内存，每行仅 6 列。
+  - 验证：`cargo clippy --all-targets -- -D warnings` ✓；`dedup_tests`(8)/`images_tests`(2)/`thumbnail_tests`(2) 全通过（现有测试覆盖 `pending_blake3_images` 结果正确性：失败重试、软删跳过、新图入选）。
 
 ### P1-5 · refresh 只刷视口窗口而非全量重拉
 - **层**：前端
@@ -231,8 +234,11 @@
 - **位置**：[dedup_service.rs:627-635](../src-tauri/src/services/dedup_service.rs#L627-L635)（exact）、[:696-721](../src-tauri/src/services/dedup_service.rs#L696-L721)（visual）；[duplicates_repo.rs:50-64](../src-tauri/src/repo/duplicates_repo.rs#L50-L64)（insert_items）
 - **方案**：整个分组 pass 外层包 `conn.transaction()`，或让 insert 接收 `&Transaction`。范式见已正确用事务的 [tags_repo.rs:64-92](../src-tauri/src/repo/tags_repo.rs#L64-L92)、[face_repo.rs:52-77](../src-tauri/src/repo/face_repo.rs#L52-L77)。
 - **验证**：`cargo test --test dedup_tests`；fixtures 去重耗时对比。
-- **状态**：⬜ 待办
-- **实测 / 备注**：_（完成后填写）_
+- **状态**：✅ 已完成（2026-07-02）
+- **实测 / 备注**：
+  - 改动文件：[dedup_service.rs](../src-tauri/src/services/dedup_service.rs)。`run_exact_grouping_with` 与 `run_visual_grouping_with` 的 group/item 写入循环用 `conn.unchecked_transaction()` 包成一个事务批量提交（`&Connection` 无法调 `transaction()`，用 unchecked；已确认调用链无外层事务）。`drop_open_groups`/`all_dhashes` 等读/删保持在事务外，语义不变。
+  - **事件时序确认（原顾虑已排除）**：`on_new_group` 仍逐组发，但前端 `useDedup` 的 `dedup:new_group` 走**尾防抖** `scheduleReload`——分组爆发期计时器不断重置，实际 reload 在爆发结束（提交）后才触发；且 `dedup:done` 兜底 reload。reload 用独立连接读**已提交**数据，不会读到未提交的组，流式渐显体验不变。
+  - 验证：`cargo test --test dedup_tests` 8 通过（含 exact/visual 分组、rerun 替换）、`clippy` ✓。
 
 ### P2-2 · `batch_resolve` 改批量取详情
 - **层**：后端
@@ -269,18 +275,22 @@
 - **问题**：`image_dimensions` 与 EXIF 读取各 `open` 一次文件，网络盘每文件两次往返。
 - **位置**：[scan_service.rs:561-570](../src-tauri/src/services/scan_service.rs#L561-L570)
 - **方案**：单 decoder / 单次读取同时拿尺寸与 EXIF。
-- **验证**：`cargo test`；网络盘（或模拟）扫描耗时对比。
-- **状态**：⬜ 待办
-- **实测 / 备注**：_（完成后填写）_
+- **状态**：✅ 已完成（2026-07-02）
+- **实测 / 备注**：
+  - 改动文件：[scan_service.rs](../src-tauri/src/services/scan_service.rs)。`probe_image` 只 `File::open` 一次：先 `image::ImageReader::new(&mut reader).with_guessed_format().into_dimensions()` 解尺寸（等价于旧的 `image::image_dimensions`，其内部同样如此），再 `seek(0)` 复用同一句柄读 EXIF。原先是 `image_dimensions` + `File::open` 两次打开。
+  - **效果**：每张待探测图少一次文件打开——网络盘上少一次往返。
+  - 新增单测：`probe_image_reads_dimensions_single_open`（JPEG + PNG 各断言尺寸），守护"换成复用句柄的 ImageReader"后尺寸解析仍正确。`cargo test --lib` ✓、`clippy` ✓。
 
 ### P2-6 · 列表查询去掉 `ocr_text`
 - **层**：DB
 - **问题**：`IMAGE_SELECT` 30 列每行都带无界 `ocr_text`（主表唯一无界大字段），画廊/pending/timeline/map 全复用，加重行扫描与序列化。
 - **位置**：[images_repo.rs:9-18](../src-tauri/src/repo/images_repo.rs#L9-L18)（`:16` 取 ocr_text）
 - **方案**：列表用精简列集（不含 ocr_text），仅 `get_detail` 取；或把 `ocr_text` 拆副表 `image_ocr`，主表只留 `ocr_status`（FTS 已单独持有一份）。
-- **验证**：`cargo test`；确认详情页/搜索回显仍正常。
-- **状态**：⬜ 待办
-- **实测 / 备注**：_（完成后填写）_
+- **状态**：✅ 已完成（2026-07-02）
+- **实测 / 备注**：
+  - 改动文件：[images_repo.rs](../src-tauri/src/repo/images_repo.rs)。新增 `IMAGE_SELECT_LIST`——列布局与 `IMAGE_SELECT` 完全一致，但第 28 列由 `i.ocr_text` 换成 `NULL`。`query()`（画廊/瀑布流分页）改用它，**复用同一个 `row_to_record`**（ocr_text 读到 NULL → None），零结构改动、零风险。详情页 `get_detail` 仍用 `IMAGE_SELECT` 取全文。
+  - **效果**：列表每页 200 行不再读取无界 `ocr_text`（大文本走 overflow page，OCR 过的库收益明显；未 OCR 的库该列为 NULL，无副作用）。未拆副表（避免 schema 迁移），用 NULL 占位是等效的最小改动。
+  - 验证：`cargo test --test images_tests`（query roundtrip + timeline）2 通过、`clippy` ✓。`row_to_record` 的 `ocr_text: row.get(28)` 与 NULL 位置对齐。
 
 ### P2-7 · MapView marker 聚类
 - **层**：前端
@@ -317,7 +327,7 @@
 - **位置**：`.image-grid`（[globals.css:485](../src/styles/globals.css#L485)、[:1478](../src/styles/globals.css#L1478)）、`.virtual-image-grid`（[:492](../src/styles/globals.css#L492)、[:1474](../src/styles/globals.css#L1474)）、`.image-card`（[:526](../src/styles/globals.css#L526)、[:1496](../src/styles/globals.css#L1496)）
 - **方案**：合并重复规则，消除覆盖歧义。
 - **验证**：`pnpm tauri dev` 目视确认样式无回归。
-- **状态**：⬜ 待办 · **实测 / 备注**：_
+- **状态**：⏭️ 暂缓 · **实测 / 备注**：经比对，两处 `.image-card`/`.image-grid`/`.virtual-image-grid` **并非重复死规则，而是有意的层叠覆盖**（后块 `padding:0/background:transparent/rows auto 19px 16px` 覆盖前块 `padding:7px/background:var(--panel)`，像一层重设计）。合并需逐条比对中间所有交叠选择器并做视觉 QA，风险 > 收益；且重复 CSS 规则的运行时开销近乎为零（非真性能项）。留待有 `pnpm tauri dev` 环境时作为纯样式清理处理。
 
 ### P3-5 · 缩略图协议线程池
 - **位置**：[lib.rs:326](../src-tauri/src/lib.rs#L326)
@@ -333,10 +343,10 @@
 - **状态**：⬜ 待办 · **实测 / 备注**：_
 
 ### P3-7 · BLAKE3 去掉冗余 BufReader
-- **位置**：[hash_service.rs:94-96](../src-tauri/src/services/hash_service.rs#L94-L96)
+- **位置**：[hash_service.rs](../src-tauri/src/services/hash_service.rs) `hash_file`
 - **方案**：已按 4MB 分块读，`BufReader` 冗余，直接读入 buf 省一次拷贝与 4MB/任务。
 - **验证**：`cargo test`。
-- **状态**：⬜ 待办 · **实测 / 备注**：_
+- **状态**：✅ 已完成（2026-07-02） · **实测 / 备注**：`hash_file` 去掉 `BufReader::with_capacity(4MB)`，直接 `File::read` 进 4MB `buf`（省一层同尺寸缓冲 + 每块一次拷贝）；移除未用的 `BufReader` 导入。既有 `hash_file_matches_known_value` 单测确认哈希值不变。`cargo test --lib` ✓、`clippy` ✓。
 
 ---
 
@@ -358,3 +368,8 @@
 | 2026-07-02 | P3-2 | `selectedRecords` 用 Set（O(n·m)→O(n)） | 待提交 |
 | 2026-07-02 | P3-3 | Lightbox `slides` 用 `useMemo` | 待提交 |
 | 2026-07-02 | P1-3 | 缩略图 JPEG DCT 降采样解码（新增 `jpeg-decoder` 依赖）；加测试 | 待提交 |
+| 2026-07-02 | P1-4 | pending_* 改窄投影 `PendingImage`（6 列 vs 30 列，去 ocr_text） | 待提交 |
+| 2026-07-02 | P2-5 | `probe_image` 单次打开文件（尺寸 + EXIF 复用句柄）；加单测 | 待提交 |
+| 2026-07-02 | P3-7 | BLAKE3 去掉冗余 BufReader，直接读入 4MB buf | 待提交 |
+| 2026-07-02 | P2-1 | 去重 exact/visual 分组 insert 包进单事务批量提交 | 待提交 |
+| 2026-07-02 | P2-6 | 画廊列表查询用 `IMAGE_SELECT_LIST`（ocr_text 置 NULL），不读无界全文 | 待提交 |

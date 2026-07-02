@@ -7,7 +7,7 @@
 //! - 文件已删除（deleted_at）的图跳过——上游入队时已过滤；任务运行前再防御一次
 
 use std::fs::File;
-use std::io::{BufReader, Read};
+use std::io::Read;
 use std::path::PathBuf;
 
 use async_trait::async_trait;
@@ -90,15 +90,16 @@ fn hash_file(
     path: &std::path::Path,
     cancellation: &tokio_util::sync::CancellationToken,
 ) -> std::io::Result<Option<String>> {
-    let file = File::open(path)?;
-    let mut reader = BufReader::with_capacity(READ_BUFFER, file);
+    // 直接按 READ_BUFFER 块从文件读入 buf 再喂 hasher；不再套 BufReader——
+    // 我们本就以 4MB 大块读取，额外的 BufReader 只是多一层同尺寸缓冲与一次拷贝（P3-7）。
+    let mut file = File::open(path)?;
     let mut hasher = Hasher::new();
     let mut buf = vec![0u8; READ_BUFFER];
     loop {
         if cancellation.is_cancelled() {
             return Ok(None);
         }
-        let n = reader.read(&mut buf)?;
+        let n = file.read(&mut buf)?;
         if n == 0 {
             break;
         }

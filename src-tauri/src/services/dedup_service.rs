@@ -624,15 +624,19 @@ pub fn run_exact_grouping_with(
     let groups = images_repo::find_blake3_duplicates(conn)?;
     let now = now_unix();
     let mut count = 0;
+    // 所有 group/item 的写入放进一个事务批量提交，避免逐条 autocommit 的写放大（P2-1）。
+    // new_group 事件仍逐组发，但前端是尾防抖 + dedup:done 兜底 reload，读到的都是提交后的数据。
+    let tx = conn.unchecked_transaction()?;
     for (_hash, ids) in &groups {
         let group_id =
-            duplicates_repo::insert_group(conn, duplicates_repo::METHOD_EXACT, None, now)?;
+            duplicates_repo::insert_group(&tx, duplicates_repo::METHOD_EXACT, None, now)?;
         let items: Vec<(i64, Option<f64>)> = ids.iter().map(|id| (*id, Some(1.0))).collect();
-        duplicates_repo::insert_items(conn, group_id, &items)?;
+        duplicates_repo::insert_items(&tx, group_id, &items)?;
         coord.groups_found.fetch_add(1, Ordering::Relaxed);
         on_new_group(group_id, "exact");
         count += 1;
     }
+    tx.commit()?;
     Ok(count)
 }
 
@@ -693,6 +697,8 @@ pub fn run_visual_grouping_with(
 
     let now = now_unix();
     let mut written = 0;
+    // 同 run_exact_grouping_with：group/item 写入放进一个事务批量提交（P2-1）。
+    let tx = conn.unchecked_transaction()?;
     for (_root, mut ids) in groups {
         if ids.len() < 2 {
             continue;
@@ -709,16 +715,17 @@ pub fn run_visual_grouping_with(
             })
             .collect();
         let group_id = duplicates_repo::insert_group(
-            conn,
+            &tx,
             duplicates_repo::METHOD_PHASH,
             Some(threshold as f64),
             now,
         )?;
-        duplicates_repo::insert_items(conn, group_id, &items)?;
+        duplicates_repo::insert_items(&tx, group_id, &items)?;
         coord.groups_found.fetch_add(1, Ordering::Relaxed);
         on_new_group(group_id, "phash");
         written += 1;
     }
+    tx.commit()?;
     Ok(written)
 }
 
