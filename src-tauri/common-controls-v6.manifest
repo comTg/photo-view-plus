@@ -1,0 +1,24 @@
+<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<!--
+  声明对 Common-Controls v6 的依赖。tauri 的 GUI 运行时会从 comctl32 导入 v6 专有的
+  导出符号（如 TaskDialogIndirect）。没有这份清单时，加载器会绑定到 system32 里的
+  comctl32 v5，缺少这些入口点，进程一启动就报 STATUS_ENTRYPOINT_NOT_FOUND (0xC0000139)。
+
+  主程序 exe 的清单由 tauri-build 注入；但 `cargo test` 生成的集成测试二进制不经过
+  tauri-build，所以需要在 build.rs 里通过 /MANIFESTINPUT 把这份清单一并嵌进测试二进制。
+  见 build.rs 中的 target_env = "msvc" 分支。
+-->
+<assembly xmlns="urn:schemas-microsoft-com:asm.v1" manifestVersion="1.0">
+  <dependency>
+    <dependentAssembly>
+      <assemblyIdentity
+        type="win32"
+        name="Microsoft.Windows.Common-Controls"
+        version="6.0.0.0"
+        processorArchitecture="*"
+        publicKeyToken="6595b64144ccf1df"
+        language="*"
+      />
+    </dependentAssembly>
+  </dependency>
+</assembly>

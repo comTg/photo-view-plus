@@ -43,6 +43,9 @@ r2d2_sqlite = "0.34"
 # MVP1: scan / EXIF / thumbnails
 walkdir = "2"
 image = "0.25"
+# 缩略图 JPEG DCT 降采样解码（image 0.25 的 zune-jpeg 后端不暴露 scale）：
+# 大图只解到略大于缩略图的分辨率，省 CPU 与峰值内存。见 docs/09 P1-3。
+jpeg-decoder = "0.3"
 kamadak-exif = "0.6"
 sha1 = "0.10"
 chrono = { version = "0.4", default-features = false, features = ["clock", "std"] }

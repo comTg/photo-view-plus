@@ -131,3 +131,102 @@ fn write_png(path: &PathBuf, alternate: bool) {
     });
     image.save(path).expect("write png");
 }
+
+// P1-3：大 JPEG 走 jpeg-decoder DCT 降采样解码，但仍应记录原生尺寸并产出正确缩略图。
+// 1024×1024 会触发 1/2 降采样（解码到 ~512），借此验证降采样路径 + 原生尺寸回填。
+#[tokio::test]
+async fn thumbnail_downscales_large_jpeg_and_keeps_native_dims() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = photo_view_plus_lib::db::open(&dir.path().join("app.sqlite")).expect("db");
+    let root_dir = dir.path().join("photos");
+    let thumbs_dir = dir.path().join("thumbs");
+    std::fs::create_dir_all(&root_dir).expect("root dir");
+    let image_path = root_dir.join("large.jpg");
+    write_jpeg(&image_path, 1024, 1024);
+
+    let conn = pool.get().expect("conn");
+    let root = roots_repo::insert(
+        &conn,
+        &NewRoot {
+            path: root_dir.to_string_lossy().to_string(),
+            label: None,
+            root_type: "local".to_string(),
+        },
+        1,
+    )
+    .expect("root");
+    // width/height 留空，让 update_thumbnail_ready 用缩略图路径回填——借此验证回填的是原生尺寸。
+    let image = NewImageMetadata {
+        root_id: root.id,
+        rel_path: "large.jpg".to_string(),
+        filename: "large.jpg".to_string(),
+        extension: "jpg".to_string(),
+        size_bytes: 16,
+        mtime: 1,
+        width: None,
+        height: None,
+        orientation: None,
+        taken_at: None,
+        gps_lat: None,
+        gps_lng: None,
+        camera_make: None,
+        camera_model: None,
+    };
+    let image_id = images_repo::upsert_scanned_image(&conn, &image, 2)
+        .expect("insert image")
+        .image_id();
+    drop(conn);
+
+    let scheduler = Scheduler::start(1);
+    scheduler
+        .enqueue(ThumbnailTask::new(
+            pool.clone(),
+            image_id,
+            root.id,
+            "large.jpg".to_string(),
+            image_path.clone(),
+            None,
+            thumbs_dir.clone(),
+            false,
+        ))
+        .expect("enqueue thumbnail");
+
+    let detail = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let conn = pool.get().expect("conn");
+            let detail = images_repo::get_detail(&conn, image_id)
+                .expect("detail")
+                .expect("image");
+            match detail.thumb_status.as_str() {
+                "ready" => break detail,
+                "failed" | "unsupported" => panic!("thumbnail failed: {:?}", detail.thumb_error),
+                _ => tokio::time::sleep(Duration::from_millis(50)).await,
+            }
+        }
+    })
+    .await
+    .expect("thumbnail timed out");
+
+    // 关键：即使 JPEG 被 DCT 降采样解码，回填的仍是原生尺寸 1024×1024。
+    assert_eq!(detail.width, Some(1024));
+    assert_eq!(detail.height, Some(1024));
+
+    // 缩略图文件存在且已缩到 <= 256。
+    let hash = detail.thumb_hash.expect("thumb hash");
+    let thumb_path = thumbs_dir.join(&hash[0..2]).join(format!("{hash}.webp"));
+    assert!(thumb_path.exists(), "thumbnail file should exist");
+    let thumb = image::open(&thumb_path).expect("decode thumb");
+    assert!(
+        thumb.width() <= 256 && thumb.height() <= 256,
+        "thumb should be downscaled to <= 256, got {}x{}",
+        thumb.width(),
+        thumb.height()
+    );
+}
+
+fn write_jpeg(path: &PathBuf, width: u32, height: u32) {
+    let image = image::RgbImage::from_fn(width, height, |x, y| {
+        image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
+    });
+    image.save(path).expect("write jpeg");
+}

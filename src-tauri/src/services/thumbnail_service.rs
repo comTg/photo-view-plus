@@ -1,5 +1,5 @@
 use std::fs::{self, File};
-use std::io::BufWriter;
+use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, OnceLock};
 
@@ -303,7 +303,11 @@ fn generate(task: ThumbnailTask, ctx: TaskContext) -> AppResult<()> {
         fs::create_dir_all(parent)?;
     }
 
-    let image = match image::open(&task.full_path) {
+    // 原生尺寸只需读图头（便宜），与解码分辨率解耦：JPEG 会被 DCT 降采样解码，
+    // 不能拿降采样后的像素尺寸当原始 width/height 回填。
+    let native_dims = image::image_dimensions(&task.full_path).ok();
+
+    let image = match decode_for_thumbnail(&task.full_path) {
         Ok(image) => image,
         Err(error) => {
             let status = if matches!(error, image::ImageError::Unsupported(_)) {
@@ -322,8 +326,9 @@ fn generate(task: ThumbnailTask, ctx: TaskContext) -> AppResult<()> {
     }
 
     let oriented = apply_orientation(image, task.orientation);
-    let width = i64::from(oriented.width());
-    let height = i64::from(oriented.height());
+    // width/height 用原生尺寸（按 orientation 交换），拿不到时退回解码后的尺寸。
+    let (width, height) = oriented_native_dims(native_dims, task.orientation)
+        .unwrap_or((i64::from(oriented.width()), i64::from(oriented.height())));
     let thumb = oriented.thumbnail(THUMB_SIZE, THUMB_SIZE).to_rgba8();
     let mut writer = BufWriter::new(File::create(&path)?);
     let encoder = WebPEncoder::new_lossless(&mut writer);
@@ -348,6 +353,56 @@ fn apply_orientation(image: DynamicImage, orientation: Option<i64>) -> DynamicIm
         4 => image.flipv(),
         _ => image,
     }
+}
+
+/// 缩略图解码入口：JPEG 走 DCT 降采样（只解到略大于缩略图目标的分辨率，省 CPU/内存），
+/// 非 JPEG 格式或降采样失败时回退到通用全量解码，保证正确性。
+fn decode_for_thumbnail(path: &Path) -> Result<DynamicImage, image::ImageError> {
+    let is_jpeg = path
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("jpg") || ext.eq_ignore_ascii_case("jpeg"))
+        .unwrap_or(false);
+    if is_jpeg {
+        if let Some(image) = decode_jpeg_downscaled(path) {
+            return Ok(image);
+        }
+        // 降采样解码失败（打开失败 / CMYK 等少见格式）→ 落回通用解码。
+    }
+    image::open(path)
+}
+
+/// 用 jpeg-decoder 的 DCT 缩放，把大 JPEG 只解到略大于缩略图目标的分辨率。
+/// 任何异常（打开失败、非 RGB/灰度格式、尺寸非法）返回 `None`，由上层回退到通用解码。
+fn decode_jpeg_downscaled(path: &Path) -> Option<DynamicImage> {
+    let file = File::open(path).ok()?;
+    let mut decoder = jpeg_decoder::Decoder::new(BufReader::new(file));
+    // 目标略大于缩略图尺寸，给旋转与后续缩放滤波留余量；解码器按 1/1,1/2,1/4,1/8 取最合适档。
+    let target = THUMB_SIZE.saturating_mul(2).min(u32::from(u16::MAX)) as u16;
+    decoder.scale(target, target).ok()?;
+    let pixels = decoder.decode().ok()?;
+    let info = decoder.info()?;
+    let (width, height) = (u32::from(info.width), u32::from(info.height));
+    match info.pixel_format {
+        jpeg_decoder::PixelFormat::RGB24 => {
+            image::RgbImage::from_raw(width, height, pixels).map(DynamicImage::ImageRgb8)
+        }
+        jpeg_decoder::PixelFormat::L8 => {
+            image::GrayImage::from_raw(width, height, pixels).map(DynamicImage::ImageLuma8)
+        }
+        // L16 / CMYK32 少见，交给通用解码处理，避免自行做色彩转换出错。
+        _ => None,
+    }
+}
+
+/// 原生尺寸按 EXIF orientation 交换宽高（6/8 为旋转 90°/270°），供回填 width/height 用。
+fn oriented_native_dims(dims: Option<(u32, u32)>, orientation: Option<i64>) -> Option<(i64, i64)> {
+    let (width, height) = dims?;
+    let (width, height) = (i64::from(width), i64::from(height));
+    Some(match orientation.unwrap_or(1) {
+        6 | 8 => (height, width),
+        _ => (width, height),
+    })
 }
 
 #[cfg(test)]

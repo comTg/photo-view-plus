@@ -33,7 +33,7 @@
 | P0-6 | DB | 主画廊默认排序无索引 + `LIKE '%%'` + COUNT 二次全扫 | P0 | 🔄 部分 |
 | P1-1 | DB | hash 流水线 pending 查询索引错配（phash/dhash 错位） | P1 | ✅ |
 | P1-2 | DB | 日期/时间线/地图共用的 `COALESCE(taken_at,mtime)` 绕过索引 | P1 | ✅ |
-| P1-3 | 后端 | 缩略图全分辨率解码（无降采样 / 不读 EXIF 预览） | P1 | ⬜ |
+| P1-3 | 后端 | 缩略图全分辨率解码（无降采样 / 不读 EXIF 预览） | P1 | ✅ |
 | P1-4 | 后端 | `pending_*` 查询拉全 30 列 `ImageRecord` | P1 | ⬜ |
 | P1-5 | 前端 | refresh 模式全量重拉已加载图片（扫描期每 1.5s） | P1 | ⬜ |
 | P1-6 | 前端 | `replaceImageRecord` 每事件触碰 6 个 state 数组 | P1 | ⬜ |
@@ -177,8 +177,13 @@
 - **位置**：[thumbnail_service.rs:306](../src-tauri/src/services/thumbnail_service.rs#L306)、[:327](../src-tauri/src/services/thumbnail_service.rs#L327)
 - **方案**：JPEG 用 DCT scaled decode（`jpeg-decoder` 的 `scale`）或 `image` reader 带 limits；大图优先读 EXIF 内嵌预览。
 - **验证**：`cargo test`；fixtures 含大 JPEG，对比缩略图生成耗时与内存峰值，确认缩略图质量无退化。
-- **状态**：⬜ 待办
-- **实测 / 备注**：_（完成后填写）_
+- **状态**：✅ 已完成（2026-07-02）
+- **实测 / 备注**：
+  - image 0.25 的 `JpegDecoder`（zune-jpeg 后端）**不暴露 `scale`**，zune-jpeg 0.4 也无公开降采样 API。故新增直接依赖 **`jpeg-decoder = "0.3"`**（Cargo.toml，⚠️ 新依赖，验收留意）用其 DCT `scale`。
+  - 改动文件：[thumbnail_service.rs](../src-tauri/src/services/thumbnail_service.rs)。新增 `decode_for_thumbnail`（JPEG 走降采样、其余格式与失败回退 `image::open`）、`decode_jpeg_downscaled`（`Decoder::scale(THUMB_SIZE*2)` → RGB24/L8 构 `DynamicImage`；CMYK/L16 返 None 回退）、`oriented_native_dims`。
+  - **正确性关键**：降采样后不能用解码尺寸当原生 `width/height`，改用 `image::image_dimensions`（只读图头）取原生尺寸并按 orientation(6/8) 交换宽高回填。
+  - 新增测试：[thumbnail_tests.rs](../src-tauri/tests/thumbnail_tests.rs) `thumbnail_downscales_large_jpeg_and_keeps_native_dims`（1024×1024 JPEG 触发 1/2 DCT 降采样），断言缩略图 ≤256 且回填的仍是原生 1024×1024；原 PNG 测试覆盖非 JPEG 回退路径。
+  - 验证：`cargo test --test thumbnail_tests` 2 通过 ✓、`cargo clippy --all-targets -- -D warnings` ✓。大 JPEG 的耗时/内存峰值实测对比留待实机 fixtures。
 
 ### P1-4 · `pending_*` 用窄投影
 - **层**：后端
@@ -352,3 +357,4 @@
 | 2026-07-02 | P3-1 | 3 处缩略图 `<img>` 加 `decoding="async"` | 待提交 |
 | 2026-07-02 | P3-2 | `selectedRecords` 用 Set（O(n·m)→O(n)） | 待提交 |
 | 2026-07-02 | P3-3 | Lightbox `slides` 用 `useMemo` | 待提交 |
+| 2026-07-02 | P1-3 | 缩略图 JPEG DCT 降采样解码（新增 `jpeg-decoder` 依赖）；加测试 | 待提交 |
