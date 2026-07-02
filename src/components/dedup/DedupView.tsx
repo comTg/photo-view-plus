@@ -637,7 +637,7 @@ function ThumbHoverPreview({ image }: { image: DedupImage }) {
       }}
     >
       {image.thumbStatus === "ready" ? (
-        <img src={thumbUrl(image.id, 256)} alt={image.filename} />
+        <img src={thumbUrl(image.id, 256)} alt={image.filename} loading="lazy" decoding="async" />
       ) : (
         <span>{image.thumbStatus}</span>
       )}

@@ -151,6 +151,16 @@ impl Task for FaceBatchTask {
         }
         if !vectors.is_empty() {
             self.vectors.upsert_face_embeddings(&vectors).await?;
+        }
+        // 把"每批一次 O(n²) 全量重建"合并为"本轮人脸检测全部完成后重建一次"：
+        // 仅当已无 pending 人脸图时才重建聚类。并发批次下由最后一个排空者触发；
+        // 偶发两个批次同时判定为 0 会重复重建，但 rebuild_clusters 幂等，无正确性问题。
+        // （本批即使没产出新向量，只要它是排空者也要重建，以纳入之前各批写入的向量。）
+        let remaining_pending = {
+            let conn = self.pool.get()?;
+            count_image_status(&conn, "pending")?
+        };
+        if remaining_pending == 0 {
             rebuild_clusters(&self.pool, &self.vectors).await?;
         }
         Ok(())

@@ -36,6 +36,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "smart_albums",
         sql: include_str!("../../migrations/0005_smart_albums.sql"),
     },
+    Migration {
+        version: 6,
+        name: "perf_indexes",
+        sql: include_str!("../../migrations/0006_perf_indexes.sql"),
+    },
 ];
 
 struct Migration {

@@ -1,5 +1,6 @@
 import { originalUrl } from "@/lib/tauri";
 import type { ImageRecord } from "@/lib/tauri-types";
+import { useMemo } from "react";
 import Lightbox, { type Slide } from "yet-another-react-lightbox";
 import "yet-another-react-lightbox/styles.css";
 import Counter from "yet-another-react-lightbox/plugins/counter";
@@ -22,13 +23,18 @@ export function ImagePreviewLightbox({
   onClose,
   onIndexChange,
 }: ImagePreviewLightboxProps) {
-  const slides: Slide[] = images.map((image) => ({
-    src: originalUrl(image.id),
-    alt: image.filename,
-    width: image.width ?? undefined,
-    height: image.height ?? undefined,
-    imageFit: "contain",
-  }));
+  // useMemo：previewImages 常为整份已加载列表，避免每次渲染（含翻页 onIndexChange）重建大数组（P3-3）。
+  const slides: Slide[] = useMemo(
+    () =>
+      images.map((image) => ({
+        src: originalUrl(image.id),
+        alt: image.filename,
+        width: image.width ?? undefined,
+        height: image.height ?? undefined,
+        imageFit: "contain",
+      })),
+    [images],
+  );
 
   return (
     <Lightbox

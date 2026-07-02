@@ -156,8 +156,8 @@ pub fn query(conn: &Connection, params: &ImageQueryParams) -> AppResult<ImagePag
     let (where_sql, values) = build_where(params);
     let order_sql = order_by(params.sort.as_ref());
 
-    let count_sql =
-        format!("SELECT COUNT(*) FROM images i JOIN roots r ON r.id = i.root_id {where_sql}");
+    // COUNT 不需要 roots 表：build_where 只引用 i.* 列，去掉 JOIN 省一次连接（P0-6）。
+    let count_sql = format!("SELECT COUNT(*) FROM images i {where_sql}");
     let total: i64 = conn.query_row(&count_sql, params_from_iter(values.iter()), |row| {
         row.get(0)
     })?;
@@ -185,7 +185,10 @@ pub fn query(conn: &Connection, params: &ImageQueryParams) -> AppResult<ImagePag
 
 pub fn get_detail(conn: &Connection, id: i64) -> AppResult<Option<ImageRecord>> {
     let sql = format!("{IMAGE_SELECT} WHERE i.id = ?1");
-    Ok(conn.query_row(&sql, [id], row_to_record).optional()?)
+    Ok(conn
+        .prepare_cached(&sql)?
+        .query_row([id], row_to_record)
+        .optional()?)
 }
 
 pub fn get_details_by_ids(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ImageRecord>> {
@@ -211,9 +214,8 @@ pub fn get_details_by_ids(conn: &Connection, ids: &[i64]) -> AppResult<Vec<Image
 
 pub fn get_thumb_hash(conn: &Connection, id: i64) -> AppResult<Option<String>> {
     Ok(conn
-        .query_row("SELECT thumb_hash FROM images WHERE id = ?1", [id], |row| {
-            row.get(0)
-        })
+        .prepare_cached("SELECT thumb_hash FROM images WHERE id = ?1")?
+        .query_row([id], |row| row.get(0))
         .optional()?
         .flatten())
 }
@@ -271,18 +273,17 @@ pub fn upsert_scanned_image(
     now: i64,
 ) -> AppResult<UpsertOutcome> {
     let existing = conn
-        .query_row(
+        .prepare_cached(
             "SELECT id, size_bytes, mtime, deleted_at FROM images WHERE root_id = ?1 AND rel_path = ?2",
-            params![image.root_id, image.rel_path],
-            |row| {
-                Ok((
-                    row.get::<_, i64>(0)?,
-                    row.get::<_, i64>(1)?,
-                    row.get::<_, i64>(2)?,
-                    row.get::<_, Option<i64>>(3)?,
-                ))
-            },
-        )
+        )?
+        .query_row(params![image.root_id, image.rel_path], |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, i64>(2)?,
+                row.get::<_, Option<i64>>(3)?,
+            ))
+        })
         .optional()?;
 
     if let Some((id, size_bytes, mtime, deleted_at)) = existing {
@@ -293,7 +294,7 @@ pub fn upsert_scanned_image(
 
         // 文件内容变了（size/mtime 变化）：缩略图和指纹都过时了，一并清空重算，
         // 否则去重会用旧指纹分组（Bug B）。blake3/dhash 置空后会被 pending 查询重新拾取。
-        conn.execute(
+        conn.prepare_cached(
             "UPDATE images
              SET filename = ?1, extension = ?2, size_bytes = ?3, mtime = ?4,
                  width = ?5, height = ?6, orientation = ?7, taken_at = ?8,
@@ -304,7 +305,8 @@ pub fn upsert_scanned_image(
                  ocr_status = 'disabled', ocr_text = NULL, face_status = 'disabled',
                  indexed_at = ?13, deleted_at = NULL
              WHERE id = ?14",
-            params![
+        )?
+        .execute(params![
                 image.filename,
                 image.extension,
                 image.size_bytes,
@@ -324,14 +326,15 @@ pub fn upsert_scanned_image(
         return Ok(UpsertOutcome::Updated(id));
     }
 
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO images(
              root_id, rel_path, filename, extension, size_bytes, mtime,
              width, height, orientation, taken_at, gps_lat, gps_lng,
              camera_make, camera_model, thumb_status, indexed_at
          )
          VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'pending', ?15)",
-        params![
+    )?
+    .execute(params![
             image.root_id,
             image.rel_path,
             image.filename,
@@ -769,6 +772,7 @@ pub fn search_text(conn: &Connection, q: &str, limit: i64, offset: i64) -> AppRe
 }
 
 pub fn timeline_buckets(conn: &Connection, limit: i64) -> AppResult<Vec<TimelineBucket>> {
+    // 1) 聚合：单次扫描按年月分桶，取 count / min / max。
     let mut stmt = conn.prepare(
         "SELECT
              CAST(strftime('%Y', ts, 'unixepoch', 'localtime') AS INTEGER) AS year,
@@ -777,7 +781,7 @@ pub fn timeline_buckets(conn: &Connection, limit: i64) -> AppResult<Vec<Timeline
              MIN(ts) AS start_ts,
              MAX(ts) AS end_ts
          FROM (
-             SELECT id, COALESCE(taken_at, mtime) AS ts
+             SELECT COALESCE(taken_at, mtime) AS ts
              FROM images
              WHERE deleted_at IS NULL
          )
@@ -794,10 +798,18 @@ pub fn timeline_buckets(conn: &Connection, limit: i64) -> AppResult<Vec<Timeline
             row.get::<_, i64>(4)?,
         ))
     })?;
-    let mut out = Vec::new();
+    let mut buckets = Vec::new();
     for row in rows {
-        let (year, month, count, start_ts, end_ts) = row?;
-        let samples = timeline_samples(conn, year, month, 50)?;
+        buckets.push(row?);
+    }
+
+    // 2) 样本：单趟窗口函数查询取每桶前 N 条（替换原来"每桶一次带 strftime 的全表扫描"的 N+1）。
+    let mut samples_by_bucket = timeline_samples_by_bucket(conn, 50)?;
+
+    // 3) 组装：把样本按 (年,月) 挂到对应桶上。
+    let mut out = Vec::with_capacity(buckets.len());
+    for (year, month, count, start_ts, end_ts) in buckets {
+        let samples = samples_by_bucket.remove(&(year, month)).unwrap_or_default();
         out.push(TimelineBucket {
             year,
             month,
@@ -835,27 +847,61 @@ pub fn map_points(conn: &Connection, limit: i64) -> AppResult<Vec<MapImagePoint>
     Ok(out)
 }
 
-fn timeline_samples(
+/// 一趟查询取出每个 (年,月) 桶内按时间倒序的前 `per_bucket` 条样本，返回 `(年,月) -> 样本列表`。
+///
+/// 用窗口函数 `ROW_NUMBER()` 在单次扫描里完成每桶 top-N，取代原先"每桶一次带 strftime
+/// 的全表扫描"（240 桶即 240 次全表扫描）。样本行的完整字段用一次批量 `get_details_by_ids`
+/// 取回，桶内顺序由 `rn` 保证与时间倒序一致。
+fn timeline_samples_by_bucket(
     conn: &Connection,
-    year: i64,
-    month: i64,
-    limit: i64,
-) -> AppResult<Vec<ImageRecord>> {
-    let sql = format!(
-        "{IMAGE_SELECT}
-         WHERE i.deleted_at IS NULL
-           AND CAST(strftime('%Y', COALESCE(i.taken_at, i.mtime), 'unixepoch', 'localtime') AS INTEGER) = ?1
-           AND CAST(strftime('%m', COALESCE(i.taken_at, i.mtime), 'unixepoch', 'localtime') AS INTEGER) = ?2
-         ORDER BY COALESCE(i.taken_at, i.mtime) DESC, i.id DESC
-         LIMIT ?3"
-    );
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(params![year, month, limit.clamp(1, 100)], row_to_record)?;
-    let mut samples = Vec::new();
+    per_bucket: i64,
+) -> AppResult<std::collections::HashMap<(i64, i64), Vec<ImageRecord>>> {
+    let mut stmt = conn.prepare(
+        "SELECT id, y, m FROM (
+             SELECT id, y, m,
+                 ROW_NUMBER() OVER (PARTITION BY y, m ORDER BY ts DESC, id DESC) AS rn
+             FROM (
+                 SELECT id,
+                     COALESCE(taken_at, mtime) AS ts,
+                     CAST(strftime('%Y', COALESCE(taken_at, mtime), 'unixepoch', 'localtime') AS INTEGER) AS y,
+                     CAST(strftime('%m', COALESCE(taken_at, mtime), 'unixepoch', 'localtime') AS INTEGER) AS m
+                 FROM images
+                 WHERE deleted_at IS NULL
+             )
+         )
+         WHERE rn <= ?1
+         ORDER BY y DESC, m DESC, rn ASC",
+    )?;
+    let rows = stmt.query_map([per_bucket.clamp(1, 100)], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, i64>(1)?,
+            row.get::<_, i64>(2)?,
+        ))
+    })?;
+    // (id, 年, 月)，保持桶内时间倒序
+    let mut ordered: Vec<(i64, i64, i64)> = Vec::new();
     for row in rows {
-        samples.push(row?);
+        ordered.push(row?);
     }
-    Ok(samples)
+    let mut map: std::collections::HashMap<(i64, i64), Vec<ImageRecord>> =
+        std::collections::HashMap::new();
+    if ordered.is_empty() {
+        return Ok(map);
+    }
+
+    // 一次批量取回完整记录，再按顺序分组到各桶。
+    let ids: Vec<i64> = ordered.iter().map(|(id, _, _)| *id).collect();
+    let mut by_id: std::collections::HashMap<i64, ImageRecord> = get_details_by_ids(conn, &ids)?
+        .into_iter()
+        .map(|record| (record.id, record))
+        .collect();
+    for (id, year, month) in ordered {
+        if let Some(record) = by_id.remove(&id) {
+            map.entry((year, month)).or_default().push(record);
+        }
+    }
+    Ok(map)
 }
 
 pub fn ids_for_tag(conn: &Connection, tag_id: i64, limit: i64, offset: i64) -> AppResult<Vec<i64>> {

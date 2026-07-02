@@ -465,6 +465,13 @@ export default function App() {
     setPreviewIndex(index);
   }, []);
 
+  // 稳定引用：直接内联 `(image) => openPreviewById(image.id)` 会每次渲染换新函数，
+  // 破坏 ImageGrid / ImageCard 的 memo，导致所有可见缩略图重渲染（P0-4）。
+  const handlePreviewById = useCallback(
+    (image: ImageRecord) => openPreviewById(image.id),
+    [openPreviewById],
+  );
+
   const openPreviewInList = useCallback((image: ImageRecord, list: ImageRecord[]) => {
     const index = list.findIndex((item) => item.id === image.id);
     if (index < 0) {
@@ -1131,12 +1138,23 @@ export default function App() {
       ? scanProgress[selection]
       : undefined;
   const selectedCount = selectedIds.length;
-  const selectedRecords = useMemo(
-    () => images.filter((image) => selectedIds.includes(image.id)),
-    [images, selectedIds],
-  );
+  const selectedRecords = useMemo(() => {
+    // 用 Set 做 O(1) 命中，避免 filter × includes 的 O(n·m)（P3-2）。
+    const idSet = new Set(selectedIds);
+    return images.filter((image) => idSet.has(image.id));
+  }, [images, selectedIds]);
   const aiResultImages = useMemo(() => aiResults.map((result) => result.image), [aiResults]);
   const showDetailPane = activeView === "browse";
+
+  // 稳定 DetailPane 的回调引用，配合下方 memo(DetailPane) 让详情面板在
+  // 扫描 / 缩略图等高频事件（不改变选中项）时跳过重渲染（P0-3）。
+  const handleDetailPreview = useCallback(() => {
+    if (primarySelectedId !== null) openPreviewById(primarySelectedId);
+  }, [primarySelectedId, openPreviewById]);
+  const handleDetailRegenerate = useCallback(() => {
+    if (detail) void handleRegenerateThumbnail(detail);
+  }, [detail, handleRegenerateThumbnail]);
+  const handleDetailFindSimilar = useCallback(() => void handleAiSimilar(), [handleAiSimilar]);
 
   return (
     <div className={`app-shell${showDetailPane ? "" : " app-shell--no-detail"}`}>
@@ -1534,7 +1552,7 @@ export default function App() {
                 selectedIds={selectedIds}
                 selectionMode={selectionMode}
                 onClickImage={handleImageClick}
-                onPreviewImage={(image) => openPreviewById(image.id)}
+                onPreviewImage={handlePreviewById}
                 onOpenContextMenu={handleOpenImageMenu}
                 onEndReached={handleGridEndReached}
                 scrollerRef={handleGridScrollerRef}
@@ -1573,14 +1591,10 @@ export default function App() {
             onDeleteSelected={handleDeleteSelected}
             selectionDeleting={selectionDeleting}
             thumbnailRefreshing={detail ? thumbnailRefreshIds.includes(detail.id) : false}
-            onRegenerateThumbnail={() => {
-              if (detail) void handleRegenerateThumbnail(detail);
-            }}
-            onPreview={() => {
-              if (primarySelectedId !== null) openPreviewById(primarySelectedId);
-            }}
+            onRegenerateThumbnail={handleDetailRegenerate}
+            onPreview={handleDetailPreview}
             onTagImage={handleAiTagSelected}
-            onFindSimilar={() => void handleAiSimilar()}
+            onFindSimilar={handleDetailFindSimilar}
           />
         </aside>
       )}
@@ -2355,7 +2369,7 @@ function StatusLine({ label, value }: { label: string; value: string }) {
   );
 }
 
-function FilterBar(props: FilterBarProps) {
+const FilterBar = memo(function FilterBar(props: FilterBarProps) {
   const selectedFormat = props.formats.length === 1 ? (props.formats[0] ?? "") : "";
 
   return (
@@ -2430,7 +2444,7 @@ function FilterBar(props: FilterBarProps) {
       </div>
     </section>
   );
-}
+});
 
 interface ImageGridProps {
   images: ImageRecord[];
@@ -2517,7 +2531,7 @@ const ImageCard = memo(function ImageCard({
       )}
       <span className="image-card__thumb">
         {image.thumbStatus === "ready" ? (
-          <img src={thumbUrl(image.id)} alt={image.filename} loading="lazy" />
+          <img src={thumbUrl(image.id)} alt={image.filename} loading="lazy" decoding="async" />
         ) : (
           <span className="image-card__placeholder">
             <ImageIcon aria-hidden="true" />
@@ -2554,7 +2568,7 @@ interface DetailPaneProps {
   onFindSimilar: () => void;
 }
 
-function DetailPane({
+const DetailPane = memo(function DetailPane({
   image,
   selectedCount,
   selectedRecords,
@@ -2631,7 +2645,7 @@ function DetailPane({
         title="打开原图预览"
       >
         {image.thumbStatus === "ready" ? (
-          <img src={thumbUrl(image.id, 512)} alt={image.filename} />
+          <img src={thumbUrl(image.id, 512)} alt={image.filename} decoding="async" />
         ) : (
           <span>{thumbStatusText(image.thumbStatus)}</span>
         )}
@@ -2755,7 +2769,7 @@ function DetailPane({
       </button>
     </section>
   );
-}
+});
 
 function DetailRow({ label, value }: { label: string; value: string | null }) {
   if (!value) return null;

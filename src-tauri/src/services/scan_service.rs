@@ -206,7 +206,7 @@ pub fn image_extensions() -> &'static [&'static str] {
 }
 
 fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> AppResult<()> {
-    let conn = task.pool.get()?;
+    let mut conn = task.pool.get()?;
     let root = roots_repo::get(&conn, task.root_id)?
         .ok_or_else(|| AppError::Other(format!("目录不存在：{}", task.root_id)))?;
     let root_path = PathBuf::from(&root.path);
@@ -255,6 +255,11 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
 
     emit_progress(&task, processed, 0, None, started);
 
+    // 网络盘判定每次扫描固定，循环外算一次即可（原先每个 Added/Updated 都重算）。
+    let is_network = crate::utils::path_normalize::is_network_path(&root_path);
+    // 探测（磁盘 I/O）在事务外累积，攒够一批再统一写库，缩短 WAL 写锁持有时间。
+    let mut batch: Vec<PreparedUpsert> = Vec::with_capacity(SCAN_BATCH_SIZE);
+
     for entry in WalkDir::new(&root_path).follow_links(false).into_iter() {
         let entry = match entry {
             Ok(entry) => entry,
@@ -270,6 +275,8 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
         }
 
         if cancellation.is_cancelled() {
+            // 先把已探测但未写入的批次落库，避免丢失已完成的探测工作。
+            flush_scan_batch(&mut conn, &mut batch, &task, &root, is_network, &mut done)?;
             set_scan_status(
                 &conn,
                 task.task_id,
@@ -316,19 +323,12 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
         };
         let prior = states.get(&rel_path).copied();
 
-        match scan_one_file(&conn, &task, &root, path, &rel_path, &metadata, prior) {
-            Ok(outcome) => match outcome {
-                UpsertOutcome::Added(_) => done.added += 1,
-                UpsertOutcome::Updated(_) => done.updated += 1,
-                UpsertOutcome::Unchanged(_) => {}
-            },
-            Err(error) => {
-                tracing::warn!(path = ?path, %error, "failed to scan one image");
-                emit_scan_error(
-                    &task,
-                    error.to_string(),
-                    Some(path.to_string_lossy().to_string()),
-                );
+        // 探测（读图头 + 解 EXIF）在事务外进行；未变化文件走快速路径，不探测也不写库。
+        // 变化/新增的文件累积成批，攒够 SCAN_BATCH_SIZE 后在一个事务里统一写入。
+        if let Some(prepared) = prepare_scan_file(&root, path, &rel_path, &metadata, prior) {
+            batch.push(prepared);
+            if batch.len() >= SCAN_BATCH_SIZE {
+                flush_scan_batch(&mut conn, &mut batch, &task, &root, is_network, &mut done)?;
             }
         }
 
@@ -346,7 +346,10 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
         }
     }
 
-    done.removed = mark_missing_deleted(&conn, task.root_id, &states, &visited)?;
+    // 收尾：写入最后不足一批的记录。
+    flush_scan_batch(&mut conn, &mut batch, &task, &root, is_network, &mut done)?;
+
+    done.removed = mark_missing_deleted(&mut conn, task.root_id, &states, &visited)?;
     let finished = now_unix();
     let total = i64::try_from(processed).unwrap_or(i64::MAX);
     tracing::info!(
@@ -370,15 +373,26 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
     Ok(())
 }
 
-fn scan_one_file(
-    conn: &rusqlite::Connection,
-    task: &ScanRootTask,
+/// 每批提交的文件数。事务只包内存→WAL 的写入（不含图片解码 / EXIF 探测），
+/// 在 WAL + synchronous=NORMAL 下不会 per-commit fsync，因此并发的缩略图 worker
+/// 只需短暂等待写锁，不会撞 busy_timeout（5s）。
+const SCAN_BATCH_SIZE: usize = 500;
+
+/// 扫描期累积的一条待写入记录：探测（磁盘 I/O）已在事务外完成。
+struct PreparedUpsert {
+    image: NewImageMetadata,
+    path: PathBuf,
+}
+
+/// 探测单个文件并构造待写入记录。返回 `None` 表示走快速路径（size/mtime 未变），
+/// 既不读图头 / 解 EXIF，也不写库。**不做任何 DB 访问**，可在事务外调用。
+fn prepare_scan_file(
     root: &Root,
     path: &Path,
     rel_path: &str,
     metadata: &std::fs::Metadata,
     prior: Option<images_repo::ScannedFileState>,
-) -> AppResult<UpsertOutcome> {
+) -> Option<PreparedUpsert> {
     let size_bytes = i64::try_from(metadata.len()).unwrap_or(i64::MAX);
     let mtime = unix_time(metadata.modified().unwrap_or(SystemTime::UNIX_EPOCH));
 
@@ -386,7 +400,7 @@ fn scan_one_file(
     // 不再读图头 / 解 EXIF（probe_image）、也不写库，缩略图同样不会重排。
     if let Some(state) = prior {
         if state.is_unchanged(size_bytes, mtime) {
-            return Ok(UpsertOutcome::Unchanged(state.id));
+            return None;
         }
     }
 
@@ -421,24 +435,81 @@ fn scan_one_file(
         camera_model: probe.camera_model,
     };
 
-    let outcome = images_repo::upsert_scanned_image(conn, &image, now_unix())?;
-    if matches!(outcome, UpsertOutcome::Added(_) | UpsertOutcome::Updated(_)) {
-        let is_network = crate::utils::path_normalize::is_network_path(Path::new(&root.path));
+    Some(PreparedUpsert {
+        image,
+        path: path.to_path_buf(),
+    })
+}
+
+/// 在单个事务里批量写入累积的记录，提交后再为新增/更新的图片入队缩略图任务。
+/// 单条 upsert 失败只跳过该条（发 scan:error），不影响同批其它记录。
+fn flush_scan_batch(
+    conn: &mut rusqlite::Connection,
+    batch: &mut Vec<PreparedUpsert>,
+    task: &ScanRootTask,
+    root: &Root,
+    is_network: bool,
+    done: &mut ScanDone,
+) -> AppResult<()> {
+    if batch.is_empty() {
+        return Ok(());
+    }
+    let now = now_unix();
+    // 事务提交后才入队缩略图，避免任务读到尚未提交的行。
+    let mut to_thumb: Vec<(i64, PathBuf, String, Option<i64>)> = Vec::with_capacity(batch.len());
+
+    let tx = conn.transaction()?;
+    for prepared in batch.drain(..) {
+        match images_repo::upsert_scanned_image(&tx, &prepared.image, now) {
+            Ok(outcome) => {
+                let (id, is_write) = match outcome {
+                    UpsertOutcome::Added(id) => {
+                        done.added += 1;
+                        (id, true)
+                    }
+                    UpsertOutcome::Updated(id) => {
+                        done.updated += 1;
+                        (id, true)
+                    }
+                    UpsertOutcome::Unchanged(id) => (id, false),
+                };
+                if is_write {
+                    to_thumb.push((
+                        id,
+                        prepared.path,
+                        prepared.image.rel_path,
+                        prepared.image.orientation,
+                    ));
+                }
+            }
+            Err(error) => {
+                tracing::warn!(path = ?prepared.path, %error, "failed to upsert scanned image");
+                emit_scan_error(
+                    task,
+                    error.to_string(),
+                    Some(prepared.path.to_string_lossy().to_string()),
+                );
+            }
+        }
+    }
+    tx.commit()?;
+
+    for (image_id, path, rel_path, orientation) in to_thumb {
         task.scheduler.enqueue(
             ThumbnailTask::new(
                 task.pool.clone(),
-                outcome.image_id(),
+                image_id,
                 root.id,
-                rel_path.to_string(),
-                path.to_path_buf(),
-                image.orientation,
+                rel_path,
+                path,
+                orientation,
                 task.paths.thumbs_dir.clone(),
                 is_network,
             )
             .with_event_app(task.app.clone()),
         )?;
     }
-    Ok(outcome)
+    Ok(())
 }
 
 fn is_supported_image(path: &Path) -> bool {
@@ -466,7 +537,7 @@ fn rel_path_string(root_path: &Path, path: &Path) -> Option<String> {
 }
 
 fn mark_missing_deleted(
-    conn: &rusqlite::Connection,
+    conn: &mut rusqlite::Connection,
     root_id: i64,
     states: &HashMap<String, images_repo::ScannedFileState>,
     visited: &HashSet<String>,
@@ -474,12 +545,15 @@ fn mark_missing_deleted(
     let now = now_unix();
     let mut removed = 0;
     // states 仅含扫描开始时未删除的行；本次扫描没访问到的即为磁盘上已消失。
+    // 一并放进单个事务批量标记删除，避免逐行 autocommit 写放大。
+    let tx = conn.transaction()?;
     for rel_path in states.keys() {
         if !visited.contains(rel_path) {
-            images_repo::mark_deleted(conn, root_id, rel_path, now)?;
+            images_repo::mark_deleted(&tx, root_id, rel_path, now)?;
             removed += 1;
         }
     }
+    tx.commit()?;
     Ok(removed)
 }
 
