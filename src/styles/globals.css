@@ -1567,6 +1567,13 @@ body {
   backdrop-filter: blur(8px);
 }
 
+.image-card--selected .image-card__check {
+  border-color: rgba(255, 255, 255, 0.96);
+  background: linear-gradient(180deg, #3b88f2, var(--accent));
+  box-shadow: 0 0 0 2px color-mix(in srgb, var(--accent) 46%, transparent), 0 6px 16px
+    rgba(35, 111, 189, 0.32);
+}
+
 .image-card__quick {
   position: absolute;
   top: 7px;
@@ -1621,6 +1628,34 @@ body {
   color: var(--text);
   font-size: 18px;
   letter-spacing: 0;
+}
+
+.detail-batch-actions {
+  display: grid;
+  gap: 8px;
+}
+
+.detail-batch-actions .primary-action {
+  width: 100%;
+}
+
+.primary-action--danger {
+  border-color: var(--danger);
+  background: linear-gradient(180deg, color-mix(in srgb, var(--danger) 84%, white), var(--danger));
+  color: #fff;
+  box-shadow: 0 10px 22px color-mix(in srgb, var(--danger) 22%, transparent);
+}
+
+.primary-action--danger:hover {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 88%, black);
+  color: #fff;
+}
+
+.primary-action--danger:disabled,
+.detail-actions .detail-action--danger:disabled {
+  opacity: 0.55;
+  cursor: default;
 }
 
 .detail-preview {
@@ -1678,6 +1713,19 @@ body {
   gap: 5px;
   border-color: var(--border);
   background: var(--panel-raised);
+}
+
+.detail-actions .detail-action--danger {
+  grid-column: 1 / -1;
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--border));
+  background: color-mix(in srgb, var(--danger) 9%, var(--panel-raised));
+  color: var(--danger);
+}
+
+.detail-actions .detail-action--danger:hover {
+  border-color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 15%, var(--panel-raised));
+  color: var(--danger);
 }
 
 .icon--spinning {
@@ -2720,10 +2768,10 @@ body {
 
 .dedup-image-row {
   display: grid;
-  grid-template-columns: 28px 86px minmax(180px, 1fr) minmax(180px, 0.72fr);
+  grid-template-columns: 28px 120px minmax(180px, 1fr) minmax(180px, 0.72fr);
   gap: 10px;
   align-items: center;
-  min-height: 76px;
+  min-height: 102px;
   padding: 8px 2px;
   border: 0;
   border-bottom: 1px solid var(--border);
@@ -2762,8 +2810,8 @@ body {
   display: flex;
   align-items: center;
   justify-content: center;
-  width: 86px;
-  height: 64px;
+  width: 120px;
+  height: 90px;
   background: rgba(0, 0, 0, 0.05);
   border-radius: 4px;
   overflow: hidden;
@@ -2869,12 +2917,12 @@ body {
   }
 
   .dedup-image-row {
-    grid-template-columns: 28px 72px minmax(0, 1fr);
+    grid-template-columns: 28px 96px minmax(0, 1fr);
   }
 
   .dedup-image-thumb {
-    width: 72px;
-    height: 54px;
+    width: 96px;
+    height: 72px;
   }
 
   .dedup-image-stats {

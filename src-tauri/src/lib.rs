@@ -178,6 +178,7 @@ pub fn run() {
             commands::dedup::dedup_resolve,
             commands::dedup::dedup_batch_resolve,
             commands::dedup::dedup_export_csv,
+            commands::trash::trash_move,
             commands::trash::trash_history,
             commands::trash::trash_undo,
             commands::ai::ai_worker_start,

@@ -449,6 +449,14 @@ export interface TrashFailure {
   error: string;
 }
 
+export interface TrashMoveResult {
+  succeeded: number[];
+  /** succeeded 的子集：网络位置不支持回收站时，已永久删除且无法撤销。 */
+  permanentlyDeleted: number[];
+  failed: TrashFailure[];
+  undoId: number | null;
+}
+
 export interface DedupResolveResult {
   groupId: number;
   trashed: number[];

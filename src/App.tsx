@@ -50,6 +50,7 @@ import {
   smartAlbumQuery,
   smartAlbumSave,
   thumbUrl,
+  trashMove,
   watcherStart,
   watcherStatus,
   watcherStop,
@@ -110,6 +111,7 @@ import {
   Sparkles,
   Star,
   Tags,
+  Trash2,
   Users,
 } from "lucide-react";
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -191,6 +193,7 @@ export default function App() {
   const [imageError, setImageError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [selectionMode, setSelectionMode] = useState(false);
+  const [selectionDeleting, setSelectionDeleting] = useState(false);
   const lastSelectedId = useRef<number | null>(null);
   const [detail, setDetail] = useState<ImageRecord | null>(null);
   const [thumbnailRefreshIds, setThumbnailRefreshIds] = useState<number[]>([]);
@@ -569,6 +572,54 @@ export default function App() {
     await navigator.clipboard.writeText(selected.map((image) => image.fullPath).join("\n"));
     setToast(`已复制 ${selected.length} 个路径`);
   }, [selectedIds]);
+
+  const handleDeleteSelected = useCallback(async () => {
+    if (selectionDeleting || selectedIds.length === 0) return;
+
+    const selected = imagesRef.current.filter((image) => selectedIds.includes(image.id));
+    const totalSize = selected.reduce((sum, image) => sum + image.sizeBytes, 0);
+    const confirmed = window.confirm(
+      `确认删除所选的 ${selectedIds.length} 张图片（${formatBytes(totalSize)}）？\n\n本地文件会移到系统回收站，并可从撤销历史恢复。\n网络盘若不支持回收站，将直接永久删除且无法撤销。`,
+    );
+    if (!confirmed) return;
+
+    setSelectionDeleting(true);
+    try {
+      const result = await trashMove(selectedIds);
+      const removedIds = new Set(result.succeeded);
+      if (removedIds.size > 0) {
+        setImages((current) => current.filter((image) => !removedIds.has(image.id)));
+        setPreviewImages((current) => current.filter((image) => !removedIds.has(image.id)));
+        setTotal((current) => Math.max(0, current - removedIds.size));
+        void rootsReloadRef.current();
+      }
+
+      const failedIds = result.failed.map((failure) => failure.imageId);
+      setSelectedIds(failedIds);
+      setSelectionMode(failedIds.length > 0);
+      lastSelectedId.current = failedIds[failedIds.length - 1] ?? null;
+
+      if (result.failed.length > 0) {
+        const permanentNote =
+          result.permanentlyDeleted.length > 0
+            ? `，其中 ${result.permanentlyDeleted.length} 张无法撤销`
+            : "";
+        setToast(
+          `已处理 ${result.succeeded.length} 张${permanentNote}，${result.failed.length} 张失败：${result.failed[0]?.error ?? "未知错误"}`,
+        );
+      } else if (result.permanentlyDeleted.length > 0) {
+        setToast(
+          `已删除 ${result.succeeded.length} 张，其中 ${result.permanentlyDeleted.length} 张位于不支持回收站的位置，无法撤销`,
+        );
+      } else {
+        setToast(`已将 ${result.succeeded.length} 张图片移到回收站`);
+      }
+    } catch (error) {
+      setToast(`删除所选图片失败：${String(error)}`);
+    } finally {
+      setSelectionDeleting(false);
+    }
+  }, [selectedIds, selectionDeleting]);
 
   const handleReveal = useCallback(async () => {
     if (primarySelectedId === null) return;
@@ -1519,6 +1570,8 @@ export default function App() {
             onRename={handleRename}
             onReveal={handleReveal}
             onCopyPaths={handleCopyPaths}
+            onDeleteSelected={handleDeleteSelected}
+            selectionDeleting={selectionDeleting}
             thumbnailRefreshing={detail ? thumbnailRefreshIds.includes(detail.id) : false}
             onRegenerateThumbnail={() => {
               if (detail) void handleRegenerateThumbnail(detail);
@@ -2492,6 +2545,8 @@ interface DetailPaneProps {
   onRename: (filename: string) => Promise<void>;
   onReveal: () => Promise<void>;
   onCopyPaths: () => Promise<void>;
+  onDeleteSelected: () => Promise<void>;
+  selectionDeleting: boolean;
   thumbnailRefreshing: boolean;
   onRegenerateThumbnail: () => void;
   onPreview: () => void;
@@ -2508,6 +2563,8 @@ function DetailPane({
   onRename,
   onReveal,
   onCopyPaths,
+  onDeleteSelected,
+  selectionDeleting,
   thumbnailRefreshing,
   onRegenerateThumbnail,
   onPreview,
@@ -2532,10 +2589,21 @@ function DetailPane({
           {selectedCount} 张图片
         </h2>
         <p className="muted">已加载选择大小：{formatBytes(totalSize)}</p>
-        <button type="button" className="primary-action" onClick={() => void onCopyPaths()}>
-          <Copy aria-hidden="true" />
-          复制路径
-        </button>
+        <div className="detail-batch-actions">
+          <button type="button" className="primary-action" onClick={() => void onCopyPaths()}>
+            <Copy aria-hidden="true" />
+            复制路径
+          </button>
+          <button
+            type="button"
+            className="primary-action primary-action--danger"
+            disabled={selectionDeleting}
+            onClick={() => void onDeleteSelected()}
+          >
+            <Trash2 aria-hidden="true" />
+            {selectionDeleting ? "正在删除…" : "删除所选文件"}
+          </button>
+        </div>
       </section>
     );
   }
@@ -2611,6 +2679,15 @@ function DetailPane({
             className={thumbnailRefreshing ? "icon--spinning" : undefined}
           />
           {thumbnailRefreshing ? "生成中…" : "重刷缩略图"}
+        </button>
+        <button
+          type="button"
+          className="detail-action--danger"
+          disabled={selectionDeleting}
+          onClick={() => void onDeleteSelected()}
+        >
+          <Trash2 aria-hidden="true" />
+          {selectionDeleting ? "删除中…" : "移到回收站"}
         </button>
       </div>
 

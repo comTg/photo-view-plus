@@ -42,6 +42,7 @@ import type {
   SmartAlbum,
   SmartAlbumInput,
   TimelineBucket,
+  TrashMoveResult,
   UndoEntry,
   UndoOutcome,
   UpdateRootArgs,
@@ -342,6 +343,10 @@ export async function dedupExportCsv(args: DedupExportArgs): Promise<number> {
 }
 
 // Trash
+export async function trashMove(imageIds: number[]): Promise<TrashMoveResult> {
+  return invoke<TrashMoveResult>("trash_move", { imageIds });
+}
+
 export async function trashHistory(limit?: number): Promise<UndoEntry[]> {
   return invoke<UndoEntry[]>("trash_history", { limit });
 }
