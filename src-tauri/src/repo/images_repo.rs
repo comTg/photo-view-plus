@@ -206,6 +206,16 @@ pub fn get_detail(conn: &Connection, id: i64) -> AppResult<Option<ImageRecord>> 
         .optional()?)
 }
 
+/// 与 `get_detail` 同布局，但走 `IMAGE_SELECT_LIST`（ocr_text 置 NULL），用于缩略图完成事件等
+/// 只关心 thumb_status/thumb_hash 的高频回读——避免每张缩略图都读一次 OCR 全文（overflow page）。
+pub fn get_detail_light(conn: &Connection, id: i64) -> AppResult<Option<ImageRecord>> {
+    let sql = format!("{IMAGE_SELECT_LIST} WHERE i.id = ?1");
+    Ok(conn
+        .prepare_cached(&sql)?
+        .query_row([id], row_to_record)
+        .optional()?)
+}
+
 pub fn get_details_by_ids(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ImageRecord>> {
     if ids.is_empty() {
         return Ok(Vec::new());

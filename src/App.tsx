@@ -198,6 +198,9 @@ export default function App() {
   const [detail, setDetail] = useState<ImageRecord | null>(null);
   const [thumbnailRefreshIds, setThumbnailRefreshIds] = useState<number[]>([]);
   const thumbnailRefreshIdsRef = useRef(new Set<number>());
+  // 待合并的缩略图更新（按 id 去重）与合帧句柄，见 handleThumbnailUpdated。
+  const pendingThumbUpdatesRef = useRef(new Map<number, ImageRecord>());
+  const thumbFlushHandleRef = useRef<number | null>(null);
   const [previewImages, setPreviewImages] = useState<ImageRecord[]>([]);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [imageMenu, setImageMenu] = useState<{
@@ -397,24 +400,58 @@ export default function App() {
   const handleAiStatus = useCallback((payload: AiWorkerStatus) => setAiStatus(payload), []);
   const handleAiProgress = useCallback((payload: AiPipelineStatus) => setAiPipeline(payload), []);
 
-  const replaceImageRecord = useCallback((updated: ImageRecord) => {
-    const replace = (image: ImageRecord) => (image.id === updated.id ? updated : image);
-    setImages((prev) => prev.map(replace));
-    setDetail((prev) => (prev?.id === updated.id ? updated : prev));
-    setPreviewImages((prev) => prev.map(replace));
+  // 批量替换多张图片记录：仅在数组确有命中项时才产生新引用，空/无关数组返回 prev 让 React bail out，
+  // 避免扫描期每张缩略图都触发 7 个数组的全量 map + App 整体重渲染。
+  const replaceImageRecords = useCallback((batch: Map<number, ImageRecord>) => {
+    const remap = (prev: ImageRecord[]) =>
+      prev.some((image) => batch.has(image.id))
+        ? prev.map((image) => batch.get(image.id) ?? image)
+        : prev;
+    setImages(remap);
+    setPreviewImages(remap);
+    setAdvancedImages(remap);
+    setDetail((prev) => {
+      if (!prev) return prev;
+      const next = batch.get(prev.id);
+      if (!next) return prev;
+      // 缩略图事件走轻量投影，ocrText 为 null；详情面板的 OCR 由 get_detail 单独加载，此处保留旧值。
+      return next.ocrText == null && prev.ocrText != null
+        ? { ...next, ocrText: prev.ocrText }
+        : next;
+    });
     setAiResults((prev) =>
-      prev.map((result) =>
-        result.image.id === updated.id ? { ...result, image: updated } : result,
-      ),
+      prev.some((result) => batch.has(result.image.id))
+        ? prev.map((result) => {
+            const next = batch.get(result.image.id);
+            return next ? { ...result, image: next } : result;
+          })
+        : prev,
     );
     setTimelineBuckets((prev) =>
-      prev.map((bucket) => ({ ...bucket, samples: bucket.samples.map(replace) })),
+      prev.some((bucket) => bucket.samples.some((sample) => batch.has(sample.id)))
+        ? prev.map((bucket) => ({
+            ...bucket,
+            samples: bucket.samples.map((sample) => batch.get(sample.id) ?? sample),
+          }))
+        : prev,
     );
     setMapPoints((prev) =>
-      prev.map((point) => (point.image.id === updated.id ? { ...point, image: updated } : point)),
+      prev.some((point) => batch.has(point.image.id))
+        ? prev.map((point) => {
+            const next = batch.get(point.image.id);
+            return next ? { ...point, image: next } : point;
+          })
+        : prev,
     );
-    setAdvancedImages((prev) => prev.map(replace));
   }, []);
+
+  // 手动重刷等需立即生效的单张路径复用批量逻辑（附带同样的空数组守卫）。
+  const replaceImageRecord = useCallback(
+    (updated: ImageRecord) => {
+      replaceImageRecords(new Map([[updated.id, updated]]));
+    },
+    [replaceImageRecords],
+  );
 
   const setThumbnailRefreshing = useCallback((imageId: number, refreshing: boolean) => {
     if (refreshing) {
@@ -425,13 +462,39 @@ export default function App() {
     setThumbnailRefreshIds([...thumbnailRefreshIdsRef.current]);
   }, []);
 
+  // 把一帧内积攒的缩略图更新一次性提交。
+  const flushThumbnailUpdates = useCallback(() => {
+    thumbFlushHandleRef.current = null;
+    const batch = pendingThumbUpdatesRef.current;
+    if (batch.size === 0) return;
+    pendingThumbUpdatesRef.current = new Map();
+    replaceImageRecords(batch);
+  }, [replaceImageRecords]);
+
+  const scheduleThumbnailFlush = useCallback(() => {
+    if (thumbFlushHandleRef.current !== null) return;
+    thumbFlushHandleRef.current = window.requestAnimationFrame(flushThumbnailUpdates);
+  }, [flushThumbnailUpdates]);
+
+  useEffect(() => {
+    return () => {
+      if (thumbFlushHandleRef.current !== null) {
+        window.cancelAnimationFrame(thumbFlushHandleRef.current);
+      }
+    };
+  }, []);
+
   const handleThumbnailUpdated = useCallback(
     (updated: ImageRecord) => {
       const wasManualRefresh = thumbnailRefreshIdsRef.current.has(updated.id);
       bustThumbnailCache(updated.id);
-      replaceImageRecord(updated);
-      setThumbnailRefreshing(updated.id, false);
+      // thumbnail:updated 是逐图片、无节流的高频事件；入队后交给动画帧批量提交，
+      // 避免每张缩略图都单独触发一次全局重渲染。
+      pendingThumbUpdatesRef.current.set(updated.id, updated);
+      scheduleThumbnailFlush();
+      // 自动扫描产生的缩略图（非手动重刷）到此为止，不再触碰刷新追踪状态与 toast。
       if (!wasManualRefresh) return;
+      setThumbnailRefreshing(updated.id, false);
       if (updated.thumbStatus === "ready") {
         setToast("缩略图已重新生成");
       } else if (updated.thumbStatus === "pending") {
@@ -440,7 +503,7 @@ export default function App() {
         setToast(`缩略图生成失败：${updated.thumbError ?? thumbStatusText(updated.thumbStatus)}`);
       }
     },
-    [replaceImageRecord, setThumbnailRefreshing],
+    [scheduleThumbnailFlush, setThumbnailRefreshing],
   );
 
   useTauriEvent<ScanProgress>("scan:progress", handleScanProgress);
