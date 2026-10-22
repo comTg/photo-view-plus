@@ -172,6 +172,14 @@ def test_prepare_reads_heic():
     assert out.size == (1024, 768)
 
 
+def test_heic_security_limits_do_not_reject_tiled_photos():
+    # 手机存的长截图按网格切块，'ipco' 属性超过 libheif 默认的 100 个上限会被拒绝；
+    # 这种文件造不出来（libheif 自己编码时共用属性），只能检查开关。
+    pillow_heif = pytest.importorskip("pillow_heif")
+    assert images.HEIF_SUPPORTED
+    assert pillow_heif.options.DISABLE_SECURITY_LIMITS is True
+
+
 class FakeLlama(BaseHTTPRequestHandler):
     responses: list[tuple[int, str]] = []
     requests: list[dict] = []

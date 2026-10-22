@@ -11,9 +11,13 @@ import io
 from PIL import Image, ImageOps
 
 try:  # pillow-heif 缺失时 HEIC 解码失败，按"格式不支持"处理，其他格式不受影响。
-    from pillow_heif import register_heif_opener
+    import pillow_heif
 
-    register_heif_opener()
+    # libheif 的默认安全上限会拒绝一部分正常照片：手机把长截图、高像素照片按网格切块存，
+    # 'ipco' 下的属性超过 100 个就报 "Security limit exceeded"（全量运行里 1080×8667 的长截图）。
+    # 图片来自用户自己的图库，解码在独立的 worker 进程里，像素上限仍由 MAX_IMAGE_PIXELS 把关。
+    pillow_heif.options.DISABLE_SECURITY_LIMITS = True
+    pillow_heif.register_heif_opener()
     HEIF_SUPPORTED = True
 except ImportError:  # pragma: no cover - 取决于环境
     HEIF_SUPPORTED = False
