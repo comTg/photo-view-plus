@@ -1155,9 +1155,9 @@ export default function App() {
   const handleAiProcessPending = useCallback(async () => {
     setAiBusy(true);
     try {
-      await aiProcessPending();
+      const message = await aiProcessPending();
       await refreshAiState();
-      setToast("已触发 AI 后台处理");
+      setToast(message);
     } catch (error) {
       setToast(`触发 AI 处理失败：${String(error)}`);
     } finally {

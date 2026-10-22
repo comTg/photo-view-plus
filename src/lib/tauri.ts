@@ -292,8 +292,9 @@ export async function aiPipelineStatus(): Promise<AiPipelineStatus> {
   return invoke<AiPipelineStatus>("ai_pipeline_status");
 }
 
-export async function aiProcessPending(): Promise<void> {
-  return invoke<void>("ai_process_pending");
+/** 手动"处理待办"：返回给用户看的结果（AI 被暂停时是原因）。 */
+export async function aiProcessPending(): Promise<string> {
+  return invoke<string>("ai_process_pending");
 }
 
 export async function aiRetagAll(): Promise<number> {

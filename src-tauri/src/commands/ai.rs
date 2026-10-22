@@ -12,6 +12,7 @@ use crate::services::ai_client::TaggerItem;
 use crate::services::ai_pipeline::{AiPipeline, AiPipelineStatus};
 use crate::services::ai_supervisor::{AiSupervisor, AiWorkerStatus};
 use crate::services::analysis_pipeline::AnalysisPipeline;
+use crate::services::resource_governor::{GpuPolicy, ResourceGovernor, Tier};
 use crate::services::search_index_service::{self, RebuildOutcome, SearchIndexStatus};
 use crate::services::search_service::{
     self, AiSearchArgs, AiSearchResponse, AiSearchResult, WorkerQueryEncoder,
@@ -173,9 +174,23 @@ pub fn ai_pipeline_status(pipeline: State<'_, Arc<AiPipeline>>) -> AiPipelineSta
     pipeline.status()
 }
 
+/// 手动"处理待办"。GPU 任务被资源治理器暂停时（使用中 / 全屏 / 手动暂停）不投递，返回原因给界面提示。
 #[tauri::command]
-pub async fn ai_process_pending(pipeline: State<'_, Arc<AiPipeline>>) -> Result<(), String> {
-    pipeline.enqueue_pending().await.map_err(|e| e.to_string())
+pub async fn ai_process_pending(
+    pipeline: State<'_, Arc<AiPipeline>>,
+    supervisor: State<'_, Arc<AiSupervisor>>,
+    governor: State<'_, Arc<ResourceGovernor>>,
+) -> Result<String, String> {
+    if supervisor.gpu_gate().policy() == GpuPolicy::Paused {
+        let reason = match governor.status().tier {
+            Tier::Paused => "后台处理已暂停，可在状态栏切回\"自动\"或\"全速\"",
+            Tier::Busy => "全屏 / 游戏中，AI 暂停",
+            _ => "正在使用电脑，AI 先暂停；离开电脑或在状态栏切到\"全速\"后开始",
+        };
+        return Ok(reason.to_string());
+    }
+    pipeline.enqueue_pending().await.map_err(|e| e.to_string())?;
+    Ok("已触发 AI 后台处理".to_string())
 }
 
 /// 清空旧的 AI 标签（含历史英文标签）并把就绪图片重置为待打标签，随后立即触发一轮重打。
