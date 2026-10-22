@@ -144,3 +144,15 @@ fn schtasks_round_trip() {
         "{xml}"
     );
 }
+
+#[cfg(windows)]
+#[test]
+fn shared_hold_keeps_the_name_alive_until_the_last_holder() {
+    let name = gui_mutex_name(&format!("test.shared.{}", std::process::id()));
+    let first = InstanceLock::hold(&name).expect("first holder");
+    let second = InstanceLock::hold(&name).expect("second holder");
+    drop(first);
+    assert!(InstanceLock::is_held(&name), "second window still open");
+    drop(second);
+    assert!(!InstanceLock::is_held(&name));
+}

@@ -9,7 +9,9 @@ pub struct InstanceLock {
 
 #[cfg(windows)]
 mod imp {
-    use windows_sys::Win32::Foundation::{CloseHandle, GetLastError, ERROR_ALREADY_EXISTS};
+    use windows_sys::Win32::Foundation::{
+        CloseHandle, GetLastError, ERROR_ACCESS_DENIED, ERROR_ALREADY_EXISTS,
+    };
     use windows_sys::Win32::System::Threading::{CreateMutexW, OpenMutexW};
 
     /// SYNCHRONIZE：只为探测是否存在。
@@ -19,16 +21,18 @@ mod imp {
         name.encode_utf16().chain(std::iter::once(0)).collect()
     }
 
-    /// 新建命名互斥量；已存在（别的进程持有）时返回 None。
-    pub fn create(name: &str) -> Option<isize> {
+    /// 新建命名互斥量；`exclusive` 时已存在（别的进程持有）就返回 None，
+    /// 否则即使已存在也保留句柄（多个进程一起"持有"这个名字）。
+    pub fn create(name: &str, exclusive: bool) -> Option<isize> {
         let name = wide(name);
         // SAFETY：name 是以 0 结尾的 UTF-16 字符串；返回的句柄由调用方负责关闭。
         unsafe {
             let handle = CreateMutexW(std::ptr::null(), 0, name.as_ptr());
             if handle.is_null() {
+                // 别的权限级别（例如管理员运行的主程序）建的同名对象：打不开，但它确实存在。
                 return None;
             }
-            if GetLastError() == ERROR_ALREADY_EXISTS {
+            if exclusive && GetLastError() == ERROR_ALREADY_EXISTS {
                 CloseHandle(handle);
                 return None;
             }
@@ -42,7 +46,8 @@ mod imp {
         unsafe {
             let handle = OpenMutexW(SYNCHRONIZE, 0, name.as_ptr());
             if handle.is_null() {
-                return false;
+                // 对象存在但没有权限打开（主程序以管理员身份运行、计划任务是普通权限）也算存在。
+                return GetLastError() == ERROR_ACCESS_DENIED;
             }
             CloseHandle(handle);
             true
@@ -58,11 +63,24 @@ mod imp {
 }
 
 impl InstanceLock {
-    /// 占用一个名字；别的进程已占用时返回 None。非 Windows 平台总是成功（不做检测）。
+    /// 独占一个名字；别的进程已占用时返回 None。非 Windows 平台总是成功（不做检测）。
     pub fn acquire(name: &str) -> Option<Self> {
         #[cfg(windows)]
         {
-            imp::create(name).map(|handle| Self { handle })
+            imp::create(name, true).map(|handle| Self { handle })
+        }
+        #[cfg(not(windows))]
+        {
+            let _ = name;
+            Some(Self {})
+        }
+    }
+
+    /// 共同持有一个名字（不排他）：开了两个主程序窗口时，关掉其中一个，另一个仍然"在"。
+    pub fn hold(name: &str) -> Option<Self> {
+        #[cfg(windows)]
+        {
+            imp::create(name, false).map(|handle| Self { handle })
         }
         #[cfg(not(windows))]
         {

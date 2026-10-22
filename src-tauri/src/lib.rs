@@ -62,7 +62,7 @@ pub fn run() {
         .setup(move |app| {
             set_profile_window_title(app.handle(), profile);
             // 让夜间后台分析看得到主程序开着（它会把分析交给主程序）。进程退出时系统自动释放。
-            let gui_lock = utils::instance::InstanceLock::acquire(
+            let gui_lock = utils::instance::InstanceLock::hold(
                 &services::night_service::gui_mutex_name(&app.config().identifier),
             );
 
