@@ -1,0 +1,561 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Frame Probe</title>
+<!--
+  R0 帧时间探针（docs/11 §4）。离线单文件，不依赖任何 CDN。
+  在 Chrome / Edge 里直接打开本文件。页面自动上下滚动一个长图墙（每张卡片带圆角、阴影、渐变、
+  滤镜，部分元素有毛玻璃和动画，用来压合成器），同时用 requestAnimationFrame 统计帧间隔，
+  按 5 秒窗口记录超过 20ms / 33ms 的帧数（over33 实际阈值 34ms，见 OVER33_MS；dropped =
+  间隔超过 1.5 个刷新周期，即任何丢帧）。测的是"其他应用感受到的卡"，能反映 GPU 争用。
+
+  URL 参数（都可选）：
+    label=S2          场景标签（写进 CSV 和文件名）
+    auto=0            关闭自动滚动（改为手动滚动）
+    speed=1200        自动滚动速度 px/s
+    duration=60       测满 N 秒后自动停止
+    autodownload=1    定时结束后自动下载 CSV
+  例：frame_probe.html?label=S2&duration=60&autodownload=1
+
+  注意：窗口必须保持可见（不要最小化、不要被其他窗口完全挡住），否则浏览器会降低 rAF 频率，
+  该窗口的数据会被标记为 visible=0，summarize.py 会剔除。
+-->
+<style>
+  :root {
+    color-scheme: light;
+    --bg: #eef0f4;
+    --fg: #1c2230;
+    --muted: #5d6778;
+    --card: #ffffff;
+    --panel: rgba(255, 255, 255, 0.72);
+    --line: rgba(28, 34, 48, 0.12);
+    --accent: #2f5fe8;
+    --warn: #c2410c;
+    --bad: #b91c1c;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      color-scheme: dark;
+      --bg: #101319;
+      --fg: #e7e9ef;
+      --muted: #9aa3b2;
+      --card: #1a1f29;
+      --panel: rgba(22, 26, 35, 0.74);
+      --line: rgba(231, 233, 239, 0.12);
+      --accent: #7c9dff;
+      --warn: #fb923c;
+      --bad: #f87171;
+    }
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font: 14px/1.45 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+  }
+  .hero {
+    min-height: 260px;
+    padding: 48px 24px 32px;
+    background: linear-gradient(135deg, #3451d1, #7b3fd6 45%, #e0567c);
+    color: #fff;
+  }
+  .hero h1 { margin: 0 0 8px; font-size: 32px; }
+  .hero p { margin: 0; max-width: 720px; opacity: 0.9; }
+  .section { padding: 0 24px 32px; }
+  .section h2 {
+    position: sticky;
+    top: 0;
+    z-index: 2;
+    margin: 0 -24px 16px;
+    padding: 12px 24px;
+    font-size: 17px;
+    background: color-mix(in srgb, var(--bg) 70%, transparent);
+    backdrop-filter: blur(10px);
+    border-bottom: 1px solid var(--line);
+  }
+  .grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(210px, 1fr));
+    gap: 16px;
+  }
+  .card {
+    position: relative;
+    overflow: hidden;
+    border-radius: 14px;
+    background: var(--card);
+    box-shadow: 0 10px 24px rgba(15, 23, 42, 0.16), 0 2px 6px rgba(15, 23, 42, 0.1);
+  }
+  .card img {
+    display: block;
+    width: 100%;
+    aspect-ratio: 4 / 3;
+    object-fit: cover;
+    background: #8892a6;
+  }
+  .card:nth-child(5n + 1) img { filter: saturate(1.35) contrast(1.08); }
+  .card:nth-child(9n + 4) { transform: rotate(-1.1deg); }
+  .card:nth-child(13n + 7) img { filter: blur(1.5px) brightness(1.05); }
+  .card .meta { padding: 9px 12px 11px; }
+  .card .meta b { display: block; font-size: 13px; }
+  .card .meta span { color: var(--muted); font-size: 12px; }
+  .card .glass {
+    position: absolute;
+    left: 10px;
+    top: 10px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    color: #fff;
+    font-size: 12px;
+    background: rgba(255, 255, 255, 0.2);
+    backdrop-filter: blur(6px) saturate(1.3);
+  }
+  .card .dot {
+    position: absolute;
+    right: 12px;
+    top: 12px;
+    width: 18px;
+    height: 18px;
+    border-radius: 50%;
+    border: 3px solid rgba(255, 255, 255, 0.85);
+    border-top-color: transparent;
+    animation: spin 1.2s linear infinite;
+  }
+  .card:nth-child(4n) .dot { animation: pulse 1.6s ease-in-out infinite; border-top-color: rgba(255, 255, 255, 0.85); }
+  @keyframes spin { to { transform: rotate(360deg); } }
+  @keyframes pulse { 50% { transform: scale(0.7); opacity: 0.5; } }
+
+  #panel {
+    position: fixed;
+    right: 12px;
+    top: 12px;
+    z-index: 10;
+    width: min(360px, calc(100vw - 24px));
+    max-height: calc(100vh - 24px);
+    overflow: auto;
+    padding: 12px 14px;
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    background: var(--panel);
+    backdrop-filter: blur(14px) saturate(1.2);
+    box-shadow: 0 12px 32px rgba(0, 0, 0, 0.22);
+    font-variant-numeric: tabular-nums;
+  }
+  #panel h3 { margin: 0 0 8px; font-size: 15px; }
+  #panel .row { display: flex; flex-wrap: wrap; align-items: center; gap: 6px 10px; margin: 6px 0; }
+  #panel label { color: var(--muted); }
+  #panel input[type="text"] { width: 90px; }
+  #panel button { padding: 3px 10px; }
+  #panel table { width: 100%; border-collapse: collapse; margin-top: 6px; font-size: 12px; }
+  #panel th, #panel td { padding: 2px 4px; text-align: right; border-bottom: 1px solid var(--line); }
+  #panel th:first-child, #panel td:first-child { text-align: left; }
+  #panel .big { font-size: 13px; }
+  #panel .warn { color: var(--warn); }
+  #panel .bad { color: var(--bad); }
+  #panel .muted { color: var(--muted); font-size: 12px; }
+</style>
+</head>
+<body>
+<div id="panel" aria-live="polite">
+  <h3>帧时间探针</h3>
+  <div class="row">
+    <label for="label">标签</label><input id="label" type="text" spellcheck="false">
+    <label><input id="auto" type="checkbox"> 自动滚动</label>
+    <select id="speed" aria-label="滚动速度">
+      <option value="600">600 px/s</option>
+      <option value="1200">1200 px/s</option>
+      <option value="2400">2400 px/s</option>
+    </select>
+  </div>
+  <div class="row">
+    <button id="toggle" type="button">暂停</button>
+    <button id="reset" type="button">重置</button>
+    <button id="download" type="button">下载 CSV</button>
+  </div>
+  <div class="row big" id="status">准备中…</div>
+  <div class="row big" id="current"></div>
+  <div class="row big" id="total"></div>
+  <table>
+    <thead><tr><th>窗口</th><th>FPS</th><th>p95</th><th>max</th><th>&gt;20</th><th>&gt;33</th></tr></thead>
+    <tbody id="windows"></tbody>
+  </table>
+  <p class="muted">保持本窗口可见；被最小化或完全遮挡时浏览器会降频，该窗口记为 visible=0。</p>
+</div>
+
+<header class="hero">
+  <h1>PhotoView+ 帧时间探针</h1>
+  <p>页面会自动上下滚动下面的图墙，用 requestAnimationFrame 统计帧间隔，每 5 秒一个窗口。测量期间不要切走这个窗口。</p>
+</header>
+<main id="content"></main>
+
+<script>
+"use strict";
+(() => {
+  const WINDOW_MS = 5000;
+  // 60Hz 下单次丢帧的间隔正好是 33.3ms；留 0.7ms 余量，over33 = 至少连丢 2 帧（任何丢帧看 dropped）。
+  const OVER33_MS = 34;
+  const IMAGE_COUNT = 96;
+  const SECTIONS = 12;
+  const CARDS_PER_SECTION = 60;
+  const params = new URLSearchParams(location.search);
+
+  const state = {
+    label: safeLabel(params.get("label") || "run"),
+    auto: params.get("auto") !== "0",
+    speed: Number(params.get("speed")) || 1200,
+    duration: Math.max(0, Number(params.get("duration")) || 0),
+    autoDownload: params.get("autodownload") === "1",
+    ready: false,
+    running: true,
+    startTs: 0,
+    startWall: 0,
+    windows: [],
+    cur: null,
+    refreshMs: null,
+    totals: { frames: 0, over20: 0, over33: 0, ms: 0 },
+    stoppedByTimer: false,
+    timerDone: false,
+  };
+
+  const $ = (id) => document.getElementById(id);
+  const ui = {
+    label: $("label"), auto: $("auto"), speed: $("speed"), toggle: $("toggle"),
+    reset: $("reset"), download: $("download"), status: $("status"),
+    current: $("current"), total: $("total"), windows: $("windows"),
+  };
+
+  function safeLabel(s) {
+    return String(s).replace(/[\\/:*?"<>|\s,]+/g, "_").replace(/^_+|_+$/g, "") || "run";
+  }
+  function pad(n, w = 2) { return String(n).padStart(w, "0"); }
+  function localIso(ms) {
+    const d = new Date(ms);
+    const off = -d.getTimezoneOffset();
+    const sign = off >= 0 ? "+" : "-";
+    const a = Math.abs(off);
+    return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:` +
+      `${pad(d.getMinutes())}:${pad(d.getSeconds())}.${pad(d.getMilliseconds(), 3)}${sign}${pad(Math.floor(a / 60))}:${pad(a % 60)}`;
+  }
+  function stamp(ms) {
+    const d = new Date(ms);
+    return `${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}`;
+  }
+  function pct(sorted, p) {
+    if (!sorted.length) return null;
+    const k = (sorted.length - 1) * p / 100;
+    const lo = Math.floor(k);
+    const hi = Math.ceil(k);
+    return lo === hi ? sorted[lo] : sorted[lo] + (sorted[hi] - sorted[lo]) * (k - lo);
+  }
+  function f1(v) { return v == null || !Number.isFinite(v) ? "" : v.toFixed(1); }
+  function f2(v) { return v == null || !Number.isFinite(v) ? "" : v.toFixed(2); }
+
+  // ---- 内容：固定种子生成，每次打开都一样 ----
+  function mulberry32(seed) {
+    let a = seed >>> 0;
+    return () => {
+      a = (a + 0x6d2b79f5) >>> 0;
+      let t = a;
+      t = Math.imul(t ^ (t >>> 15), t | 1);
+      t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+    };
+  }
+  const rand = mulberry32(20261022);
+  const hsl = (h, s, l, a = 1) => `hsla(${h.toFixed(0)}, ${s}%, ${l}%, ${a})`;
+
+  async function makeImages(n, w, h) {
+    const canvas = document.createElement("canvas");
+    canvas.width = w;
+    canvas.height = h;
+    const ctx = canvas.getContext("2d", { willReadFrequently: true });
+    const urls = [];
+    for (let i = 0; i < n; i++) {
+      const g = ctx.createLinearGradient(0, 0, w, h);
+      g.addColorStop(0, hsl(rand() * 360, 65, 58));
+      g.addColorStop(1, hsl(rand() * 360, 70, 30));
+      ctx.globalAlpha = 1;
+      ctx.fillStyle = g;
+      ctx.fillRect(0, 0, w, h);
+      for (let k = 0; k < 36; k++) {
+        ctx.globalAlpha = 0.12 + rand() * 0.45;
+        ctx.fillStyle = hsl(rand() * 360, 70, 50 + rand() * 30);
+        ctx.beginPath();
+        ctx.arc(rand() * w, rand() * h, 6 + rand() * 70, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      ctx.globalAlpha = 1;
+      const img = ctx.getImageData(0, 0, w, h);
+      const px = img.data;
+      for (let p = 0; p < px.length; p += 4) {
+        const noise = (rand() - 0.5) * 28;
+        px[p] += noise;
+        px[p + 1] += noise;
+        px[p + 2] += noise;
+      }
+      ctx.putImageData(img, 0, 0);
+      const blob = await new Promise((resolve) => canvas.toBlob(resolve, "image/jpeg", 0.86));
+      urls.push(URL.createObjectURL(blob));
+      if (i % 8 === 7) ui.status.textContent = `准备中… 生成图片 ${i + 1}/${n}`;
+    }
+    return urls;
+  }
+
+  function buildContent(urls) {
+    const frag = document.createDocumentFragment();
+    const places = ["海边", "山谷", "街角", "雪地", "夜景", "花园", "沙漠", "港口", "森林", "古镇", "湖畔", "高原"];
+    let index = 0;
+    for (let s = 0; s < SECTIONS; s++) {
+      const section = document.createElement("section");
+      section.className = "section";
+      const h2 = document.createElement("h2");
+      h2.textContent = `2026 年 ${s + 1} 月 · ${places[s % places.length]}（${CARDS_PER_SECTION} 张）`;
+      section.appendChild(h2);
+      const grid = document.createElement("div");
+      grid.className = "grid";
+      for (let c = 0; c < CARDS_PER_SECTION; c++) {
+        index++;
+        const card = document.createElement("div");
+        card.className = "card";
+        const img = document.createElement("img");
+        img.alt = "";
+        img.decoding = "async";
+        img.loading = "lazy";
+        img.src = urls[(index * 7) % urls.length];
+        const glass = document.createElement("span");
+        glass.className = "glass";
+        glass.textContent = `#${index}`;
+        const dot = document.createElement("span");
+        dot.className = "dot";
+        const meta = document.createElement("div");
+        meta.className = "meta";
+        const b = document.createElement("b");
+        b.textContent = `IMG_${String(20260000 + index * 37)}.JPG`;
+        const span = document.createElement("span");
+        span.textContent = `${(1.2 + rand() * 6).toFixed(1)} MB · ${4000 + Math.floor(rand() * 4000)}×${3000 + Math.floor(rand() * 2000)}`;
+        meta.append(b, span);
+        card.append(img, glass, dot, meta);
+        grid.appendChild(card);
+      }
+      section.appendChild(grid);
+      frag.appendChild(section);
+    }
+    document.getElementById("content").appendChild(frag);
+  }
+
+  // ---- 自动滚动（来回） ----
+  let scrollPos = 0;
+  let scrollDir = 1;
+  function autoscroll(dtMs) {
+    const el = document.scrollingElement || document.documentElement;
+    const max = el.scrollHeight - el.clientHeight;
+    if (max <= 0) return;
+    if (Math.abs(el.scrollTop - scrollPos) > 4) scrollPos = el.scrollTop; // 被手动拖动过
+    scrollPos += scrollDir * state.speed * dtMs / 1000;
+    if (scrollPos >= max) { scrollPos = max; scrollDir = -1; }
+    else if (scrollPos <= 0) { scrollPos = 0; scrollDir = 1; }
+    el.scrollTop = scrollPos;
+  }
+
+  // ---- 帧采样 ----
+  function newWindow(ts) {
+    return { t0: ts, wall0: state.startWall + (ts - state.startTs), dts: [], hidden: document.hidden, auto: state.auto };
+  }
+  function finalizeWindow(w, tsEnd) {
+    const sorted = w.dts.slice().sort((a, b) => a - b);
+    const ms = tsEnd - w.t0;
+    const med = pct(sorted, 50);
+    if (!w.hidden && med != null && sorted.length >= 20) {
+      state.refreshMs = state.refreshMs == null ? med : Math.min(state.refreshMs, med);
+    }
+    const period = state.refreshMs || 16.7;
+    const row = {
+      window_start: localIso(w.wall0),
+      window_end: localIso(w.wall0 + ms),
+      elapsed_s: ((tsEnd - state.startTs) / 1000).toFixed(3),
+      window_s: (ms / 1000).toFixed(3),
+      label: state.label,
+      frames: sorted.length,
+      fps: ms > 0 ? sorted.length / (ms / 1000) : 0,
+      mean_ms: sorted.length ? sorted.reduce((a, b) => a + b, 0) / sorted.length : null,
+      p50_ms: med,
+      p95_ms: pct(sorted, 95),
+      p99_ms: pct(sorted, 99),
+      max_ms: sorted.length ? sorted[sorted.length - 1] : null,
+      over20: sorted.filter((d) => d > 20).length,
+      over33: sorted.filter((d) => d > OVER33_MS).length,
+      over50: sorted.filter((d) => d > 50).length,
+      dropped: sorted.filter((d) => d > period * 1.5).length,
+      refresh_hz: period ? 1000 / period : null,
+      autoscroll: w.auto ? 1 : 0,
+      speed_px_s: state.speed,
+      visible: w.hidden ? 0 : 1,
+    };
+    state.windows.push(row);
+    if (row.visible) {
+      state.totals.frames += row.frames;
+      state.totals.over20 += row.over20;
+      state.totals.over33 += row.over33;
+      state.totals.ms += ms;
+    }
+    renderWindows();
+  }
+
+  let lastTs = 0;
+  let skipNext = true;
+  let lastUi = 0;
+  function onFrame(ts) {
+    const dt = lastTs ? ts - lastTs : 0;
+    if (state.ready && state.running) {
+      if (!state.cur) state.cur = newWindow(ts);
+      if (dt > 0 && !skipNext) state.cur.dts.push(dt);
+      if (state.auto && dt > 0) autoscroll(Math.min(dt, 100));
+      if (ts - state.cur.t0 >= WINDOW_MS) {
+        finalizeWindow(state.cur, ts);
+        state.cur = newWindow(ts);
+      }
+      if (state.duration > 0 && !state.timerDone && ts - state.startTs >= state.duration * 1000) stopByTimer(ts);
+      if (ts - lastUi > 500) { lastUi = ts; renderCurrent(ts); }
+    }
+    skipNext = false;
+    lastTs = ts;
+    requestAnimationFrame(onFrame);
+  }
+  document.addEventListener("visibilitychange", () => {
+    if (document.hidden) { if (state.cur) state.cur.hidden = true; }
+    else skipNext = true; // 隐藏期间的长间隔不计
+  });
+
+  function stopByTimer(ts) {
+    if (state.cur && state.cur.dts.length) finalizeWindow(state.cur, ts);
+    state.cur = null;
+    state.running = false;
+    state.auto = false;
+    state.stoppedByTimer = true;
+    state.timerDone = true; // 之后点"继续"就不再定时
+    ui.auto.checked = false;
+    ui.toggle.textContent = "继续";
+    renderCurrent(ts);
+    if (state.autoDownload) download();
+  }
+
+  // ---- 界面 ----
+  function renderCurrent(ts) {
+    const elapsed = state.startTs ? (ts - state.startTs) / 1000 : 0;
+    const remain = state.duration > 0 ? Math.max(0, state.duration - elapsed) : null;
+    let status = state.running ? "测量中" : (state.stoppedByTimer ? "已到时停止" : "已暂停");
+    status += ` · ${elapsed.toFixed(0)}s`;
+    if (remain != null && state.running) status += `（剩 ${remain.toFixed(0)}s）`;
+    status += ` · 窗口 ${state.windows.length}`;
+    if (state.refreshMs) status += ` · 刷新率约 ${(1000 / state.refreshMs).toFixed(0)}Hz`;
+    if (document.hidden) status += " · 页面不可见！";
+    ui.status.textContent = status;
+    const cur = state.cur;
+    if (cur && cur.dts.length) {
+      const sorted = cur.dts.slice().sort((a, b) => a - b);
+      const over33 = sorted.filter((d) => d > OVER33_MS).length;
+      ui.current.innerHTML = `当前窗口：${sorted.length} 帧 · p95 ${f1(pct(sorted, 95))}ms · max ${f1(sorted[sorted.length - 1])}ms · ` +
+        `<span class="${over33 ? "bad" : ""}">&gt;33ms ${over33}</span>`;
+    }
+    const t = state.totals;
+    if (t.frames) {
+      const minutes = t.ms / 60000;
+      ui.total.innerHTML = `累计：${t.frames} 帧 · &gt;20ms ${(t.over20 / t.frames * 100).toFixed(2)}% · ` +
+        `<span class="${t.over33 / t.frames > 0.01 ? "bad" : ""}">&gt;33ms ${(t.over33 / t.frames * 100).toFixed(2)}%（${(t.over33 / minutes).toFixed(1)}/min）</span>`;
+    }
+  }
+  function renderWindows() {
+    const rows = state.windows.slice(-12).reverse();
+    ui.windows.innerHTML = rows.map((r) =>
+      `<tr${r.visible ? "" : ' class="warn"'}><td>${r.elapsed_s.split(".")[0]}s${r.visible ? "" : " 隐"}</td>` +
+      `<td>${f1(r.fps)}</td><td>${f1(r.p95_ms)}</td><td>${f1(r.max_ms)}</td>` +
+      `<td>${r.over20}</td><td class="${r.over33 ? "bad" : ""}">${r.over33}</td></tr>`).join("");
+  }
+
+  const CSV_COLUMNS = ["window_start", "window_end", "elapsed_s", "window_s", "label", "frames", "fps", "mean_ms",
+    "p50_ms", "p95_ms", "p99_ms", "max_ms", "over20", "over33", "over50", "dropped", "refresh_hz",
+    "autoscroll", "speed_px_s", "visible"];
+  function toCsv() {
+    const lines = [CSV_COLUMNS.join(",")];
+    for (const r of state.windows) {
+      lines.push(CSV_COLUMNS.map((c) => {
+        const v = r[c];
+        if (v == null) return "";
+        if (typeof v === "number") return Number.isInteger(v) ? String(v) : v.toFixed(3);
+        return /[",\n]/.test(v) ? `"${v.replace(/"/g, '""')}"` : v;
+      }).join(","));
+    }
+    return `${lines.join("\r\n")}\r\n`;
+  }
+  function download() {
+    if (state.cur && state.cur.dts.length >= 10 && state.running) {
+      // 把进行中的窗口也写出去，避免最后几秒丢失
+      finalizeWindow(state.cur, lastTs);
+      state.cur = newWindow(lastTs);
+    }
+    const blob = new Blob([`﻿${toCsv()}`], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = `frames_${state.label}_${stamp(state.startWall || Date.now())}.csv`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10000);
+  }
+
+  ui.label.value = state.label;
+  ui.auto.checked = state.auto;
+  ui.speed.value = String(state.speed);
+  if (ui.speed.value !== String(state.speed)) {
+    const opt = document.createElement("option");
+    opt.value = String(state.speed);
+    opt.textContent = `${state.speed} px/s`;
+    ui.speed.appendChild(opt);
+    ui.speed.value = String(state.speed);
+  }
+  ui.label.addEventListener("change", () => { state.label = safeLabel(ui.label.value); ui.label.value = state.label; });
+  ui.auto.addEventListener("change", () => { state.auto = ui.auto.checked; });
+  ui.speed.addEventListener("change", () => { state.speed = Number(ui.speed.value) || 1200; });
+  ui.toggle.addEventListener("click", () => {
+    state.running = !state.running;
+    if (!state.running && state.cur && state.cur.dts.length >= 10) finalizeWindow(state.cur, lastTs);
+    state.cur = null;
+    skipNext = true;
+    ui.toggle.textContent = state.running ? "暂停" : "继续";
+  });
+  ui.reset.addEventListener("click", () => {
+    state.windows = [];
+    state.cur = null;
+    state.totals = { frames: 0, over20: 0, over33: 0, ms: 0 };
+    state.startTs = lastTs || performance.now();
+    state.startWall = Date.now();
+    state.stoppedByTimer = false;
+    state.timerDone = false;
+    state.running = true;
+    skipNext = true;
+    ui.toggle.textContent = "暂停";
+    ui.current.textContent = "";
+    ui.total.textContent = "";
+    renderWindows();
+  });
+  ui.download.addEventListener("click", download);
+  // 供 CDP / 控制台读取：frameProbe.csv() 直接拿到 CSV 文本，不必走下载
+  window.frameProbe = { csv: toCsv, windows: () => state.windows.slice(), download };
+
+  makeImages(IMAGE_COUNT, 480, 360).then((urls) => {
+    buildContent(urls);
+    requestAnimationFrame((ts) => {
+      state.startTs = ts;
+      state.startWall = Date.now();
+      state.ready = true;
+      skipNext = true;
+      ui.status.textContent = "测量中";
+    });
+  });
+  requestAnimationFrame(onFrame);
+})();
+</script>
+</body>
+</html>
