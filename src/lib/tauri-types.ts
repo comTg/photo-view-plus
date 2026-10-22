@@ -192,6 +192,16 @@ export interface AppSettings {
   aiWhileActive: boolean;
   /** 大模型只在空闲时运行（默认开）。 */
   vlmIdleOnly: boolean;
+  /** 大模型打标（docs/10 A6），默认关。 */
+  vlmEnabled: boolean;
+  /** llama-server 与模型文件；三项都空时自动查找。 */
+  vlmServerExe: string;
+  vlmModelPath: string;
+  vlmMmprojPath: string;
+  /** llama-server 并发槽位（-np）。 */
+  vlmParallel: number;
+  /** 送模型的图片长边。 */
+  vlmLongEdge: number;
 }
 
 export interface AppSettingsPatch {
@@ -212,6 +222,49 @@ export interface AppSettingsPatch {
   idleThresholdMinutes?: number;
   aiWhileActive?: boolean;
   vlmIdleOnly?: boolean;
+  vlmEnabled?: boolean;
+  vlmServerExe?: string;
+  vlmModelPath?: string;
+  vlmMmprojPath?: string;
+  vlmParallel?: number;
+  vlmLongEdge?: number;
+}
+
+// ===== 大模型打标（docs/10 A6） =====
+
+export interface VlmServerStatus {
+  /** stopped | starting | ready | degraded */
+  state: string;
+  /** 是否由本应用启动（复用外部服务时为 false）。 */
+  owned: boolean;
+  pid: number | null;
+  port: number;
+  lastError: string | null;
+  startsLastMinute: number;
+  loadSecs: number | null;
+}
+
+export interface AnalysisProgress {
+  /** disabled | notConfigured | waiting | paused | starting | running | idle | error */
+  state: string;
+  reason: string | null;
+  pending: number;
+  analyzed: number;
+  failed: number;
+  inflight: number;
+  sessionDone: number;
+  sessionFailed: number;
+  secsPerImage: number | null;
+  etaSecs: number | null;
+  lastError: string | null;
+  model: string;
+  server: VlmServerStatus;
+}
+
+export interface VlmPaths {
+  exe: string;
+  model: string;
+  mmproj: string;
 }
 
 // ===== 后台资源治理（docs/11 R2） =====

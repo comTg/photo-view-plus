@@ -121,6 +121,26 @@ pub fn run() {
                 let _ = governor_app.emit("system:load_mode", status);
             });
 
+            // docs/10 A6：VLM 打标。llama-server 按需启动（或复用 8081 上已有的服务），
+            // 只在治理器允许时投递；输出日志与主日志放在一起。
+            let vlm_supervisor = Arc::new(
+                services::vlm_supervisor::VlmSupervisor::new(
+                    services::vlm_supervisor::DEFAULT_PORT,
+                    log_dir_for(profile),
+                )
+                .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
+            );
+            let analysis_pipeline = services::analysis_pipeline::AnalysisPipeline::new(
+                pool.clone(),
+                paths.clone(),
+                ai_supervisor.clone(),
+                vlm_supervisor,
+                governor.clone(),
+            );
+            analysis_pipeline
+                .clone()
+                .spawn_loop(app.handle().clone(), startup_gate.clone());
+
             let ai_pipeline = Arc::new(services::ai_pipeline::AiPipeline::new(
                 pool.clone(),
                 scheduler.clone(),
@@ -173,6 +193,7 @@ pub fn run() {
             app.manage(ai_supervisor);
             app.manage(ai_pipeline);
             app.manage(governor);
+            app.manage(analysis_pipeline);
             app.manage(startup_gate);
             app.manage(watcher_service);
             Ok(())
@@ -236,6 +257,11 @@ pub fn run() {
             commands::analysis::analysis_import_memora,
             commands::analysis::analysis_get,
             commands::analysis::analysis_status,
+            commands::analysis::analysis_progress,
+            commands::analysis::vlm_detect_paths,
+            commands::analysis::analysis_requeue_outdated,
+            commands::analysis::analysis_retry_failed,
+            commands::analysis::vlm_server_stop,
             commands::ocr::ocr_run,
             commands::ocr::ocr_status,
             commands::face::face_run,

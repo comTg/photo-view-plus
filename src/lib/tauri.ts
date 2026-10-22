@@ -8,6 +8,7 @@ import type {
   AiSearchResult,
   AiTag,
   AiWorkerStatus,
+  AnalysisProgress,
   AnalysisStatus,
   AppSettings,
   AppSettingsPatch,
@@ -54,6 +55,7 @@ import type {
   UndoEntry,
   UndoOutcome,
   UpdateRootArgs,
+  VlmPaths,
   WatcherStatus,
 } from "./tauri-types";
 
@@ -230,6 +232,26 @@ export async function analysisImportMemora(dbPath: string): Promise<MemoraImport
 
 export async function analysisGet(imageId: number): Promise<ImageAnalysis | null> {
   return invoke<ImageAnalysis | null>("analysis_get", { imageId });
+}
+
+export async function analysisProgress(): Promise<AnalysisProgress> {
+  return invoke<AnalysisProgress>("analysis_progress");
+}
+
+export async function vlmDetectPaths(): Promise<VlmPaths | null> {
+  return invoke<VlmPaths | null>("vlm_detect_paths");
+}
+
+export async function analysisRequeueOutdated(): Promise<number> {
+  return invoke<number>("analysis_requeue_outdated");
+}
+
+export async function analysisRetryFailed(): Promise<number> {
+  return invoke<number>("analysis_retry_failed");
+}
+
+export async function vlmServerStop(): Promise<boolean> {
+  return invoke<boolean>("vlm_server_stop");
 }
 
 export async function analysisStatus(): Promise<AnalysisStatus> {

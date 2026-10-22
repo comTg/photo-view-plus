@@ -245,7 +245,7 @@ button {
 .app-footer {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr) minmax(260px, 1fr) auto;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr) minmax(260px, 1fr) auto auto;
   gap: 12px;
   align-items: center;
   min-width: 0;
@@ -1175,7 +1175,7 @@ body {
 }
 
 .app-footer {
-  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.35fr) minmax(260px, 1fr) auto;
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.35fr) minmax(260px, 1fr) auto auto;
   border-top-color: var(--border-soft);
   background: rgba(251, 252, 255, 0.86);
   color: var(--text-muted);
@@ -1819,6 +1819,15 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
+}
+
+.settings-field--wide {
+  grid-column: 1 / -1;
+}
+
+.analysis-badge {
+  max-width: 280px;
+  color: var(--text-muted);
 }
 
 .settings-hint {

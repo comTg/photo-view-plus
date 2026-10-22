@@ -96,6 +96,40 @@ pub fn replace_image_tags(
     Ok(written)
 }
 
+/// 用一组新标签替换某张图在 `replace_sources` 这些来源下的全部标签（在调用方的事务里执行）。
+/// VLM 结果写入时用它同时清掉 memora 导入的类别标签（docs/10 §7：VLM 覆盖 memora）。
+pub fn replace_source_tags(
+    conn: &Connection,
+    image_id: i64,
+    replace_sources: &[&str],
+    tags: &[NewTagScore],
+    now: i64,
+) -> AppResult<()> {
+    for source in replace_sources {
+        conn.prepare_cached("DELETE FROM image_tags WHERE image_id = ?1 AND source = ?2")?
+            .execute(params![image_id, source])?;
+    }
+    for tag in tags {
+        let name = tag.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        let tag_id = upsert_tag(conn, name, &tag.source, tag.category.as_deref(), now)?;
+        conn.prepare_cached(
+            "INSERT OR REPLACE INTO image_tags(image_id, tag_id, score, source, created_at)
+             VALUES (?1, ?2, ?3, ?4, ?5)",
+        )?
+        .execute(params![
+            image_id,
+            tag_id,
+            tag.score.clamp(0.0, 1.0),
+            tag.source,
+            now
+        ])?;
+    }
+    Ok(())
+}
+
 /// 清空所有 AI 标签，并把"缩略图就绪、未删除"的图片重置为待打标签，
 /// 让后台流水线用当前 tagger（如换成 RAM-plus 中文）重新打一遍。
 /// 返回被重置 tag_status 的图片数。user 来源的标签与引用不受影响。

@@ -8,6 +8,8 @@ dependencies = [
     "uvicorn[standard]>=0.30.0",
     "pydantic>=2.8.0",
     "pillow>=10.4.0",
+    # VLM 打标读原图：iPhone 的 HEIC / HEIF（docs/10 §4、A6）。
+    "pillow-heif>=0.18.0",
     "huggingface_hub>=0.24.0",
 ]
 
@@ -51,7 +53,7 @@ tagger = [
 ]
 
 [dependency-groups]
-dev = []
+dev = ["pytest>=8.0"]
 
 [tool.uv.sources]
 torch = { index = "pytorch-cu128" }

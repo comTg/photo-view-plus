@@ -1,4 +1,5 @@
 import { RootList } from "@/components/sidebar/RootList";
+import { AnalysisBadge, AnalysisSettings } from "@/components/system/AnalysisSettings";
 import { LoadModeControl } from "@/components/system/LoadModeControl";
 import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useRoots } from "@/hooks/useRoots";
@@ -1547,6 +1548,7 @@ export default function App() {
             onSearchIndexRebuild={handleSearchIndexRebuild}
             onImportMemora={handleImportMemora}
             onAiDownloadModel={handleAiDownloadModel}
+            onMessage={setToast}
           />
         ) : activeView === "dedup" ? (
           <Suspense fallback={<div className="loading-row">正在加载去重视图…</div>}>
@@ -1762,6 +1764,7 @@ export default function App() {
           aiStatus={aiStatus}
           aiPipeline={aiPipeline}
         />
+        <AnalysisBadge />
         <LoadModeControl onError={setToast} />
       </footer>
       {toast && (
@@ -3060,6 +3063,7 @@ function SettingsView({
   onSearchIndexRebuild,
   onImportMemora,
   onAiDownloadModel,
+  onMessage,
 }: {
   settings: AppSettings | null;
   aiStatus: AiWorkerStatus | null;
@@ -3075,6 +3079,7 @@ function SettingsView({
   onSearchIndexRebuild: () => Promise<void>;
   onImportMemora: () => Promise<void>;
   onAiDownloadModel: (modelKey: string) => Promise<void>;
+  onMessage: (message: string) => void;
 }) {
   if (!settings) {
     return <EmptyState title="正在读取设置" body="配置文件位于应用本地数据目录。" />;
@@ -3301,6 +3306,8 @@ function SettingsView({
             />
           </label>
         </section>
+
+        <AnalysisSettings settings={settings} onPatch={onPatch} onMessage={onMessage} />
 
         <div className="settings-panel settings-panel--wide">
           <div className="settings-panel__header">

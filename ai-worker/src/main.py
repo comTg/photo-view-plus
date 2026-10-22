@@ -15,6 +15,7 @@ from .api.models import router as models_router
 from .api.ocr import router as ocr_router
 from .api.tagger import router as tagger_router
 from .api.text import router as text_router
+from .api.vlm import router as vlm_router
 
 
 app = FastAPI(title="PhotoView+ AI Worker", version="0.0.1")
@@ -25,6 +26,7 @@ app.include_router(models_router)
 app.include_router(ocr_router)
 app.include_router(face_router)
 app.include_router(text_router)
+app.include_router(vlm_router)
 
 
 def parse_args() -> argparse.Namespace:

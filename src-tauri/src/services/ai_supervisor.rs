@@ -15,7 +15,8 @@ use tokio::time::Instant;
 use crate::error::{AppError, AppResult};
 use crate::services::ai_client::{
     AiHttpClient, ClipEmbedItem, ClipEmbedResponse, FaceDetectItem, FaceDetectResponse, OcrItem,
-    OcrResponse, TaggerItem, TaggerResponse, TextEmbedResponse, TextEncodeResponse, WorkerHealth,
+    OcrResponse, TaggerItem, TaggerResponse, TextEmbedResponse, TextEncodeResponse,
+    VlmAnalyzeParams, VlmAnalyzeResponse, WorkerHealth,
 };
 use crate::services::resource_governor::{GpuGate, GpuPolicy};
 
@@ -305,6 +306,22 @@ impl AiSupervisor {
     ) -> AppResult<TextEmbedResponse> {
         let port = self.ready_port().await?;
         self.client.embed_texts(port, texts, model, query).await
+    }
+
+    /// VLM 分析一张图（worker 读图、调 llama-server、规范化输出）。不经过 GPU 闸门：推理在
+    /// llama-server 里，由分析流水线按负载模式投递（docs/10 A6）。
+    pub async fn vlm_analyze(
+        &self,
+        image: Vec<u8>,
+        params: &VlmAnalyzeParams,
+    ) -> AppResult<VlmAnalyzeResponse> {
+        let port = self.ready_port().await?;
+        self.client.vlm_analyze(port, image, params).await
+    }
+
+    /// worker 是否在运行（不为此启动）。
+    pub async fn is_running(&self) -> bool {
+        self.running_port().await.is_some()
     }
 
     pub async fn tag_images(&self, items: Vec<TaggerItem>) -> AppResult<TaggerResponse> {

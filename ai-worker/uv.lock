@@ -297,6 +297,15 @@ wheels = [
 ]
 
 [[package]]
+name = "iniconfig"
+version = "2.3.1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/01/e1/2069291243c926a2ff1cd706c7f3eeb9b62144bf60f77c9fb9ff2fb26bd3/iniconfig-2.3.1.tar.gz", hash = "sha256:67f4b9c50da0dedf52af349e7749a80a9057a5031199791b906c3bb3ae878960", size = 21209, upload-time = "2026-10-06T22:48:38.076Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/56/43/4ca9e49d27a1fcf6bece6f6aec0ea46bb9112489b93d4b688fb415457bdb/iniconfig-2.3.1-py3-none-any.whl", hash = "sha256:9121e2c1fdb355232495be3194c8dfe87ccc2d5dee45947b78e68f499790d7a7", size = 7552, upload-time = "2026-10-06T22:48:36.959Z" },
+]
+
+[[package]]
 name = "insightface"
 version = "2.1"
 source = { registry = "https://pypi.org/simple" }
@@ -682,6 +691,7 @@ dependencies = [
     { name = "fastapi" },
     { name = "huggingface-hub" },
     { name = "pillow" },
+    { name = "pillow-heif" },
     { name = "pydantic" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -712,6 +722,11 @@ tagger = [
     { name = "transformers" },
 ]
 
+[package.dev-dependencies]
+dev = [
+    { name = "pytest" },
+]
+
 [package.metadata]
 requires-dist = [
     { name = "fairscale", marker = "extra == 'tagger'", specifier = ">=0.4.13" },
@@ -724,6 +739,7 @@ requires-dist = [
     { name = "onnxruntime-gpu", marker = "extra == 'face'", specifier = ">=1.20.0" },
     { name = "open-clip-torch", marker = "extra == 'cuda'", specifier = ">=2.26.0" },
     { name = "pillow", specifier = ">=10.4.0" },
+    { name = "pillow-heif", specifier = ">=0.18.0" },
     { name = "pydantic", specifier = ">=2.8.0" },
     { name = "ram", marker = "extra == 'tagger'", git = "https://github.com/xinyu1205/recognize-anything.git" },
     { name = "rapidocr-onnxruntime", marker = "extra == 'ocr'", specifier = ">=1.4.0" },
@@ -737,7 +753,7 @@ requires-dist = [
 provides-extras = ["cuda", "models", "ocr", "face", "tagger"]
 
 [package.metadata.requires-dev]
-dev = []
+dev = [{ name = "pytest", specifier = ">=8.0" }]
 
 [[package]]
 name = "pillow"
@@ -763,6 +779,39 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/c3/28/ec0fc38107fc32536908034e990c47914c57cd7c5a3ece4d8d8f7ffd7e27/pillow-12.2.0-pp311-pypy311_pp73-manylinux_2_27_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:4a6c9fa44005fa37a91ebfc95d081e8079757d2e904b27103f4f5fa6f0bf78c0", size = 5355404, upload-time = "2026-04-01T14:46:06.33Z" },
     { url = "https://files.pythonhosted.org/packages/5e/8b/51b0eddcfa2180d60e41f06bd6d0a62202b20b59c68f5a132e615b75aecf/pillow-12.2.0-pp311-pypy311_pp73-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:25373b66e0dd5905ed63fa3cae13c82fbddf3079f2c8bf15c6fb6a35586324c1", size = 6002215, upload-time = "2026-04-01T14:46:08.83Z" },
     { url = "https://files.pythonhosted.org/packages/bc/60/5382c03e1970de634027cee8e1b7d39776b778b81812aaf45b694dfe9e28/pillow-12.2.0-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:bfa9c230d2fe991bed5318a5f119bd6780cda2915cca595393649fc118ab895e", size = 7080946, upload-time = "2026-04-01T14:46:11.734Z" },
+]
+
+[[package]]
+name = "pillow-heif"
+version = "1.8.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pillow" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/44/c1/82145984920ca055675af2c2795bd30da6f7461215c41f3c1eacb3d66353/pillow_heif-1.8.1.tar.gz", hash = "sha256:521ebffb8a181d56c3904e5a61f20903edee0d9d3275967b8fb345f866215c06", size = 17395786, upload-time = "2026-10-11T13:18:19.2Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/85/4d/dd392467616bb618a168e3475268e12a9e6f7a709baede13c13d40de8ac3/pillow_heif-1.8.1-cp311-cp311-macosx_10_15_x86_64.whl", hash = "sha256:a36557e0959f680582b6de5046e84f61d6cde5f9db4cd60086dc3d4434e29816", size = 4815367, upload-time = "2026-10-11T11:16:24.519Z" },
+    { url = "https://files.pythonhosted.org/packages/ac/17/4488241f4f348b08b48891ff06d624b72ad095ca0a3c09727f4ce8f7d609/pillow_heif-1.8.1-cp311-cp311-macosx_11_0_arm64.whl", hash = "sha256:961a0298ede61a7eb559c095662c90a9e567984cfc006527b8b902034388c609", size = 4309206, upload-time = "2026-10-11T11:16:26.326Z" },
+    { url = "https://files.pythonhosted.org/packages/23/2d/1f9b3a0795283c30586528b3eb1e810a087a3493b58e9c67931e7e179019/pillow_heif-1.8.1-cp311-cp311-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:446b58aae154e4a084124d383317fed1cc869ae402d1acea91c377ad18da0a6b", size = 6420056, upload-time = "2026-10-11T11:16:28.121Z" },
+    { url = "https://files.pythonhosted.org/packages/40/63/ad16ea9d8c3d3568b10de38896ba5787a3b84c1af8ec15d2c524ba19d940/pillow_heif-1.8.1-cp311-cp311-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:a94f02ccb61042820e9fc60b2a427d85377c6017d27b7594d33f26b1c78918e5", size = 5709404, upload-time = "2026-10-11T11:16:29.793Z" },
+    { url = "https://files.pythonhosted.org/packages/85/3f/54bf4f5421ef74e7ebb7a2b37428be16bc8b0681741114cfd04799009a84/pillow_heif-1.8.1-cp311-cp311-musllinux_1_2_aarch64.whl", hash = "sha256:72bd9d8c3f037ed3e4833dad5cfd3e45720a688b465a28df81c7586fb17c786b", size = 7454223, upload-time = "2026-10-11T11:16:31.667Z" },
+    { url = "https://files.pythonhosted.org/packages/93/42/663e4cbeae8832ceb595daf4edc0c2506e9a7a223d5b157a98d6809dfd97/pillow_heif-1.8.1-cp311-cp311-musllinux_1_2_x86_64.whl", hash = "sha256:3ca20c0ce72d2884011b642ae57ad1305cfd0bf80c3c07ebdf140cf8e5dd7102", size = 6745450, upload-time = "2026-10-11T11:16:33.571Z" },
+    { url = "https://files.pythonhosted.org/packages/92/a0/1b9febe5d16652972d5fb5c1463a610acc1906f0cf0f58f90fe1dc13f1fb/pillow_heif-1.8.1-cp311-cp311-win_amd64.whl", hash = "sha256:9d9e1034a5d6a8ccea5a950545583d82c0c249bd68f8825bbc91436d652a170c", size = 6603993, upload-time = "2026-10-11T11:16:35.521Z" },
+    { url = "https://files.pythonhosted.org/packages/a7/2a/73a7fe34d77bfb08360923ced0778968d49d854be38b09d8913b5d3e72fa/pillow_heif-1.8.1-cp311-cp311-win_arm64.whl", hash = "sha256:950cbad44494253b539c10620a0b36e5e0ab4900f58038abc166b5e04cc2f9d2", size = 3872457, upload-time = "2026-10-11T11:16:37.651Z" },
+    { url = "https://files.pythonhosted.org/packages/71/83/c85d945ea6676a06afb23ecb4f91829315f54a5ccd74c9e2f116f97f34bd/pillow_heif-1.8.1-pp311-pypy311_pp73-macosx_10_15_x86_64.whl", hash = "sha256:15656f1b2d5260421210c48731332e8a30729381eef97d4d8b22df18382490de", size = 4802985, upload-time = "2026-10-11T13:18:08.513Z" },
+    { url = "https://files.pythonhosted.org/packages/4c/7b/58f7c402ed71891a274698b5963690fe5a602ba62e6bb94906fd229863c9/pillow_heif-1.8.1-pp311-pypy311_pp73-macosx_11_0_arm64.whl", hash = "sha256:77ff9e899f094e06964aa1e52c9e80d089e699baf16b248d7fb898b2432a59d3", size = 4308083, upload-time = "2026-10-11T13:18:10.069Z" },
+    { url = "https://files.pythonhosted.org/packages/ed/38/c47df37b9ccd731d9a9d7173dbe38a9ef7713dd8480c5c6504d3740961d9/pillow_heif-1.8.1-pp311-pypy311_pp73-manylinux_2_26_aarch64.manylinux_2_28_aarch64.whl", hash = "sha256:317c6317a5f22fb5cd5b651186b1669760e587ac8b3d55895c04355b0a4b56f4", size = 6367775, upload-time = "2026-10-11T13:18:11.696Z" },
+    { url = "https://files.pythonhosted.org/packages/33/ad/67cde410707ef0d53717ddd92a305dfded755ac6f9eef1ea02c819612361/pillow_heif-1.8.1-pp311-pypy311_pp73-manylinux_2_27_x86_64.manylinux_2_28_x86_64.whl", hash = "sha256:ad4a201eebfb45f5c4217e62e835c27aed2788f9f252616a31346491060eec35", size = 5654632, upload-time = "2026-10-11T13:18:14.837Z" },
+    { url = "https://files.pythonhosted.org/packages/c5/f9/ba8c637bbc8c3dc46f8a875efd910f8a072085e550c22b0faa7a3ffc161d/pillow_heif-1.8.1-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:9307c857733908ea013cdc6fb08598440e6c3df0c48721b455a8b1dd137d14b5", size = 6604282, upload-time = "2026-10-11T13:18:17.227Z" },
+]
+
+[[package]]
+name = "pluggy"
+version = "1.7.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/db/7fc19e6f2dc92a966727031389fc2e08b558f0f25eb7403c1119ad4713cd/pluggy-1.7.0.tar.gz", hash = "sha256:d1eaa46ebb595891b860ab086b4d09c8588af65ebd4361b8e8f4bb8920b90ba8", size = 123304, upload-time = "2026-10-15T09:50:58.343Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/40/9e/2b38731e0fc536806f16490e1a12d7f0dc2a1235aa8cc07bcc75416a7daa/pluggy-1.7.0-py3-none-any.whl", hash = "sha256:7dd7b0d8832ba3cb632c306926ded123429211b83641b35dc5c41ad2d34f9bec", size = 27082, upload-time = "2026-10-15T09:50:56.808Z" },
 ]
 
 [[package]]
@@ -846,6 +895,31 @@ wheels = [
     { url = "https://files.pythonhosted.org/packages/ac/ad/5565071e937d8e752842ac241463944c9eb14c87e2d269f2658a5bd05e98/pydantic_core-2.46.4-pp311-pypy311_pp73-musllinux_1_1_armv7l.whl", hash = "sha256:d396ec2b979760aaf3218e76c24e65bd0aca24983298653b3a9d7a45f9e47b30", size = 2310000, upload-time = "2026-05-06T13:37:56.694Z" },
     { url = "https://files.pythonhosted.org/packages/4f/c3/66883a5cec183e7fba4d024b4cbbe61851a63750ef606b0afecc46d1f2bf/pydantic_core-2.46.4-pp311-pypy311_pp73-musllinux_1_1_x86_64.whl", hash = "sha256:86e1a4418c6cd97d60c95c71164158eaf7324fae7b0923264016baa993eba6fc", size = 2361286, upload-time = "2026-05-06T13:40:05.667Z" },
     { url = "https://files.pythonhosted.org/packages/4b/2d/69abac8f838090bbecd5df894befb2c2619e7996a98ddb949db9f3b93225/pydantic_core-2.46.4-pp311-pypy311_pp73-win_amd64.whl", hash = "sha256:d51026d73fcfd93610abc7b27789c26b313920fcfb20e27462d74a7f8b06e983", size = 2193071, upload-time = "2026-05-06T13:38:08.682Z" },
+]
+
+[[package]]
+name = "pygments"
+version = "2.21.0"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/49/2e/ced460408999b33da6b31b0021b0f37d329e202d4169aeb164493778f25b/pygments-2.21.0.tar.gz", hash = "sha256:610ca751c9bc2492b38eb9a38a7fbc93edbbb2d7182edaf34e66ae493dee5c8c", size = 5005329, upload-time = "2026-08-17T08:02:48.824Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/71/46/17f022dd3e953bf20a04a028a21ec746d942f8d2af30fa0f124fa0e6a684/pygments-2.21.0-py3-none-any.whl", hash = "sha256:2363c69b61c4a97c838da3b130dcd6468f4848992b21a82f2a63ec34377137d9", size = 1250147, upload-time = "2026-08-17T08:02:44.912Z" },
+]
+
+[[package]]
+name = "pytest"
+version = "9.1.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "colorama", marker = "sys_platform == 'win32'" },
+    { name = "iniconfig" },
+    { name = "packaging" },
+    { name = "pluggy" },
+    { name = "pygments" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/e4/47/b9efed96c114afcfa3c9d3fe98a76a1d14c74a9e266d397cf6eb64be5e01/pytest-9.1.1.tar.gz", hash = "sha256:1088fbde8f2b49d95a549a195707afa7a76a3ce9bcadc26b6d71f0ffda5fe313", size = 1636369, upload-time = "2026-06-19T10:58:32.857Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/25/1de2678b631f5a49215c6c96fff41ba892b0a34df68d6d80292b1b48aa7f/pytest-9.1.1-py3-none-any.whl", hash = "sha256:37a86b45efb9a47a61a36449063e8e18d0cab3161329fc099eb21783169c4f0c", size = 386536, upload-time = "2026-06-19T10:58:31.347Z" },
 ]
 
 [[package]]

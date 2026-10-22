@@ -160,6 +160,93 @@ pub fn count_pending_text_embedding(conn: &Connection, model: &str) -> AppResult
 }
 
 /// 当前模型下各状态的数量（只统计未删除的图）。
+/// VLM 分析的候选图（docs/10 A6）。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VlmCandidate {
+    pub image_id: i64,
+    pub root_path: String,
+    pub rel_path: String,
+    pub taken_at: Option<i64>,
+    pub has_analysis: bool,
+}
+
+/// VLM 待处理条件：没有 vlm_analysis 任务行；或失败了且（换了模型 / 提示词版本，或次数未用完）。
+/// 已就绪的行不论版本都不算待处理：升级提示词后是否重跑由用户手动触发（`requeue_outdated_vlm`）。
+const PENDING_VLM_WHERE: &str = "
+    i.deleted_at IS NULL
+    AND (j.image_id IS NULL OR (j.status = 'failed' AND (j.model <> ?1 OR j.attempts < ?2)))";
+
+/// 目录优先级（同 memora）：相机目录最先，微信等聊天软件目录最后，中途停下时最有价值的照片已经分析完。
+/// `p` 是小写、反斜杠分隔的相对路径，前面补了一个 `\`，目录名可以按 `\名字\` 整段匹配。
+const VLM_DIR_PRIORITY: &str = r"
+    CASE
+        WHEN p LIKE '%\camera\%' OR p LIKE '%\dcim\%' OR p LIKE '%\camera remote\%'
+             OR p LIKE '%\dji album\%' OR p LIKE '%\realme share\%' OR p LIKE '%互传%' THEN 0
+        WHEN (p LIKE '%weixin%' OR p LIKE '%wechat%') AND lower(i.filename) LIKE 'wx_camera%' THEN 1
+        WHEN p LIKE '%weixin%' OR p LIKE '%wechat%' OR p LIKE '%\tencent\%' OR p LIKE '%\qq\%'
+             OR p LIKE '%\qq_images\%' THEN 3
+        ELSE 2
+    END";
+
+/// 取一批待分析的图：还没有任何描述的先做（memora 导入过的排后面，之后再用 VLM 覆盖），
+/// 再按目录优先级，同优先级里新照片在前；缩略图就绪的（说明原图读得到）排在同路径的重复行前面。
+pub fn pending_vlm_analysis(
+    conn: &Connection,
+    model: &str,
+    limit: i64,
+) -> AppResult<Vec<VlmCandidate>> {
+    let sql = format!(
+        r"SELECT i.id, r.path, i.rel_path, i.taken_at, a.image_id IS NOT NULL
+         FROM (SELECT i.*, '\' || lower(replace(i.rel_path, '/', '\')) AS p FROM images i) i
+         JOIN roots r ON r.id = i.root_id
+         LEFT JOIN ai_jobs j ON j.image_id = i.id AND j.kind = '{KIND_VLM_ANALYSIS}'
+         LEFT JOIN image_analysis a ON a.image_id = i.id
+         WHERE {PENDING_VLM_WHERE}
+         ORDER BY a.image_id IS NOT NULL, {VLM_DIR_PRIORITY},
+                  COALESCE(i.taken_at, i.mtime) DESC,
+                  i.thumb_status <> 'ready', i.id
+         LIMIT ?3"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![model, MAX_ATTEMPTS, limit], |row| {
+        Ok(VlmCandidate {
+            image_id: row.get(0)?,
+            root_path: row.get(1)?,
+            rel_path: row.get(2)?,
+            taken_at: row.get(3)?,
+            has_analysis: row.get(4)?,
+        })
+    })?;
+    Ok(rows.collect::<Result<Vec<_>, _>>()?)
+}
+
+pub fn count_pending_vlm_analysis(conn: &Connection, model: &str) -> AppResult<i64> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM images i
+         LEFT JOIN ai_jobs j ON j.image_id = i.id AND j.kind = '{KIND_VLM_ANALYSIS}'
+         WHERE {PENDING_VLM_WHERE}"
+    );
+    Ok(conn
+        .prepare_cached(&sql)?
+        .query_row(params![model, MAX_ATTEMPTS], |row| row.get(0))?)
+}
+
+/// 提示词 / 模型升级后，让旧版本的结果重新排队（用户手动触发）。返回排队的张数。
+pub fn requeue_outdated_vlm(conn: &Connection, model: &str) -> AppResult<usize> {
+    Ok(conn.execute(
+        &format!("DELETE FROM ai_jobs WHERE kind = '{KIND_VLM_ANALYSIS}' AND model <> ?1"),
+        [model],
+    )?)
+}
+
+/// 清掉 VLM 的失败记录，让它们重新排队（例如 NAS 修好之后）。返回张数。
+pub fn retry_failed_vlm(conn: &Connection) -> AppResult<usize> {
+    Ok(conn.execute(
+        &format!("DELETE FROM ai_jobs WHERE kind = '{KIND_VLM_ANALYSIS}' AND status = 'failed'"),
+        [],
+    )?)
+}
+
 pub fn counts(conn: &Connection, kind: &str, model: &str) -> AppResult<JobCounts> {
     let mut stmt = conn.prepare_cached(
         "SELECT j.status, COUNT(*) FROM ai_jobs j

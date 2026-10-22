@@ -134,6 +134,16 @@ pub struct AppSettings {
     pub ai_while_active: bool,
     /// "大模型只在空闲时运行"（默认开，docs/10 A6）。
     pub vlm_idle_only: bool,
+    /// 大模型打标（docs/10 A6）：默认关，在设置页打开。全库分析要几个小时 GPU，只在空闲时跑。
+    pub vlm_enabled: bool,
+    /// llama-server 程序与模型文件；三项都空时自动查找（见 `analysis_pipeline::resolve_vlm_paths`）。
+    pub vlm_server_exe: String,
+    pub vlm_model_path: String,
+    pub vlm_mmproj_path: String,
+    /// llama-server 的并发槽位数（`-np`），同 memora 默认 4。
+    pub vlm_parallel: u8,
+    /// 送模型的图片长边（1024 同 memora；768 更快）。
+    pub vlm_long_edge: u16,
 }
 
 impl Default for AppSettings {
@@ -157,6 +167,12 @@ impl Default for AppSettings {
             idle_threshold_minutes: 3,
             ai_while_active: false,
             vlm_idle_only: true,
+            vlm_enabled: false,
+            vlm_server_exe: String::new(),
+            vlm_model_path: String::new(),
+            vlm_mmproj_path: String::new(),
+            vlm_parallel: 4,
+            vlm_long_edge: 1024,
         }
     }
 }
@@ -181,6 +197,12 @@ pub struct AppSettingsPatch {
     pub idle_threshold_minutes: Option<u16>,
     pub ai_while_active: Option<bool>,
     pub vlm_idle_only: Option<bool>,
+    pub vlm_enabled: Option<bool>,
+    pub vlm_server_exe: Option<String>,
+    pub vlm_model_path: Option<String>,
+    pub vlm_mmproj_path: Option<String>,
+    pub vlm_parallel: Option<u8>,
+    pub vlm_long_edge: Option<u16>,
 }
 
 impl AppSettings {
@@ -259,6 +281,24 @@ impl AppSettings {
         }
         if let Some(vlm_idle_only) = patch.vlm_idle_only {
             self.vlm_idle_only = vlm_idle_only;
+        }
+        if let Some(vlm_enabled) = patch.vlm_enabled {
+            self.vlm_enabled = vlm_enabled;
+        }
+        if let Some(path) = patch.vlm_server_exe {
+            self.vlm_server_exe = path.trim().to_string();
+        }
+        if let Some(path) = patch.vlm_model_path {
+            self.vlm_model_path = path.trim().to_string();
+        }
+        if let Some(path) = patch.vlm_mmproj_path {
+            self.vlm_mmproj_path = path.trim().to_string();
+        }
+        if let Some(parallel) = patch.vlm_parallel {
+            self.vlm_parallel = parallel.clamp(1, 8);
+        }
+        if let Some(long_edge) = patch.vlm_long_edge {
+            self.vlm_long_edge = long_edge.clamp(512, 1536);
         }
     }
 }

@@ -354,7 +354,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 | A3 | 导入 memora 描述（`image_analysis` + `ai_jobs`）；跑 S2/S3，过 G1 | A2 | ✅ |
 | A4 | 文本向量通道：worker `/text/embed`、LanceDB `image_text_emb_<model>`；跑 S4/S5 | A3、G1 | ✅ |
 | A5 | Chinese-CLIP：worker 图像模型可插拔、新表、全量重算、人脸维度解耦；跑 S1/S5，过 G2，写 ADR-008 | A1 | ✅ |
-| A6 | VLM 打标流水线：`llama-server` 监管、worker `/vlm/analyze`、`AnalysisPipeline`（受 docs/11 R2 调度）、进度界面；200 张样本过 G3 后再全量 | R2（docs/11）、G1 | ⬜ |
+| A6 | VLM 打标流水线：`llama-server` 监管、worker `/vlm/analyze`、`AnalysisPipeline`（受 docs/11 R2 调度）、进度界面；200 张样本过 G3 后再全量 | R2（docs/11）、G1 | ✅ G3 通过 |
 | A6b | 夜间定时：Windows 计划任务在 03:00 运行 `photo-view-plus.exe --background-analyze`（无窗口、单实例）；应用已经开着时交给正在运行的实例；07:00 前处理完或到点退出；与 memora 共用 8081 服务（§12） | A6 | ⬜ |
 | A7 | RAM-plus 下线：tagger 设置增加 `vlm`；VLM 覆盖率 ≥ 95% 后，经用户确认再清理旧的 `'ai'` 标签；标签云按类别分组 | A6 | ⬜ |
 | A8 | 收尾：更新 docs/05、docs/08（ADR-008 / ADR-010）、设置页、测试 | 全部 | ⬜ |
@@ -490,6 +490,21 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 - **通过标准**：过 G2；写 ADR-008。
 
 ### A6 VLM 打标流水线
+- **实测 / 备注**（2026-10-23 完成）：
+  - **worker**：`src/vlm/`（`prompts.py` 提示词与 Schema、`normalize.py` 规范化、`images.py` 读图、`client.py` 调 llama-server，用标准库 urllib，不新增 HTTP 依赖）和 `/vlm/analyze`。请求体是原图字节，参数走查询串；返回规范化结果或带类型的失败：`decode`（解码失败）、`model`（4xx、JSON 重试后仍不完整）算这张图失败，`server`（连不上、超时、5xx）是临时错误。新依赖 `pillow-heif`（pyproject + uv.lock）；`tests/test_vlm.py` 16 个用例（规范化、Schema、HEIC 解码、EXIF 方向、透明图、假 llama-server 上的重试与错误分类）。
+  - **规范化**比 §6 多三条（样本试跑后加的）：纯颜色词（"白色""黄色"）不当标签、挪进 keywords；连续 8 位以上的数字（手机号、证件号、卡号）在描述和画面文字里打码，日期保留；`sensitive` 的图不存画面文字——要求模型只写类别，它仍会把证件上的姓名、住址抄进 `visible_text`。提示词也补了"描述里不写人名、证件号、电话、住址""不用人名作标签"（初稿只在 visible_text 里要求，样本里身份证的姓名进了标签和描述）。同义词表 `src/vlm/synonyms.json` 与 Rust 侧查询扩展共用（A2b）。
+  - **Rust**：
+    - `services/vlm_supervisor.rs`：启动命令同 memora（`-c 6144×槽位 -np 4 -ngl 99 -fa on --reasoning off`，只监听本机 8081），隐藏窗口、低于正常优先级、绑作业对象，输出追加到 `llama-YYYYMMDD.log`；`/health` 轮询最多 300 秒；1 分钟内最多启动 3 次，超过进入 degraded；启动前用 `nvidia-smi` 查剩余显存，< 8.5GB 拒绝启动。8081 上已有健康服务就复用、不负责关闭；自己启动的，关闭前确认 `/slots` 全部空闲（全屏 / 手动卸载时强制关）。
+    - `services/analysis_pipeline.rs`：每秒推进一次，负载模式变化时立即推进。不允许运行（默认只在空闲档或"全速"时允许）就不投递，在途的自然完成；进入全屏 / 游戏立刻卸载；没活或不允许运行满 5 分钟卸载。原图由 Rust 在读闸门许可下读好再发给 worker，读完即释放许可（与 §4 写的"worker 返回后再释放"不同：不占着 NAS 读名额等推理），在途数 = 槽位数。候选顺序：还没有任何描述的先做（memora 导入过的排后面，之后再覆盖），相机目录优先、微信等最后，同目录新照片在前。只差大小写的重复路径（docs/11 §6.1）只分析一次、结果写给所有重复行。结果在一个事务里写 `image_analysis`（source = vlm）、`image_tags`（source = vlm，同时替换 memora 导入的类别标签；类别也写成标签）、`ai_jobs`（`vlm_analysis`，model = `qwen3.5-9b-q4@search-v1`）；检索索引由触发器维护，描述向量按输入指纹自动重算。NAS 断开、服务不可用这类临时错误不计失败次数，这张图 10 分钟后再试，连续 6 次临时错误整体暂停 5 分钟。已就绪的结果不随提示词升级自动重跑，设置页"重新分析旧版本"手动触发。
+    - 设置：`vlmEnabled`（默认关）、`vlmServerExe` / `vlmModelPath` / `vlmMmprojPath`（三项都空时自动查找：先 `%LOCALAPPDATA%\PhotoViewPlus\`，再 memora 的目录）、`vlmParallel`（4）、`vlmLongEdge`（1024）。命令 `analysis_progress`、`vlm_detect_paths`、`analysis_requeue_outdated`、`analysis_retry_failed`、`vlm_server_stop`；事件 `analysis:progress`（每秒最多一次）。
+    - 界面：设置页"大模型打标"一节（开关、路径与自动查找、并发、输入尺寸、进度 / 速度 / 预计剩余、模型服务状态、卸载 / 重试失败 / 重新分析旧版本）；底部状态栏在加载或分析时显示一行进度。
+    - 测试：`tests/vlm_tests.rs` 12 个（假 llama-server 上的复用外部服务、启动并等待加载、显存不足拒绝、启动次数上限、槽位忙不停、空闲卸载与进程退出回收；候选顺序、大小写重复行、标签替换、失败上限与重试、提示词升级手动重跑、路径解析、读原图错误分类）。`tests/vlm_eval.rs`（`#[ignore]`）是 G3 样本和全量运行的夹具，结果写在评测目录的另一份库副本里。
+  - **G3 通过**（2026-10-23，评测库副本，随机 200 张有缩略图的图，长边 1024，并发 4）：
+    - 前 5 个标签人工逐张核对：严格口径 983 / 1000 = **98.3%**（湖景标成"海边 / 海景"算错；按 A0 的标注习惯算对是 98.6%）。错误主要是：湖当成海（3）、背影或视频通话标成"自拍"（2）、平板 / 手写板混淆、"火锅"标给麻辣鱼、"米饭"标给粥、斑点狗标成"大丹犬"、OpenAI 图标标成"云"。
+    - 吞吐 **1.69 秒 / 张**（memora 实测 1.64），单张延迟 p50 6.2 秒、p95 10.2 秒；读原图 p50 76ms；平均提示 722 token、输出 246 token。模型加载 8 秒（文件已在缓存；冷启动约 26 秒）。
+    - 显存：llama-server 峰值 +7.6GB，运行中剩余约 3.0GB。torch worker 另占：Chinese-CLIP + bge 0.67GB、再加 RAM-plus 2.0GB——VLM 和 RAM-plus 同时驻留时合计约 11.5 / 12GB，所以 A7 让 RAM-plus 下线。
+    - 前台影响（docs/11 R0 的 `probe.py`，VLM 满载 4 分钟对比空闲 1 分钟）：计时器 p99 0.68 → 0.78ms（指标：增加 ≤ 5ms），固定计算量平均变慢 0.9% → 4.2%（≤ 15%），4KB 写 + fsync 1.1 → 1.5ms。正常使用时 VLM 只在空闲档运行，这是"满载时有人用电脑"的上限。
+  - **长边 768 对 1024**（同 30 张）：768 快 14%（1.50 对 1.75 秒 / 张，提示 484 对 760 token）；主类别一致 26 / 30；1024 的标签更具体（"红烧肉 / 番茄 / 炒卷心菜"对"饭菜 / 炖菜 / 炒青菜"），读出的画面文字多 14%。默认保留 1024，设置里可选 768。
 - **改动**：
   - `services/vlm_supervisor.rs`：
     - 按设置拼启动参数（同 memora `llama.command`），隐藏窗口、低于正常优先级，放进作业对象（见 docs/11 R1-4）；

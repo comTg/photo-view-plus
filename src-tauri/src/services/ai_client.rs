@@ -215,6 +215,61 @@ pub struct FaceDetectResponse {
     pub fallback: bool,
 }
 
+/// `/vlm/analyze` 的参数（走查询串；请求体是原图字节）。
+#[derive(Debug, Clone, Serialize)]
+pub struct VlmAnalyzeParams {
+    pub server_url: String,
+    pub long_edge: u16,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub taken_at: Option<i64>,
+}
+
+/// VLM 规范化后的一条标签（分数按顺序赋值）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VlmTag {
+    pub name: String,
+    pub score: f64,
+}
+
+/// worker 规范化后的分析结果（docs/10 §6）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct VlmResult {
+    pub description: String,
+    pub categories: Vec<String>,
+    pub tags: Vec<VlmTag>,
+    pub keywords: Vec<String>,
+    pub people_count: i64,
+    pub visible_text: String,
+    pub sensitive: bool,
+    #[serde(default)]
+    pub raw_json: Option<String>,
+}
+
+/// `/vlm/analyze` 的响应。`error_kind`：decode / model 算这张图失败；server 是临时错误。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct VlmAnalyzeResponse {
+    pub ok: bool,
+    #[serde(default)]
+    pub error_kind: Option<String>,
+    #[serde(default)]
+    pub error: Option<String>,
+    #[serde(default)]
+    pub result: Option<VlmResult>,
+    #[serde(default)]
+    pub prompt_version: Option<String>,
+    #[serde(default)]
+    pub duration_ms: Option<i64>,
+    #[serde(default)]
+    pub infer_ms: Option<i64>,
+    #[serde(default)]
+    pub prompt_tokens: Option<i64>,
+    #[serde(default)]
+    pub predicted_tokens: Option<i64>,
+}
+
+/// VLM 单张图的请求超时：llama-server 槽位全忙时请求在那边排队，给足时间。
+const VLM_REQUEST_TIMEOUT: Duration = Duration::from_secs(300);
+
 impl AiHttpClient {
     pub fn new() -> AppResult<Self> {
         let client = reqwest::Client::builder()
@@ -229,6 +284,28 @@ impl AiHttpClient {
         Ok(self
             .client
             .get(url)
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    /// 一张图的 VLM 分析：原图字节作请求体（docs/10 §4）。
+    pub async fn vlm_analyze(
+        &self,
+        port: u16,
+        image: Vec<u8>,
+        params: &VlmAnalyzeParams,
+    ) -> AppResult<VlmAnalyzeResponse> {
+        let url = endpoint(port, "/vlm/analyze");
+        Ok(self
+            .client
+            .post(url)
+            .query(params)
+            .header(reqwest::header::CONTENT_TYPE, "application/octet-stream")
+            .body(image)
+            .timeout(VLM_REQUEST_TIMEOUT)
             .send()
             .await?
             .error_for_status()?
