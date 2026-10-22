@@ -30,8 +30,9 @@ const VISIBLE_REQUEST_LIMIT: usize = 160;
 static THUMBNAIL_CPU_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
 static VISIBLE_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
 static VISIBLE_STATE: OnceLock<Mutex<VisibleState>> = OnceLock::new();
-/// 正在生成缩略图的图片（批量队列和可见区域队列共用），同一张图不会同时生成两次。
-static GENERATING: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
+/// 正在生成的缩略图文件（批量队列和可见区域队列共用），同一张图不会同时生成两次。
+/// 按输出文件路径记，而不是图片 id：路径同时确定了库（缩略图目录）和图片。
+static GENERATING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 
 /// 可见区域队列的状态。
 #[derive(Default)]
@@ -43,15 +44,19 @@ struct VisibleState {
 }
 
 /// 占住"正在生成"的名额，drop 时释放。
-struct GeneratingClaim(i64);
+struct GeneratingClaim(PathBuf);
 
 impl GeneratingClaim {
-    fn try_claim(image_id: i64) -> Option<Self> {
+    fn try_claim(task: &ThumbnailTask) -> Option<Self> {
+        let path = thumb_path(
+            &task.thumbs_dir,
+            &thumb_hash_for(task.root_id, &task.rel_path),
+        );
         let mut generating = GENERATING
             .get_or_init(|| Mutex::new(HashSet::new()))
             .lock()
             .ok()?;
-        generating.insert(image_id).then_some(Self(image_id))
+        generating.insert(path.clone()).then_some(Self(path))
     }
 }
 
@@ -181,7 +186,7 @@ impl ThumbnailTask {
             _ = cancellation.cancelled() => return Ok(()),
         };
         // 可见区域队列可能已经生成了这张图（或正在生成）：跳过，不重复读原图。
-        let Some(claim) = GeneratingClaim::try_claim(self.image_id) else {
+        let Some(claim) = GeneratingClaim::try_claim(self) else {
             return Ok(());
         };
         if !self.still_pending()? {
@@ -249,7 +254,7 @@ impl ThumbnailTask {
                 return Ok(false);
             }
         }
-        let Some(claim) = GeneratingClaim::try_claim(self.image_id) else {
+        let Some(claim) = GeneratingClaim::try_claim(self) else {
             return Ok(false);
         };
         if !self.still_pending()? {
