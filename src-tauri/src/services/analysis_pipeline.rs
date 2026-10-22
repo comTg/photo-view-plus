@@ -16,7 +16,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, TransactionBehavior};
 use serde::Serialize;
 use tauri::Emitter;
 
@@ -668,7 +668,9 @@ pub fn save_vlm_result(
     duration_ms: Option<i64>,
     now: i64,
 ) -> AppResult<usize> {
-    let tx = conn.transaction()?;
+    // IMMEDIATE：开头就拿写锁（等不到时按 busy_timeout 等待）。默认的 DEFERRED 事务先读后写，
+    // 并发写入时升级写锁会直接报 "database is locked"，白算一张图。
+    let tx = conn.transaction_with_behavior(TransactionBehavior::Immediate)?;
     let ids = sibling_ids(&tx, candidate)?;
     let model = job_model();
     let tags = vlm_tags(result);
