@@ -297,6 +297,13 @@ fn budget_table_matches_docs() {
     let paused = budget_for(Tier::Paused, &settings);
     assert_eq!(paused.gpu, GpuPolicy::Paused);
     assert!(!paused.vlm);
+    // 暂停 / 全屏：批量缩略图全部等待，只留可见区域队列（R3）。
+    assert_eq!(paused.batch_thumbnails, 0);
+    assert_eq!(paused.visible_thumbnails, 2);
+    let busy = budget_for(Tier::Busy, &settings);
+    assert_eq!(busy.batch_thumbnails, 0);
+    assert_eq!(busy.visible_thumbnails, 1);
+    assert_eq!(busy.hash_tasks, 0);
     // 小机器：短暂离开档的缩略图不超过空闲档。
     let small = BudgetSettings {
         idle_thumbnails: 2,

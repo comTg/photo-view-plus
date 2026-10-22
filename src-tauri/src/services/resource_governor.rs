@@ -156,7 +156,9 @@ pub enum GpuPolicy {
 /// 一个档位的资源预算（docs/11 §5.2）。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Budget {
-    /// 批量缩略图并发（R3 的"可见区域"队列做之前，暂停 / 全屏档保留 1 个，免得画廊完全不出图）。
+    /// 可见区域缩略图并发（R3，独立队列，不占批量名额）。
+    pub visible_thumbnails: usize,
+    /// 批量缩略图并发（0 = 全屏 / 暂停时批量生成全部等待）。
     pub batch_thumbnails: usize,
     /// 网络盘读原图并发（红线：≤ 4）。
     pub network_reads: usize,
@@ -225,6 +227,7 @@ pub fn parse_override(value: &str) -> Option<(OverrideMode, Option<Duration>)> {
 pub fn budget_for(tier: Tier, settings: &BudgetSettings) -> Budget {
     match tier {
         Tier::Active => Budget {
+            visible_thumbnails: 2,
             batch_thumbnails: 1,
             network_reads: 3,
             hash_tasks: 1,
@@ -237,6 +240,7 @@ pub fn budget_for(tier: Tier, settings: &BudgetSettings) -> Budget {
             worker_threads: 1,
         },
         Tier::Away => Budget {
+            visible_thumbnails: 2,
             batch_thumbnails: 3.min(settings.idle_thumbnails.max(1)),
             network_reads: 4,
             hash_tasks: 2,
@@ -245,6 +249,7 @@ pub fn budget_for(tier: Tier, settings: &BudgetSettings) -> Budget {
             worker_threads: 2,
         },
         Tier::Idle => Budget {
+            visible_thumbnails: 2,
             batch_thumbnails: settings.idle_thumbnails.max(1),
             network_reads: 4,
             hash_tasks: usize::MAX,
@@ -252,9 +257,21 @@ pub fn budget_for(tier: Tier, settings: &BudgetSettings) -> Budget {
             vlm: true,
             worker_threads: 4,
         },
-        Tier::Busy | Tier::Paused => Budget {
-            batch_thumbnails: 1,
+        // 全屏 / 游戏：用户不在看画廊，可见区域留 1 个以防万一。
+        Tier::Busy => Budget {
+            visible_thumbnails: 1,
+            batch_thumbnails: 0,
             network_reads: 1,
+            hash_tasks: 0,
+            gpu: GpuPolicy::Paused,
+            vlm: false,
+            worker_threads: 1,
+        },
+        // 手动暂停：只保留浏览所需的可见区域缩略图（§5.1）。
+        Tier::Paused => Budget {
+            visible_thumbnails: 2,
+            batch_thumbnails: 0,
+            network_reads: 2,
             hash_tasks: 0,
             gpu: GpuPolicy::Paused,
             vlm: false,
@@ -397,6 +414,7 @@ impl Drop for GpuPermit {
 #[derive(Debug, Clone, PartialEq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct BudgetView {
+    pub visible_thumbnails: usize,
     pub batch_thumbnails: usize,
     pub network_reads: usize,
     /// `null` 表示不限。
@@ -416,6 +434,7 @@ impl From<&Budget> for BudgetView {
             GpuPolicy::Unlimited => ("unlimited", None),
         };
         Self {
+            visible_thumbnails: budget.visible_thumbnails,
             batch_thumbnails: budget.batch_thumbnails,
             network_reads: budget.network_reads,
             hash_tasks: (budget.hash_tasks != usize::MAX).then_some(budget.hash_tasks),

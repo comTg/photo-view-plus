@@ -153,6 +153,11 @@ export async function imagesRegenerateThumbnail(id: number): Promise<ImageRecord
   return invoke<ImageRecord>("images_regenerate_thumbnail", { id });
 }
 
+/** 可见区域优先（docs/11 §5.4）：把可见范围里还没有缩略图的图报给后端优先生成。 */
+export async function thumbsPrioritize(ids: number[]): Promise<number> {
+  return invoke<number>("thumbs_prioritize", { ids });
+}
+
 export async function thumbsPath(imageId: number, size?: number): Promise<string | null> {
   return invoke<string | null>("thumbs_path", { imageId, size });
 }

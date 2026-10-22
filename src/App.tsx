@@ -55,6 +55,7 @@ import {
   smartAlbumQuery,
   smartAlbumSave,
   thumbUrl,
+  thumbsPrioritize,
   trashMove,
   watcherStart,
   watcherStatus,
@@ -121,7 +122,7 @@ import {
   Users,
 } from "lucide-react";
 import { Suspense, lazy, memo, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { VirtuosoGrid } from "react-virtuoso";
+import { type ListRange, VirtuosoGrid } from "react-virtuoso";
 
 const PAGE_SIZE = 200;
 const SCAN_REFRESH_MS = 1500;
@@ -2662,12 +2663,14 @@ const ImageGrid = memo(function ImageGrid({
   scrollerRef,
 }: ImageGridProps) {
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
+  const handleRangeChanged = useVisibleThumbnailPriority(images);
   return (
     <VirtuosoGrid
       className="virtual-image-grid"
       computeItemKey={(_index, image) => image.id}
       data={images}
       endReached={onEndReached}
+      rangeChanged={handleRangeChanged}
       increaseViewportBy={{ top: 640, bottom: 1280 }}
       itemClassName="image-grid__item"
       itemContent={(_index, image) => (
@@ -2686,6 +2689,60 @@ const ImageGrid = memo(function ImageGrid({
     />
   );
 });
+
+/**
+ * 可见区域优先的缩略图（docs/11 §5.4）：可见范围变化或列表内容变化后防抖 200ms，把范围内
+ * 还没有缩略图的图报给后端，用独立队列先生成。列表没变时不重复发送。
+ */
+function useVisibleThumbnailPriority(images: ImageRecord[]) {
+  const imagesRef = useRef(images);
+  imagesRef.current = images;
+  const rangeRef = useRef<ListRange | null>(null);
+  const timerRef = useRef<number | null>(null);
+  const lastSentRef = useRef("");
+
+  const flush = useCallback(() => {
+    timerRef.current = null;
+    const range = rangeRef.current;
+    if (!range) return;
+    const ids = imagesRef.current
+      .slice(range.startIndex, range.endIndex + 1)
+      .filter((image) => image.thumbStatus === "pending")
+      .map((image) => image.id);
+    const key = ids.join(",");
+    if (key === lastSentRef.current) return;
+    lastSentRef.current = key;
+    thumbsPrioritize(ids).catch((error) => console.warn("可见区域缩略图优先失败", error));
+  }, []);
+
+  const schedule = useCallback(() => {
+    if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    timerRef.current = window.setTimeout(flush, 200);
+  }, [flush]);
+
+  const handleRangeChanged = useCallback(
+    (range: ListRange) => {
+      rangeRef.current = range;
+      schedule();
+    },
+    [schedule],
+  );
+
+  // 列表内容变了（翻页、扫描新增、缩略图完成）但可见范围没变时，也重新报一次。
+  // biome-ignore lint/correctness/useExhaustiveDependencies: images 变化只是触发信号，实际读取走 ref
+  useEffect(() => {
+    if (rangeRef.current) schedule();
+  }, [images, schedule]);
+
+  useEffect(
+    () => () => {
+      if (timerRef.current !== null) window.clearTimeout(timerRef.current);
+    },
+    [],
+  );
+
+  return handleRangeChanged;
+}
 
 interface ImageCardProps {
   image: ImageRecord;

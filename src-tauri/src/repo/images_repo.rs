@@ -748,6 +748,36 @@ pub fn pending_thumbnail_images(conn: &Connection) -> AppResult<Vec<PendingImage
     )
 }
 
+/// 指定图片里缩略图仍处于 pending 的，按 `ids` 的顺序返回（可见区域优先队列用，docs/11 §5.4）。
+pub fn pending_thumbnail_images_by_ids(
+    conn: &Connection,
+    ids: &[i64],
+) -> AppResult<Vec<PendingImage>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "{PENDING_SELECT} WHERE i.id IN ({}) AND i.deleted_at IS NULL AND i.thumb_status = 'pending'",
+        placeholders(ids.len())
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(ids.iter().copied()), row_to_pending)?;
+    let mut by_id = std::collections::HashMap::new();
+    for row in rows {
+        let image = row?;
+        by_id.insert(image.id, image);
+    }
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
+}
+
+/// 缩略图状态；图片不存在或已删除时为 `None`。
+pub fn thumb_status(conn: &Connection, id: i64) -> AppResult<Option<String>> {
+    Ok(conn
+        .prepare_cached("SELECT thumb_status FROM images WHERE id = ?1 AND deleted_at IS NULL")?
+        .query_row([id], |row| row.get(0))
+        .optional()?)
+}
+
 /// 缩略图已就绪但还没算 dHash 的图（视觉哈希依赖 thumb）。
 pub fn pending_dhash_images(conn: &Connection) -> AppResult<Vec<PendingImage>> {
     // 同 pending_blake3_images：不按共用的 hash_status 排除，失败可重试、不连累 blake3。

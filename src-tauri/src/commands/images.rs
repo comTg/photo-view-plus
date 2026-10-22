@@ -9,7 +9,6 @@ use tokio::sync::mpsc;
 use crate::config::AppPaths;
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
-use crate::queue::Scheduler;
 use crate::repo::images_repo::{
     self, ImagePage, ImageQueryParams, ImageRecord, MapImagePoint, RenameRecordPatch,
     TimelineBucket,
@@ -101,7 +100,6 @@ pub fn images_reveal_in_dir(pool: State<'_, Pool>, id: i64) -> Result<(), String
 #[tauri::command]
 pub fn images_regenerate_thumbnail(
     pool: State<'_, Pool>,
-    scheduler: State<'_, Scheduler>,
     paths: State<'_, AppPaths>,
     app: AppHandle,
     id: i64,
@@ -109,7 +107,6 @@ pub fn images_regenerate_thumbnail(
     let (completion_tx, mut completion_rx) = mpsc::unbounded_channel();
     let pending = thumbnail_service::enqueue_thumbnail_regeneration(
         pool.inner(),
-        scheduler.inner(),
         &paths.thumbs_dir,
         id,
         completion_tx,
@@ -131,6 +128,19 @@ pub fn images_regenerate_thumbnail(
     });
 
     Ok(pending)
+}
+
+/// 可见区域优先（docs/11 §5.4）：前端把可见范围里还没有缩略图的图报上来（防抖 200ms），
+/// 后台用独立的固定并发先生成这些。返回新排进可见队列的张数。
+#[tauri::command]
+pub fn thumbs_prioritize(
+    pool: State<'_, Pool>,
+    paths: State<'_, AppPaths>,
+    app: AppHandle,
+    ids: Vec<i64>,
+) -> Result<usize, String> {
+    thumbnail_service::prioritize_visible(pool.inner(), &paths.thumbs_dir, Some(&app), &ids)
+        .map_err(|e| e.to_string())
 }
 
 fn rename_image(pool: &Pool, args: RenameImageArgs) -> AppResult<Option<ImageRecord>> {

@@ -89,7 +89,6 @@ async fn thumbnail_task_generates_webp_and_updates_db() {
     let (completion_tx, mut completion_rx) = tokio::sync::mpsc::unbounded_channel();
     let pending = thumbnail_service::enqueue_thumbnail_regeneration(
         &pool,
-        &scheduler,
         &thumbs_dir,
         image_id,
         completion_tx,
@@ -229,4 +228,123 @@ fn write_jpeg(path: &PathBuf, width: u32, height: u32) {
         image::Rgb([(x % 256) as u8, (y % 256) as u8, ((x + y) % 256) as u8])
     });
     image.save(path).expect("write jpeg");
+}
+
+// docs/11 R3：可见区域队列不经过批量调度器、独立生成；已排队或已就绪的图不会重复排队；
+// 之后到来的批量任务发现图已就绪就跳过，不重复读原图。
+#[tokio::test]
+async fn visible_queue_generates_ahead_of_batch_and_dedupes() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = photo_view_plus_lib::db::open(&dir.path().join("app.sqlite")).expect("db");
+    let root_dir = dir.path().join("photos");
+    let thumbs_dir = dir.path().join("thumbs");
+    std::fs::create_dir_all(&root_dir).expect("root dir");
+
+    let conn = pool.get().expect("conn");
+    let root = roots_repo::insert(
+        &conn,
+        &NewRoot {
+            path: root_dir.to_string_lossy().to_string(),
+            label: None,
+            root_type: "local".to_string(),
+        },
+        1,
+    )
+    .expect("root");
+    let mut ids = Vec::new();
+    for name in ["a.png", "b.png"] {
+        write_png(&root_dir.join(name), name == "b.png");
+        let image = NewImageMetadata {
+            root_id: root.id,
+            rel_path: name.to_string(),
+            filename: name.to_string(),
+            extension: "png".to_string(),
+            size_bytes: 16,
+            mtime: 1,
+            width: None,
+            height: None,
+            orientation: None,
+            taken_at: None,
+            gps_lat: None,
+            gps_lng: None,
+            camera_make: None,
+            camera_model: None,
+        };
+        ids.push(
+            images_repo::upsert_scanned_image(&conn, &image, 2)
+                .expect("insert image")
+                .image_id(),
+        );
+    }
+    drop(conn);
+
+    let queued =
+        thumbnail_service::prioritize_visible(&pool, &thumbs_dir, None, &ids).expect("prioritize");
+    assert_eq!(queued, 2);
+    // 同一屏再报一次：已在队列里或已就绪，不重复排。
+    let again =
+        thumbnail_service::prioritize_visible(&pool, &thumbs_dir, None, &ids).expect("prioritize");
+    assert_eq!(again, 0);
+
+    let hashes = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let conn = pool.get().expect("conn");
+            let details = ids
+                .iter()
+                .map(|id| {
+                    images_repo::get_detail(&conn, *id)
+                        .expect("detail")
+                        .expect("image")
+                })
+                .collect::<Vec<_>>();
+            if details.iter().all(|detail| detail.thumb_status == "ready") {
+                break details
+                    .into_iter()
+                    .map(|detail| detail.thumb_hash.expect("hash"))
+                    .collect::<Vec<_>>();
+            }
+            assert!(
+                details.iter().all(
+                    |detail| detail.thumb_status == "pending" || detail.thumb_status == "ready"
+                ),
+                "visible thumbnail failed"
+            );
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    })
+    .await
+    .expect("visible thumbnails timed out");
+
+    let thumb_path = thumbs_dir
+        .join(&hashes[0][0..2])
+        .join(format!("{}.webp", hashes[0]));
+    let modified = std::fs::metadata(&thumb_path)
+        .expect("thumb")
+        .modified()
+        .expect("mtime");
+
+    // 扫描时排进批量队列的同一张图：已就绪，跳过。
+    let scheduler = Scheduler::start(1);
+    scheduler
+        .enqueue(ThumbnailTask::new(
+            pool.clone(),
+            ids[0],
+            root.id,
+            "a.png".to_string(),
+            root_dir.join("a.png"),
+            None,
+            thumbs_dir.clone(),
+            false,
+        ))
+        .expect("enqueue thumbnail");
+    tokio::time::sleep(Duration::from_millis(400)).await;
+    assert_eq!(scheduler.status().completed, 1);
+    let after = std::fs::metadata(&thumb_path)
+        .expect("thumb")
+        .modified()
+        .expect("mtime");
+    assert_eq!(
+        modified, after,
+        "batch task must not regenerate a ready thumbnail"
+    );
 }

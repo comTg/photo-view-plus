@@ -225,6 +225,7 @@ export type LoadOverrideMode = "auto" | "fullSpeed" | "paused";
 export type LoadOverrideChoice = "auto" | "fullSpeed" | "pause1h" | "pauseUntilRestart";
 
 export interface LoadBudget {
+  visibleThumbnails: number;
   batchThumbnails: number;
   networkReads: number;
   /** null = 不限。 */

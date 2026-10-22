@@ -1,7 +1,8 @@
+use std::collections::HashSet;
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use async_trait::async_trait;
 use image::codecs::webp::WebPEncoder;
@@ -9,6 +10,7 @@ use image::{DynamicImage, ImageEncoder};
 use sha1::{Digest, Sha1};
 use tauri::{AppHandle, Emitter};
 use tokio::sync::mpsc;
+use tokio_util::sync::CancellationToken;
 
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
@@ -20,8 +22,58 @@ use crate::utils::read_gate;
 
 const THUMB_SIZE: u32 = 256;
 const MAX_THUMBNAIL_CPU_WORKERS: usize = 6;
+/// 可见区域队列的固定并发（docs/11 §5.2：全屏 / 游戏时由治理器降到 1）。
+pub const VISIBLE_THUMBNAIL_CONCURRENCY: usize = 2;
+/// 一次最多接受多少张可见区域的图（一屏加上下预加载区）。
+const VISIBLE_REQUEST_LIMIT: usize = 160;
 
 static THUMBNAIL_CPU_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
+static VISIBLE_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
+static VISIBLE_STATE: OnceLock<Mutex<VisibleState>> = OnceLock::new();
+/// 正在生成缩略图的图片（批量队列和可见区域队列共用），同一张图不会同时生成两次。
+static GENERATING: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
+
+/// 可见区域队列的状态。
+#[derive(Default)]
+struct VisibleState {
+    /// 前端最近一次报告的可见区域：排队期间用户滚走了的图留给批量队列。
+    wanted: HashSet<i64>,
+    /// 已在可见队列里（排队或生成中）的图。
+    queued: HashSet<i64>,
+}
+
+/// 占住"正在生成"的名额，drop 时释放。
+struct GeneratingClaim(i64);
+
+impl GeneratingClaim {
+    fn try_claim(image_id: i64) -> Option<Self> {
+        let mut generating = GENERATING
+            .get_or_init(|| Mutex::new(HashSet::new()))
+            .lock()
+            .ok()?;
+        generating.insert(image_id).then_some(Self(image_id))
+    }
+}
+
+impl Drop for GeneratingClaim {
+    fn drop(&mut self) {
+        if let Some(generating) = GENERATING.get() {
+            if let Ok(mut generating) = generating.lock() {
+                generating.remove(&self.0);
+            }
+        }
+    }
+}
+
+fn visible_state() -> &'static Mutex<VisibleState> {
+    VISIBLE_STATE.get_or_init(|| Mutex::new(VisibleState::default()))
+}
+
+fn visible_limiter() -> Arc<AdjustableLimiter> {
+    VISIBLE_LIMITER
+        .get_or_init(|| AdjustableLimiter::new(VISIBLE_THUMBNAIL_CONCURRENCY))
+        .clone()
+}
 
 #[derive(Clone)]
 pub struct ThumbnailTask {
@@ -128,6 +180,13 @@ impl ThumbnailTask {
             permit = limiter.acquire() => permit,
             _ = cancellation.cancelled() => return Ok(()),
         };
+        // 可见区域队列可能已经生成了这张图（或正在生成）：跳过，不重复读原图。
+        let Some(claim) = GeneratingClaim::try_claim(self.image_id) else {
+            return Ok(());
+        };
+        if !self.still_pending()? {
+            return Ok(());
+        }
         // 读原图前再过一道原图读取闸门：网络盘并发读过高会拖死 NAS（红线 6）。
         // 与 BLAKE3 共用同一组闸门，约束的是"读原图"的总并发。
         let read_permit = tokio::select! {
@@ -138,15 +197,135 @@ impl ThumbnailTask {
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
             let _read_permit = read_permit;
-            generate(task, ctx)
+            let _claim = claim;
+            generate(task, &cancellation, true)
         })
         .await?
     }
+
+    fn still_pending(&self) -> AppResult<bool> {
+        let conn = self.pool.get()?;
+        Ok(images_repo::thumb_status(&conn, self.image_id)?.as_deref() == Some("pending"))
+    }
+
+    /// 可见区域队列里的一张图：固定并发，不占批量名额，以正常优先级运行（用户正在等）。
+    async fn run_visible(self, require_wanted: bool) {
+        let image_id = self.image_id;
+        let result = self.run_visible_inner(require_wanted).await;
+        if let Ok(mut state) = visible_state().lock() {
+            state.queued.remove(&image_id);
+        }
+        let generated = match result {
+            Ok(generated) => generated,
+            Err(error) => {
+                if let Ok(conn) = self.pool.get() {
+                    let _ = images_repo::update_thumbnail_failed(
+                        &conn,
+                        image_id,
+                        "failed",
+                        &error.to_string(),
+                    );
+                }
+                true
+            }
+        };
+        if let Some(completion) = &self.completion {
+            let _ = completion.send(image_id);
+        }
+        if generated {
+            self.emit_updated();
+        }
+    }
+
+    /// 返回是否真的生成了（排队期间滚出可见区域、或已被批量队列处理时为 false）。
+    async fn run_visible_inner(&self, require_wanted: bool) -> AppResult<bool> {
+        let permit = visible_limiter().acquire().await;
+        if require_wanted {
+            let wanted = visible_state()
+                .lock()
+                .map(|state| state.wanted.contains(&self.image_id))
+                .unwrap_or(false);
+            if !wanted {
+                return Ok(false);
+            }
+        }
+        let Some(claim) = GeneratingClaim::try_claim(self.image_id) else {
+            return Ok(false);
+        };
+        if !self.still_pending()? {
+            return Ok(false);
+        }
+        let read_permit = read_gate::acquire_read(self.is_network).await?;
+        let task = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let _read_permit = read_permit;
+            let _claim = claim;
+            generate(task, &CancellationToken::new(), false)
+        })
+        .await??;
+        Ok(true)
+    }
 }
 
+/// 可见区域优先（docs/11 §5.4、R3）：前端报告当前可见范围里还没有缩略图的图，这里用独立的
+/// 固定并发生成，不占批量名额，也不受"使用中"的批量限速影响。返回新排进可见队列的张数。
+///
+/// 每次调用都会替换"可见区域"：之前排队、但已经滚出可见区域的图不再生成，留给批量队列。
+pub fn prioritize_visible(
+    pool: &Pool,
+    thumbs_dir: &Path,
+    app: Option<&AppHandle>,
+    image_ids: &[i64],
+) -> AppResult<usize> {
+    let ids = image_ids
+        .iter()
+        .copied()
+        .take(VISIBLE_REQUEST_LIMIT)
+        .collect::<Vec<_>>();
+    let pending = {
+        let conn = pool.get()?;
+        images_repo::pending_thumbnail_images_by_ids(&conn, &ids)?
+    };
+    let fresh = {
+        let mut state = visible_state()
+            .lock()
+            .map_err(|_| AppError::Other("可见区域缩略图状态不可用".to_string()))?;
+        state.wanted = ids.iter().copied().collect();
+        pending
+            .into_iter()
+            .filter(|image| state.queued.insert(image.id))
+            .collect::<Vec<_>>()
+    };
+    let count = fresh.len();
+    for image in fresh {
+        let is_network = crate::utils::path_normalize::is_network_path(Path::new(&image.root_path));
+        let mut task = ThumbnailTask::new(
+            pool.clone(),
+            image.id,
+            image.root_id,
+            image.rel_path,
+            PathBuf::from(image.full_path),
+            image.orientation,
+            thumbs_dir.to_path_buf(),
+            is_network,
+        );
+        if let Some(app) = app {
+            task = task.with_event_app(app.clone());
+        }
+        tauri::async_runtime::spawn(task.run_visible(true));
+    }
+    Ok(count)
+}
+
+/// 资源治理器调整可见区域队列的并发（全屏 / 游戏时 1，其他 2）。
+pub fn set_visible_limit(limit: usize) {
+    visible_limiter().set_limit(limit.clamp(1, VISIBLE_THUMBNAIL_CONCURRENCY));
+}
+
+/// 用户手动"重新生成缩略图"：走可见区域队列（用户正在等，不排在批量任务后面，也不受暂停影响）。
 pub fn enqueue_thumbnail_regeneration(
     pool: &Pool,
-    scheduler: &Scheduler,
     thumbs_dir: &Path,
     image_id: i64,
     completion: mpsc::UnboundedSender<i64>,
@@ -169,14 +348,10 @@ pub fn enqueue_thumbnail_regeneration(
         is_network,
     )
     .with_completion(completion);
-
-    if let Err(error) = scheduler.enqueue(task) {
-        if let Ok(conn) = pool.get() {
-            let _ =
-                images_repo::update_thumbnail_failed(&conn, image_id, "failed", &error.to_string());
-        }
-        return Err(error);
+    if let Ok(mut state) = visible_state().lock() {
+        state.queued.insert(image_id);
     }
+    tauri::async_runtime::spawn(task.run_visible(false));
 
     image.thumb_status = "pending".to_string();
     image.thumb_hash = None;
@@ -209,8 +384,9 @@ fn thumbnail_cpu_limiter() -> Arc<AdjustableLimiter> {
 }
 
 /// 资源治理器按负载模式调整批量缩略图并发（docs/11 §5.2），不超过机器的 CPU 上限。
+/// 0 = 全屏 / 暂停时批量生成全部等待（可见区域队列不受影响）。
 pub fn set_batch_limit(limit: usize) {
-    thumbnail_cpu_limiter().set_limit(limit.clamp(1, thumbnail_cpu_limit()));
+    thumbnail_cpu_limiter().set_limit(limit.min(thumbnail_cpu_limit()));
 }
 
 /// 启动时把仍处于 pending 的缩略图重新入队（P0）。覆盖"扫描被中断后缩略图卡在生成中"
@@ -266,12 +442,13 @@ pub fn thumb_path(thumbs_dir: &Path, thumb_hash: &str) -> PathBuf {
     thumbs_dir.join(prefix).join(format!("{thumb_hash}.webp"))
 }
 
-fn generate(task: ThumbnailTask, ctx: TaskContext) -> AppResult<()> {
-    if ctx.is_cancelled() {
+/// `background`：批量队列整段降到后台优先级；可见区域队列用正常优先级（用户正在等这张图）。
+fn generate(task: ThumbnailTask, cancel: &CancellationToken, background: bool) -> AppResult<()> {
+    if cancel.is_cancelled() {
         return Ok(());
     }
-    // 解码 / 缩放 / WebP 编码 + 读原图都很重，整段降到后台优先级，避免拖卡前台 UI。
-    let _bg = BackgroundPriorityGuard::enter();
+    // 解码 / 缩放 / WebP 编码 + 读原图都很重，批量生成整段降到后台优先级，避免拖卡前台 UI。
+    let _bg = background.then(BackgroundPriorityGuard::enter);
 
     let hash = thumb_hash_for(task.root_id, &task.rel_path);
     let path = thumb_path(&task.thumbs_dir, &hash);
@@ -297,7 +474,7 @@ fn generate(task: ThumbnailTask, ctx: TaskContext) -> AppResult<()> {
         }
     };
 
-    if ctx.is_cancelled() {
+    if cancel.is_cancelled() {
         return Ok(());
     }
 

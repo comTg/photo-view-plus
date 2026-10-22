@@ -202,6 +202,7 @@ pub fn run() {
             commands::images::images_rename,
             commands::images::images_reveal_in_dir,
             commands::images::images_regenerate_thumbnail,
+            commands::images::thumbs_prioritize,
             commands::images::thumbs_path,
             commands::settings::settings_get,
             commands::settings::settings_update,
@@ -263,7 +264,8 @@ pub fn run() {
 fn budget_applier(scheduler: queue::Scheduler, supervisor: Arc<AiSupervisor>) -> BudgetApplier {
     Box::new(move |budget: &Budget| {
         services::thumbnail_service::set_batch_limit(budget.batch_thumbnails);
-        scheduler.set_cap(queue::Priority::P0, budget.batch_thumbnails.max(1));
+        services::thumbnail_service::set_visible_limit(budget.visible_thumbnails);
+        scheduler.set_cap(queue::Priority::P0, budget.batch_thumbnails);
         utils::read_gate::set_network_limit(budget.network_reads);
         // P2 = BLAKE3，P3 = dHash；0 = 全屏 / 暂停时不派发。
         scheduler.set_cap(queue::Priority::P2, budget.hash_tasks);
