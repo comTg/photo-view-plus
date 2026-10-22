@@ -61,6 +61,10 @@ pub struct AiSupervisor {
     idle_stop_secs: AtomicU64,
     /// 资源治理器下发的数学库线程数；worker 启动后和档位变化时应用。
     worker_threads: AtomicUsize,
+    /// 串行化 `/runtime/throttle`：每次都发最新值，两次快速变化不会乱序。
+    throttle_lock: Mutex<()>,
+    /// 正在进行的 worker 请求数：空闲自动停止不打断在途请求（VLM 单张最长可到几分钟）。
+    active_requests: AtomicUsize,
     inner: Mutex<AiSupervisorInner>,
     /// 串行化 worker 启动。`spawn_worker` 要加载模型、耗时数秒，期间不能持 `inner` 锁
     /// （否则阻塞 status/health 查询）；但若不加这把锁，并发的后台任务/重试会在
@@ -103,6 +107,8 @@ impl AiSupervisor {
             last_used: std::sync::Mutex::new(Instant::now()),
             idle_stop_secs: AtomicU64::new(10 * 60),
             worker_threads: AtomicUsize::new(ai_worker_cpu_threads()),
+            throttle_lock: Mutex::new(()),
+            active_requests: AtomicUsize::new(0),
             inner: Mutex::new(AiSupervisorInner {
                 child: None,
                 status,
@@ -118,9 +124,11 @@ impl AiSupervisor {
         // 任何经过 start 的调用（后台批次、搜索编码、手动启动）都算"在用"：刚拉起的 worker
         // 不会在第一批任务到达前就被空闲检查停掉。
         self.touch();
-        // 快速路径：已就绪直接返回，不去争 start_lock。
+        // 快速路径：已就绪直接返回，不去争 start_lock。先回收已退出的进程：没有健康检查循环
+        // （夜间无窗口模式）时，worker 崩溃后靠这里重新拉起，而不是一直把请求发给死端口。
         {
             let mut inner = self.inner.lock().await;
+            reap_exited(&mut inner);
             refresh_restart_window(&mut inner);
             if inner.child.is_some() && inner.status.status == "ready" {
                 return Ok(inner.status.clone());
@@ -207,11 +215,20 @@ impl AiSupervisor {
         if previous == threads {
             return;
         }
+        // 串行发送，并且发的是拿到锁时的最新值：最后一个拿到锁的一定把最新值送到 worker。
+        let _throttle = self.throttle_lock.lock().await;
+        let current = self.worker_threads.load(Ordering::Relaxed);
         if let Some(port) = self.running_port().await {
-            if let Err(error) = self.client.throttle(port, threads).await {
-                tracing::debug!(%error, threads, "AI worker throttle failed");
+            if let Err(error) = self.client.throttle(port, current).await {
+                tracing::debug!(%error, threads = current, "AI worker throttle failed");
             }
         }
+    }
+
+    /// 标记一个在途的 worker 请求；结束时（drop）计数减一并记为"刚用过"。
+    fn active(&self) -> ActiveRequest<'_> {
+        self.active_requests.fetch_add(1, Ordering::SeqCst);
+        ActiveRequest { supervisor: self }
     }
 
     async fn running_port(&self) -> Option<u16> {
@@ -232,7 +249,10 @@ impl AiSupervisor {
     /// 空闲超过设定时间就停掉 worker，释放显存和内存。返回是否停了。
     async fn stop_if_idle(&self) -> bool {
         let limit = self.idle_stop_secs.load(Ordering::Relaxed);
-        if limit == 0 || self.running_port().await.is_none() {
+        if limit == 0
+            || self.active_requests.load(Ordering::SeqCst) > 0
+            || self.running_port().await.is_none()
+        {
             return false;
         }
         let idle = self
@@ -252,30 +272,25 @@ impl AiSupervisor {
 
     pub async fn status(&self) -> AppResult<AiWorkerStatus> {
         let mut inner = self.inner.lock().await;
-        if let Some(child) = inner.child.as_mut() {
-            if let Some(exit_status) = child.try_wait()? {
-                inner.child = None;
-                inner.status.status = "stopped".to_string();
-                inner.status.pid = None;
-                inner.status.port = None;
-                inner.status.last_error = Some(format!("AI worker exited: {exit_status}"));
-            }
-        }
+        reap_exited(&mut inner);
         refresh_restart_window(&mut inner);
         Ok(inner.status.clone())
     }
 
     pub async fn diagnostics(&self) -> AppResult<serde_json::Value> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.diagnostics(port).await
     }
 
     pub async fn models_status(&self) -> AppResult<serde_json::Value> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.models_status(port).await
     }
 
     pub async fn model_download(&self, model_key: &str) -> AppResult<serde_json::Value> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.model_download(port, model_key).await
     }
@@ -285,6 +300,7 @@ impl AiSupervisor {
         items: Vec<ClipEmbedItem>,
         model: Option<String>,
     ) -> AppResult<ClipEmbedResponse> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.embed_images(port, items, model).await
     }
@@ -294,6 +310,7 @@ impl AiSupervisor {
         text: String,
         model: Option<String>,
     ) -> AppResult<TextEncodeResponse> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.encode_text(port, text, model).await
     }
@@ -304,6 +321,7 @@ impl AiSupervisor {
         model: Option<String>,
         query: bool,
     ) -> AppResult<TextEmbedResponse> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.embed_texts(port, texts, model, query).await
     }
@@ -315,6 +333,7 @@ impl AiSupervisor {
         image: Vec<u8>,
         params: &VlmAnalyzeParams,
     ) -> AppResult<VlmAnalyzeResponse> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.vlm_analyze(port, image, params).await
     }
@@ -325,16 +344,19 @@ impl AiSupervisor {
     }
 
     pub async fn tag_images(&self, items: Vec<TaggerItem>) -> AppResult<TaggerResponse> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.tag_images(port, items).await
     }
 
     pub async fn run_ocr(&self, items: Vec<OcrItem>) -> AppResult<OcrResponse> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.run_ocr(port, items).await
     }
 
     pub async fn detect_faces(&self, items: Vec<FaceDetectItem>) -> AppResult<FaceDetectResponse> {
+        let _active = self.active();
         let port = self.ready_port().await?;
         self.client.detect_faces(port, items).await
     }
@@ -578,6 +600,39 @@ impl AiSupervisor {
             pid,
             health,
         })
+    }
+}
+
+/// 在途请求标记，见 [`AiSupervisor::active`]。
+struct ActiveRequest<'a> {
+    supervisor: &'a AiSupervisor,
+}
+
+impl Drop for ActiveRequest<'_> {
+    fn drop(&mut self) {
+        self.supervisor
+            .active_requests
+            .fetch_sub(1, Ordering::SeqCst);
+        self.supervisor.touch();
+    }
+}
+
+/// worker 进程已退出就清掉记录，状态改回 stopped（下次使用时重新拉起）。
+fn reap_exited(inner: &mut AiSupervisorInner) {
+    let Some(child) = inner.child.as_mut() else {
+        return;
+    };
+    let exited = match child.try_wait() {
+        Ok(Some(status)) => Some(format!("AI worker exited: {status}")),
+        Ok(None) => None,
+        Err(error) => Some(format!("AI worker state unknown: {error}")),
+    };
+    if let Some(reason) = exited {
+        inner.child = None;
+        inner.status.status = "stopped".to_string();
+        inner.status.pid = None;
+        inner.status.port = None;
+        inner.status.last_error = Some(reason);
     }
 }
 

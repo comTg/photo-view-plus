@@ -233,12 +233,13 @@
 **R1-4**：
 - `aiIdleStopMinutes`（默认 10）：supervisor 记录最后一次使用 worker 的时间（任何 worker 请求都算，包括搜索编码），健康检查循环里发现空闲超时就停掉 worker；设置修改立即生效。下次搜索或有待处理任务时按需重启。
 - 作业对象：`utils/job_object.rs`，带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，worker 启动后立即绑定；以后的 `llama-server` 也绑这个作业。
+- 评审后修正：supervisor 记录在途请求数，空闲自动停止不会停掉正在处理请求的 worker（VLM 单张可达几分钟）；worker 意外退出后，下次使用时在快速路径上就回收并重新拉起（夜间无窗口模式没有健康检查循环，之前会一直把请求发给已退出的端口）。
 
 **R2**：
 - `services/resource_governor.rs`：`classify`（一次采样 → 模式）、`ModeMachine`（降档立即、升档持续 10 秒）、`budget_for`（§5.2 预算表）、`effective_tier`（模式 + 手动覆盖）、`GpuGate`（暂停 / 一次一批 / 占空比冷却）、`ResourceGovernor`（每 500ms 采样，预算变化时调用下发回调，发 `system:load_mode`）。纯逻辑部分时间由调用方传入。
 - `utils/win_activity.rs`：`GetLastInputInfo` + `SHQueryUserNotificationState`（`QUNS_BUSY` / `QUNS_RUNNING_D3D_FULL_SCREEN` / `QUNS_PRESENTATION_MODE` → 全屏档，`QUNS_NOT_PRESENT` → 空闲）。非 Windows 用桩实现。
 - `utils/limiter.rs`：`AdjustableLimiter` 替换缩略图 CPU 闸门和读闸门；调度器的单优先级上限改成原子量，可运行时调整。
-- 下发点（`lib.rs` 的 `budget_applier`）：批量缩略图（CPU 闸门 + P0 上限）、网络盘读闸门（夹在 1–4，红线）、P2/P3（BLAKE3 / dHash）上限、worker 数学库线程数（新接口 `POST /runtime/throttle`，worker 运行时 `torch.set_num_threads`；启动时也会应用当前档位）。
+- 下发点（`lib.rs` 的 `budget_applier`）：批量缩略图（CPU 闸门 + P0 上限）、网络盘读闸门（夹在 1–4，红线）、P2/P3（BLAKE3 / dHash）上限、worker 数学库线程数（新接口 `POST /runtime/throttle`，worker 运行时 `torch.set_num_threads`；启动时也会应用当前档位）。线程数串行下发，每次发拿到锁时的最新值，档位快速变化两次也不会乱序（评审后修正）。
 - AI 后台任务（图像向量、描述向量、RAM 标签、OCR、人脸）统一先过 supervisor 的 `GpuGate`；GPU 暂停时 AI 流水线不投递新批次、也不唤醒 worker。搜索编码不经过闸门。
 - 命令 `governor_status`、`governor_set_override`（`auto` / `fullSpeed` / `pause1h` / `pauseUntilRestart`）；底部状态栏组件 `LoadModeControl` 自己订阅 `system:load_mode`。
 - 设置项：`idleThresholdMinutes`（默认 3）、`aiWhileActive`（默认关）、`vlmIdleOnly`（默认开），修改后立即生效。

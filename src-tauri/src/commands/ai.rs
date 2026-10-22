@@ -189,7 +189,10 @@ pub async fn ai_process_pending(
         };
         return Ok(reason.to_string());
     }
-    pipeline.enqueue_pending().await.map_err(|e| e.to_string())?;
+    pipeline
+        .enqueue_pending()
+        .await
+        .map_err(|e| e.to_string())?;
     Ok("已触发 AI 后台处理".to_string())
 }
 
