@@ -21,6 +21,19 @@ pub struct Tokens {
     pub terms: Vec<String>,
     /// 单字（停用字除外）。
     pub chars: Vec<String>,
+    /// 查询扩展（A2b，`synonyms::expand_tokens` 填）：查询里出现的同义说法与同组其他说法切出的词。
+    /// 建索引和未扩展的查询为空。
+    pub synonyms: Vec<SynonymTerms>,
+}
+
+/// 一个被扩展的同义说法。
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct SynonymTerms {
+    /// 查询里的说法（规范化后）及其切出的词。
+    pub matched: String,
+    pub matched_terms: Vec<String>,
+    /// 同组其他说法（规范化后）及各自切出的词。
+    pub alternatives: Vec<(String, Vec<String>)>,
 }
 
 impl Tokens {

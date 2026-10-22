@@ -276,6 +276,7 @@ fn fts_match_query_requires_all_terms_then_relaxes() {
     let lone = text_tokens::Tokens {
         terms: Vec::new(),
         chars: vec!["猫".to_string()],
+        ..text_tokens::Tokens::default()
     };
     assert_eq!(
         search_service::fts_match_query(&lone, columns, true),
@@ -743,4 +744,83 @@ fn rebuild_and_query_15k_library_within_budget() {
     println!("fulltext latencies (ms, debug build): {latencies:?}");
     // 测试是 debug 构建（SQLite 未优化），门槛放宽；release 下的实测见 docs/10 A2。
     assert!(worst < 300.0, "全文通道最慢一次 {worst:.1}ms");
+}
+
+// ---------------------------------------------------------------------------
+// A2b：同义词查询扩展
+// ---------------------------------------------------------------------------
+
+#[test]
+fn synonym_expansion_prefers_longest_and_skips_single_chars_inside_words() {
+    use photo_view_plus_lib::utils::synonyms;
+    let found = synonyms::expansions("小孩子在海滩玩");
+    let matched = found
+        .iter()
+        .map(|expansion| expansion.matched.as_str())
+        .collect::<Vec<_>>();
+    assert!(matched.contains(&"小孩子"), "{matched:?}");
+    assert!(matched.contains(&"海滩"), "{matched:?}");
+    assert!(!matched.contains(&"小孩"), "长说法优先：{matched:?}");
+    let child = found
+        .iter()
+        .find(|expansion| expansion.matched == "小孩子")
+        .expect("child group");
+    assert!(child.alternatives.contains(&"孩子".to_string()));
+    assert!(child.alternatives.contains(&"小孩".to_string()));
+    // 单字说法只在查询本身就是这个字时算："山东"不会扩展成"山峰"。
+    assert!(synonyms::expansions("山东大学").is_empty());
+    let cat = synonyms::expansions("猫");
+    assert_eq!(cat.len(), 1);
+    assert!(cat[0].alternatives.contains(&"猫咪".to_string()));
+}
+
+#[test]
+fn fts_query_puts_synonyms_in_an_or_group() {
+    use photo_view_plus_lib::utils::synonyms;
+    let query = "小猫 窗台";
+    let tokens = synonyms::expand_tokens(text_tokens::query_tokens(query), query);
+    let and = search_service::fts_match_query(&tokens, "{tags}", true);
+    assert!(
+        and.starts_with("{tags} : (\"窗台\" AND (\"小猫\" OR \"猫\" OR \"猫咪\""),
+        "{and}"
+    );
+    assert!(and.contains("(\"喵星\" AND \"星人\")"), "{and}");
+    let or = search_service::fts_match_query(&tokens, "{tags}", false);
+    assert!(or.contains("\"猫咪\""), "{or}");
+    // 没有同义词时与原来一致。
+    let plain = text_tokens::query_tokens("窗台");
+    assert_eq!(
+        search_service::fts_match_query(&plain, "{tags}", true),
+        "{tags} : (\"窗台\")"
+    );
+}
+
+#[tokio::test]
+async fn search_finds_images_through_synonyms() {
+    let env = env();
+    let root = add_root(&env.pool);
+    let ids = add_images(&env.pool, root, &["a.jpg", "b.jpg", "c.jpg"]);
+    tag(&env.pool, ids[0], &["猫"]);
+    tag(&env.pool, ids[1], &["猫咪", "窗台"]);
+    tag(&env.pool, ids[2], &["狗"]);
+    flush(&env.pool);
+    for channel in [Channel::Tag, Channel::FullText] {
+        let response = search_service::search_with(
+            &env.pool,
+            &env.vectors,
+            &VectorEncoder,
+            &args("小猫", 10),
+            &SearchOptions::only(&[channel]),
+        )
+        .await
+        .expect("search");
+        let found = ids_of(&response.results)
+            .into_iter()
+            .collect::<HashSet<_>>();
+        assert_eq!(found, HashSet::from([ids[0], ids[1]]), "{channel:?}");
+        assert!(response
+            .results
+            .iter()
+            .all(|result| result.matched_by.contains(&"tag".to_string())));
+    }
 }

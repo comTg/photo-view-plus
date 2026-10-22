@@ -336,7 +336,8 @@ async fn description_vectors_join_the_fusion() {
     assert_eq!(only_text[0].image.id, ids[0]);
     assert_eq!(only_text[0].matched_by, vec!["semantic".to_string()]);
 
-    // 全部通道：描述全文命中 1，描述向量命中 0；相似度低于下限（0.35）的 1、2 在文字通道有结果时被切掉。
+    // 全部通道：描述全文命中 1（"海边"）和 0（同义词"沙滩"，A2b），描述向量命中 0；
+    // 相似度低于下限（0.35）的 1、2 在文字通道有结果时被切掉。
     let fused = search_service::search(
         &env.pool,
         &env.vectors,
@@ -359,11 +360,14 @@ async fn description_vectors_join_the_fusion() {
             .find(|result| result.image.id == id)
             .expect("result")
     };
-    assert_eq!(by_id(ids[0]).matched_by, vec!["semantic".to_string()]);
+    assert_eq!(
+        by_id(ids[0]).matched_by,
+        vec!["description".to_string(), "semantic".to_string()]
+    );
     assert_eq!(by_id(ids[1]).matched_by, vec!["description".to_string()]);
     assert!(by_id(ids[1]).snippet.is_some());
 
-    // 文本向量编码失败：降级为文字通道，带原因。
+    // 文本向量编码失败：降级为文字通道，带原因。精确命中"海边"的排在同义词"沙滩"前面。
     let degraded = search_service::search(
         &env.pool,
         &env.vectors,
@@ -379,6 +383,6 @@ async fn description_vectors_join_the_fusion() {
             .iter()
             .map(|result| result.image.id)
             .collect::<Vec<_>>(),
-        vec![ids[1]]
+        vec![ids[1], ids[0]]
     );
 }

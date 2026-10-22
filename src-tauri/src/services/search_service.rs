@@ -31,6 +31,7 @@ use crate::services::ai_client::ClipEmbedItem;
 use crate::services::ai_supervisor::AiSupervisor;
 use crate::services::search_index_service::{self, SearchTexts};
 use crate::services::thumbnail_service;
+use crate::utils::synonyms;
 use crate::utils::text_tokens::{self, Tokens};
 
 pub const DEFAULT_LIMIT: usize = 40;
@@ -458,7 +459,8 @@ pub async fn search_with(
     };
 
     let query = filter.text.clone();
-    let tokens = text_tokens::query_tokens(&query);
+    // A2b：同义说法一起检索（"小猫"也找"猫""猫咪"）。
+    let tokens = synonyms::expand_tokens(text_tokens::query_tokens(&query), &query);
 
     // 文字通道是同步 SQL，放到 blocking 线程，与 worker 编码查询并行。
     let text_task = {
@@ -548,7 +550,7 @@ pub async fn search_with(
     let mut results = {
         let conn = pool.get()?;
         let hydrated = hydrate_fused(&conn, &fused, limit)?;
-        annotate(&conn, hydrated, &tokens)?
+        annotate(&conn, hydrated, &display_tokens(&tokens))?
     };
     if results.is_empty() {
         let conn = pool.get()?;
@@ -713,6 +715,15 @@ pub fn tag_channel(
     let normalized = text_tokens::normalize(query);
     let query_chars = normalized.chars().collect::<Vec<_>>();
     let words = normalized.split_whitespace().collect::<HashSet<_>>();
+    // A2b：查询里的同义说法 → 同组其他说法也算命中，覆盖的是原说法在查询里的位置。
+    let mut aliases: HashMap<String, u64> = HashMap::new();
+    for expansion in synonyms::expansions(&normalized) {
+        let matched_chars = expansion.matched.chars().collect::<Vec<_>>();
+        let mask = occurrence_mask(&query_chars, &matched_chars);
+        for alternative in expansion.alternatives {
+            *aliases.entry(alternative).or_default() |= mask;
+        }
+    }
     let mut matched: HashMap<i64, u64> = HashMap::new();
     {
         let mut stmt = conn.prepare_cached("SELECT id, name FROM tags")?;
@@ -725,6 +736,9 @@ pub fn tag_channel(
             for part in search_index_service::split_tag_name(&name) {
                 let part = text_tokens::normalize(part);
                 let part_chars = part.chars().collect::<Vec<_>>();
+                if let Some(alias) = aliases.get(&part) {
+                    mask |= alias;
+                }
                 if part_chars.is_empty()
                     || (part_chars.len() == 1 && !words.contains(part.as_str()))
                 {
@@ -840,24 +854,47 @@ pub fn fulltext_channel(
 }
 
 /// FTS5 查询表达式。AND：双字词全部出现（只有单字时要求单字全部出现）；OR：任一双字词或任一单字。
+///
+/// 有同义扩展（A2b）时，同义说法切出的词在 AND 里换成"任一说法"的 OR 组
+/// （`("小猫" OR "猫" OR "猫咪") AND "窗台"`），OR 查询里也加上其他说法的词。
 pub fn fts_match_query(tokens: &Tokens, column_filter: &str, all: bool) -> String {
-    let terms = tokens
-        .terms
-        .iter()
-        .map(|term| text_tokens::fts_quote(term))
-        .collect::<Vec<_>>();
-    let chars = tokens
-        .chars
-        .iter()
-        .map(|c| text_tokens::fts_quote(c))
-        .collect::<Vec<_>>();
+    let quote = |term: &String| text_tokens::fts_quote(term);
+    let chars = tokens.chars.iter().map(quote).collect::<Vec<_>>();
     if all {
-        if terms.is_empty() {
-            format!("chars : ({})", chars.join(" AND "))
-        } else {
-            format!("{column_filter} : ({})", terms.join(" AND "))
+        if tokens.terms.is_empty() {
+            return format!("chars : ({})", chars.join(" AND "));
         }
+        let grouped = tokens
+            .synonyms
+            .iter()
+            .flat_map(|synonym| synonym.matched_terms.iter())
+            .collect::<HashSet<_>>();
+        let mut clauses = tokens
+            .terms
+            .iter()
+            .filter(|term| !grouped.contains(term))
+            .map(quote)
+            .collect::<Vec<_>>();
+        for synonym in &tokens.synonyms {
+            let options = std::iter::once(&synonym.matched_terms)
+                .chain(synonym.alternatives.iter().map(|(_, terms)| terms))
+                .map(|terms| all_of(&terms.iter().map(quote).collect::<Vec<_>>()))
+                .collect::<Vec<_>>();
+            clauses.push(format!("({})", options.join(" OR ")));
+        }
+        format!("{column_filter} : ({})", clauses.join(" AND "))
     } else {
+        let mut terms = tokens.terms.iter().map(quote).collect::<Vec<_>>();
+        for synonym in &tokens.synonyms {
+            for (_, alternative_terms) in &synonym.alternatives {
+                for term in alternative_terms {
+                    let quoted = quote(term);
+                    if !terms.contains(&quoted) {
+                        terms.push(quoted);
+                    }
+                }
+            }
+        }
         let mut parts = Vec::new();
         if !terms.is_empty() {
             parts.push(format!("{column_filter} : ({})", terms.join(" OR ")));
@@ -867,6 +904,27 @@ pub fn fts_match_query(tokens: &Tokens, column_filter: &str, all: bool) -> Strin
         }
         parts.join(" OR ")
     }
+}
+
+fn all_of(terms: &[String]) -> String {
+    if terms.len() == 1 {
+        terms[0].clone()
+    } else {
+        format!("({})", terms.join(" AND "))
+    }
+}
+
+/// 标命中来源和高亮用的词：查询词加上同义扩展的其他说法（"猫咪"命中的描述也高亮）。
+fn display_tokens(tokens: &Tokens) -> Tokens {
+    let mut display = tokens.clone();
+    for synonym in &tokens.synonyms {
+        for (alternative, _) in &synonym.alternatives {
+            if !display.terms.contains(alternative) {
+                display.terms.push(alternative.clone());
+            }
+        }
+    }
+    display
 }
 
 fn run_fulltext(

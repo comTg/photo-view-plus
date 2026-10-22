@@ -259,6 +259,7 @@ impl IndexDoc {
             let Tokens {
                 terms,
                 chars: column_chars,
+                ..
             } = text_tokens::tokenize(text);
             chars.extend(column_chars);
             terms.join(" ")

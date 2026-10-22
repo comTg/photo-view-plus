@@ -4,5 +4,6 @@ pub mod limiter;
 pub mod path_normalize;
 pub mod priority;
 pub mod read_gate;
+pub mod synonyms;
 pub mod text_tokens;
 pub mod win_activity;
