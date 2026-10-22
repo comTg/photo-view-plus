@@ -26,13 +26,16 @@ pub struct Tokens {
     pub synonyms: Vec<SynonymTerms>,
 }
 
-/// 一个被扩展的同义说法。
+/// 一个被扩展的同义说法。每种说法一支，要求的词见 `synonyms::expand_tokens`。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SynonymTerms {
-    /// 查询里的说法（规范化后）及其切出的词。
+    /// 查询里的说法（规范化后）。
     pub matched: String,
+    /// 原说法那一支要求的词（都是查询本来的词）。
     pub matched_terms: Vec<String>,
-    /// 同组其他说法（规范化后）及各自切出的词。
+    /// 不再要求的词：夹在两个同义说法之间的跨界双字词，在不在取决于两边各用哪种说法。
+    pub dropped_terms: Vec<String>,
+    /// 同组其他说法（规范化后），以及换成这种说法后那一支要求的词。
     pub alternatives: Vec<(String, Vec<String>)>,
 }
 
@@ -93,6 +96,39 @@ pub fn tokenize(text: &str) -> Tokens {
 /// 切词（查询用，去重）。
 pub fn query_tokens(text: &str) -> Tokens {
     tokenize(text).dedup()
+}
+
+/// 切词并记下每个词的字符区间 `[start, end)`，规则与 [`tokenize`] 的词项一致；`chars` 须是
+/// [`normalize`] 过的文本。查询扩展用它找出与同义说法的位置有交集的词。
+pub fn term_spans(chars: &[char]) -> Vec<(String, usize, usize)> {
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < chars.len() {
+        if is_cjk(chars[i]) {
+            let start = i;
+            while i < chars.len() && is_cjk(chars[i]) {
+                i += 1;
+            }
+            let run = &chars[start..i];
+            if run.len() == 1 && !is_stop(run[0]) {
+                out.push((run[0].to_string(), start, start + 1));
+            }
+            for (offset, pair) in run.windows(2).enumerate() {
+                if !is_stop(pair[0]) && !is_stop(pair[1]) {
+                    out.push((pair.iter().collect(), start + offset, start + offset + 2));
+                }
+            }
+        } else if chars[i].is_ascii_alphanumeric() {
+            let start = i;
+            while i < chars.len() && chars[i].is_ascii_alphanumeric() {
+                i += 1;
+            }
+            out.push((chars[start..i].iter().collect(), start, i));
+        } else {
+            i += 1;
+        }
+    }
+    out
 }
 
 fn flush_ascii(word: &mut String, tokens: &mut Tokens) {

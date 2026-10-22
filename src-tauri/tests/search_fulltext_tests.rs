@@ -16,7 +16,7 @@ use photo_view_plus_lib::services::search_service::{
     self, AiSearchArgs, AiSearchResult, Channel, FusionWeights, QueryEncoder, SearchOptions,
     SnippetPart, SOURCE_FUSION,
 };
-use photo_view_plus_lib::utils::text_tokens;
+use photo_view_plus_lib::utils::{synonyms, text_tokens};
 use photo_view_plus_lib::{AppError, AppResult};
 use tempfile::TempDir;
 
@@ -752,7 +752,6 @@ fn rebuild_and_query_15k_library_within_budget() {
 
 #[test]
 fn synonym_expansion_prefers_longest_and_skips_single_chars_inside_words() {
-    use photo_view_plus_lib::utils::synonyms;
     let found = synonyms::expansions("小孩子在海滩玩");
     let matched = found
         .iter()
@@ -776,7 +775,6 @@ fn synonym_expansion_prefers_longest_and_skips_single_chars_inside_words() {
 
 #[test]
 fn fts_query_puts_synonyms_in_an_or_group() {
-    use photo_view_plus_lib::utils::synonyms;
     let query = "小猫 窗台";
     let tokens = synonyms::expand_tokens(text_tokens::query_tokens(query), query);
     let and = search_service::fts_match_query(&tokens, "{tags}", true);
@@ -787,12 +785,81 @@ fn fts_query_puts_synonyms_in_an_or_group() {
     assert!(and.contains("(\"喵星\" AND \"星人\")"), "{and}");
     let or = search_service::fts_match_query(&tokens, "{tags}", false);
     assert!(or.contains("\"猫咪\""), "{or}");
+    // 嵌在长片段里的同义说法：每一支都是"把这个说法换成它之后，和这个位置有交集的词"，
+    // 原说法那一支全是查询本来的词（切不出单字"码"），换了说法的几支带各自的跨界双字词。
+    let query = "白色小猫";
+    let tokens = synonyms::expand_tokens(text_tokens::query_tokens(query), query);
+    assert_eq!(
+        search_service::fts_match_query(&tokens, "{tags}", true),
+        "{tags} : (\"白色\" AND ((\"色小\" AND \"小猫\") OR \"色猫\" OR (\"色猫\" AND \"猫咪\") \
+         OR (\"色猫\" AND \"猫猫\") OR (\"色喵\" AND \"喵星\" AND \"星人\")))"
+    );
+    let query = "QR码扫描";
+    let tokens = synonyms::expand_tokens(text_tokens::query_tokens(query), query);
+    assert_eq!(
+        search_service::fts_match_query(&tokens, "{tags}", true),
+        "{tags} : (\"扫描\" AND ((\"qr\" AND \"码扫\") OR (\"二维\" AND \"维码\" AND \"码扫\")))"
+    );
+    // 夹在两个同义说法之间的"录截"取决于两边各用哪种说法，不要求。
+    let query = "聊天记录截图";
+    let tokens = synonyms::expand_tokens(text_tokens::query_tokens(query), query);
+    let and = search_service::fts_match_query(&tokens, "{tags}", true);
+    assert!(!and.contains("录截"), "{and}");
+    assert!(
+        and.contains("(\"聊天\" AND \"天截\" AND \"截图\")"),
+        "{and}"
+    );
+    assert!(
+        and.contains("(\"屏幕\" AND \"幕截\" AND \"截图\")"),
+        "{and}"
+    );
     // 没有同义词时与原来一致。
     let plain = text_tokens::query_tokens("窗台");
     assert_eq!(
         search_service::fts_match_query(&plain, "{tags}", true),
         "{tags} : (\"窗台\")"
     );
+}
+
+#[test]
+fn synonym_expansion_never_drops_the_original_document() {
+    // 评审发现的回归：扩展前 AND 能命中的文档，扩展后也必须命中。直接跑 AND 表达式——走
+    // fulltext_channel 的话命中不足 20 条会放宽成 OR，测不出来。
+    let env = env();
+    let root = add_root(&env.pool);
+    let ids = add_images(
+        &env.pool,
+        root,
+        &[
+            "a.jpg", "b.jpg", "c.jpg", "d.jpg", "e.jpg", "f.jpg", "g.jpg",
+        ],
+    );
+    set_ocr(&env.pool, ids[0], "QR码扫描说明");
+    set_ocr(&env.pool, ids[1], "请用二维码扫描登录");
+    set_ocr(&env.pool, ids[2], "白色猫咪在窗台上");
+    set_ocr(&env.pool, ids[3], "白色小猫睡觉");
+    set_ocr(&env.pool, ids[4], "这是一张游戏截图");
+    set_ocr(&env.pool, ids[5], "游戏屏幕截图分享");
+    set_ocr(&env.pool, ids[6], "游戏中心入口的截图");
+    flush(&env.pool);
+    let conn = env.pool.get().expect("conn");
+    let columns = format!("{{{}}}", search_service::FULLTEXT_TERM_COLUMNS.join(" "));
+    let and_hits = |query: &str| {
+        let tokens = synonyms::expand_tokens(text_tokens::query_tokens(query), query);
+        let expression = search_service::fts_match_query(&tokens, &columns, true);
+        let mut statement = conn
+            .prepare("SELECT rowid FROM search_fts WHERE search_fts MATCH ?1")
+            .expect("prepare");
+        statement
+            .query_map([expression], |row| row.get::<_, i64>(0))
+            .expect("match")
+            .collect::<Result<HashSet<_>, _>>()
+            .expect("rows")
+    };
+    assert_eq!(and_hits("QR码扫描"), HashSet::from([ids[0], ids[1]]));
+    assert_eq!(and_hits("白色小猫"), HashSet::from([ids[2], ids[3]]));
+    // 相邻约束都保留："游戏…截图"不相邻的不算，"游戏屏幕截图"经同义说法命中。
+    assert_eq!(and_hits("游戏截图"), HashSet::from([ids[4], ids[5]]));
 }
 
 #[tokio::test]

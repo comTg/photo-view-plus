@@ -855,8 +855,9 @@ pub fn fulltext_channel(
 
 /// FTS5 查询表达式。AND：双字词全部出现（只有单字时要求单字全部出现）；OR：任一双字词或任一单字。
 ///
-/// 有同义扩展（A2b）时，同义说法切出的词在 AND 里换成"任一说法"的 OR 组
-/// （`("小猫" OR "猫" OR "猫咪") AND "窗台"`），OR 查询里也加上其他说法的词。
+/// 有同义扩展（A2b）时，同义说法所在位置的词在 AND 里换成"任一说法"的 OR 组
+/// （`"窗台" AND ("小猫" OR "猫" OR "猫咪" …)`；嵌在长片段里时每一支带上各自的跨界双字词：
+/// `"游戏" AND (("戏截" AND "截图") OR ("戏截" AND "截屏") …)`），OR 查询里也加上其他说法的词。
 pub fn fts_match_query(tokens: &Tokens, column_filter: &str, all: bool) -> String {
     let quote = |term: &String| text_tokens::fts_quote(term);
     let chars = tokens.chars.iter().map(quote).collect::<Vec<_>>();
@@ -867,7 +868,7 @@ pub fn fts_match_query(tokens: &Tokens, column_filter: &str, all: bool) -> Strin
         let grouped = tokens
             .synonyms
             .iter()
-            .flat_map(|synonym| synonym.matched_terms.iter())
+            .flat_map(|synonym| synonym.matched_terms.iter().chain(&synonym.dropped_terms))
             .collect::<HashSet<_>>();
         let mut clauses = tokens
             .terms
