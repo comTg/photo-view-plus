@@ -61,6 +61,9 @@ pub const SEARCH_WORKER_WAIT: Duration = Duration::from_millis(1500);
 /// Chinese-CLIP 图像向量通道的相似度下限（余弦）。它的图文相似度挤在 0.35–0.50 的窄带里：
 /// 评测集 40 个查询前 20 名中相关图的 p5 是 0.397、每个查询的第 1 名都 ≥ 0.418，下限只能保守地切掉长尾。
 pub const IMAGE_SIMILARITY_FLOOR: f32 = 0.37;
+/// 描述向量通道（bge-small-zh）的相似度下限（余弦）：评测集里相关图的 p5 是 0.359、不相关图的
+/// 中位数是 0.373，取 0.35 只切掉明显无关的长尾（docs/10 A4）。
+pub const TEXT_SIMILARITY_FLOOR: f32 = 0.35;
 /// 片段长度与命中词前保留的字数。
 const SNIPPET_CHARS: usize = 80;
 const SNIPPET_LEAD: usize = 16;
@@ -204,6 +207,8 @@ pub struct SearchOptions {
     /// 图像向量通道的相似度下限：文字通道有结果时，低于下限的图像向量命中不参与融合
     /// （文字通道没有结果时全部保留，docs/10 §8.4）。
     pub image_similarity_floor: f32,
+    /// 描述向量通道的相似度下限（同上）。
+    pub text_similarity_floor: f32,
     /// 全文通道的双字词只查这些列（评测对比用）；`None` 为全部列。
     pub fulltext_columns: Option<Vec<String>>,
 }
@@ -214,6 +219,7 @@ impl Default for SearchOptions {
             channels: Channel::ALL.to_vec(),
             weights: FusionWeights::default(),
             image_similarity_floor: IMAGE_SIMILARITY_FLOOR,
+            text_similarity_floor: TEXT_SIMILARITY_FLOOR,
             fulltext_columns: None,
         }
     }
@@ -262,13 +268,20 @@ pub trait QueryEncoder: Send + Sync {
 pub struct WorkerQueryEncoder {
     supervisor: Arc<AiSupervisor>,
     clip_model: String,
+    text_model: Option<String>,
 }
 
 impl WorkerQueryEncoder {
-    pub fn new(supervisor: Arc<AiSupervisor>, clip_model: String) -> Self {
+    /// `text_model` 为 `None` 时不跑描述向量这一路。
+    pub fn new(
+        supervisor: Arc<AiSupervisor>,
+        clip_model: String,
+        text_model: Option<String>,
+    ) -> Self {
         Self {
             supervisor,
             clip_model,
+            text_model,
         }
     }
 
@@ -326,6 +339,35 @@ impl QueryEncoder for WorkerQueryEncoder {
         }
         self.check_model(&response.model)?;
         Ok(Some(response.embedding))
+    }
+
+    fn text_model(&self) -> Option<&str> {
+        self.text_model.as_deref()
+    }
+
+    async fn encode_query(&self, text: &str) -> AppResult<Option<Vec<f32>>> {
+        let Some(model) = self.text_model.clone() else {
+            return Ok(None);
+        };
+        self.ensure_ready_briefly().await?;
+        let response = self
+            .supervisor
+            .embed_texts(vec![text.to_string()], Some(model.clone()), true)
+            .await?;
+        if response.fallback {
+            tracing::info!(
+                model = %response.model,
+                "文本向量处于兜底模式（伪向量），本次搜索跳过描述向量通道"
+            );
+            return Ok(None);
+        }
+        if response.model != model {
+            return Err(AppError::Other(format!(
+                "AI worker 返回的文本向量模型 {} 与设置的 {model} 不一致",
+                response.model
+            )));
+        }
+        Ok(response.embeddings.into_iter().next())
     }
 
     async fn encode_image(&self, image_id: i64, thumb_path: String) -> AppResult<Option<Vec<f32>>> {
@@ -440,50 +482,66 @@ pub async fn search_with(
     let mut channels = text_task.await??;
 
     let mut degraded_reason = None;
+    let image_vector = match image_query {
+        Some(Ok(Some(vector))) => Some(vector),
+        Some(Ok(None)) => {
+            degraded_reason = Some("AI worker 处于兜底模式（缺模型），语义检索不可用".to_string());
+            None
+        }
+        Some(Err(error)) => {
+            degraded_reason = Some(error.to_string());
+            None
+        }
+        None => None,
+    };
+    let text_vector = match (text_query, encoder.text_model()) {
+        (Some(Ok(Some(vector))), Some(model)) => Some((model, vector)),
+        (Some(Ok(None)), _) => {
+            degraded_reason.get_or_insert_with(|| {
+                "AI worker 处于兜底模式（缺文本向量模型），描述语义检索不可用".to_string()
+            });
+            None
+        }
+        (Some(Err(error)), _) => {
+            degraded_reason.get_or_insert_with(|| error.to_string());
+            None
+        }
+        _ => None,
+    };
+    // 两路向量检索互不依赖，并行跑。
+    let candidates = candidates.as_deref();
+    let (image_hits, text_hits) = tokio::join!(
+        vector_channel(
+            vectors,
+            image_vector.map(|vector| (
+                VectorTable::image_clip(encoder.clip_model(), vector.len()),
+                vector
+            )),
+            candidates,
+        ),
+        vector_channel(
+            vectors,
+            text_vector
+                .map(|(model, vector)| (VectorTable::image_text(model, vector.len()), vector)),
+            candidates,
+        ),
+    );
     let text_has_hits = channels.iter().any(|channel| !channel.hits.is_empty());
-    if let Some(outcome) = image_query {
-        match outcome {
-            Ok(Some(vector)) => {
-                let started = Instant::now();
-                let table = VectorTable::image_clip(encoder.clip_model(), vector.len());
-                let mut hits = vectors
-                    .top_k_filtered(&table, &vector, CHANNEL_DEPTH, candidates.as_deref())
-                    .await?;
-                if text_has_hits {
-                    hits.retain(|hit| hit.score >= options.image_similarity_floor);
-                }
-                channels.push(ChannelHits::from_vector(
-                    Channel::ImageVector,
-                    hits,
-                    started,
-                ));
-            }
-            Ok(None) => {
-                degraded_reason =
-                    Some("AI worker 处于兜底模式（缺模型），语义检索不可用".to_string())
-            }
-            Err(error) => degraded_reason = Some(error.to_string()),
+    if let Some((mut hits, started)) = image_hits? {
+        if text_has_hits {
+            hits.retain(|hit| hit.score >= options.image_similarity_floor);
         }
+        channels.push(ChannelHits::from_vector(
+            Channel::ImageVector,
+            hits,
+            started,
+        ));
     }
-    if let (Some(outcome), Some(model)) = (text_query, encoder.text_model()) {
-        match outcome {
-            Ok(Some(vector)) => {
-                let started = Instant::now();
-                let table = VectorTable::image_text(model, vector.len());
-                let hits = vectors
-                    .top_k_filtered(&table, &vector, CHANNEL_DEPTH, candidates.as_deref())
-                    .await?;
-                channels.push(ChannelHits::from_vector(Channel::TextVector, hits, started));
-            }
-            Ok(None) => {
-                degraded_reason.get_or_insert_with(|| {
-                    "AI worker 处于兜底模式（缺文本向量模型），描述语义检索不可用".to_string()
-                });
-            }
-            Err(error) => {
-                degraded_reason.get_or_insert_with(|| error.to_string());
-            }
+    if let Some((mut hits, started)) = text_hits? {
+        if text_has_hits {
+            hits.retain(|hit| hit.score >= options.text_similarity_floor);
         }
+        channels.push(ChannelHits::from_vector(Channel::TextVector, hits, started));
     }
 
     let fused = fuse(&channels, &options.weights);
@@ -579,6 +637,22 @@ impl ChannelHits {
             elapsed_ms: self.elapsed_ms,
         }
     }
+}
+
+/// 一路向量检索；没有查询向量时返回 `None`。
+async fn vector_channel(
+    vectors: &LanceDbRepo,
+    query: Option<(VectorTable, Vec<f32>)>,
+    candidates: Option<&[i64]>,
+) -> AppResult<Option<(Vec<VectorSearchHit>, Instant)>> {
+    let Some((table, vector)) = query else {
+        return Ok(None);
+    };
+    let started = Instant::now();
+    let hits = vectors
+        .top_k_filtered(&table, &vector, CHANNEL_DEPTH, candidates)
+        .await?;
+    Ok(Some((hits, started)))
 }
 
 /// 需要时调用编码器；不需要这一路时返回 `None`。

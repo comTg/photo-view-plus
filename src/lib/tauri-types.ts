@@ -179,6 +179,8 @@ export interface AppSettings {
   aiEnabled: boolean;
   aiIdleStopMinutes: number;
   aiClipModel: string;
+  /** 描述文本向量模型（"描述语义"检索通道）。 */
+  aiTextModel: string;
   aiTaggerModel: string;
   ocrEnabled: boolean;
   faceEnabled: boolean;
@@ -195,6 +197,7 @@ export interface AppSettingsPatch {
   aiEnabled?: boolean;
   aiIdleStopMinutes?: number;
   aiClipModel?: string;
+  aiTextModel?: string;
   aiTaggerModel?: string;
   ocrEnabled?: boolean;
   faceEnabled?: boolean;
@@ -345,6 +348,10 @@ export interface AiPipelineStatus {
   taggingInflight: number;
   /** 当前图像向量模型（设置项 aiClipModel）。 */
   embeddingModel: string;
+  /** 描述文本向量（docs/10 A4）。 */
+  textEmbeddingPending: number;
+  textEmbeddingInflight: number;
+  textEmbeddingModel: string;
 }
 
 export interface AiSearchArgs {

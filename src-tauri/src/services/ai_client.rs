@@ -75,6 +75,25 @@ fn default_clip_dims() -> usize {
     512
 }
 
+/// `/text/embed`：描述（或查询）文本 → 文本向量。
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct TextEmbedRequest {
+    pub texts: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    /// 查询文本：worker 按模型卡加检索指令前缀。
+    pub query: bool,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TextEmbedResponse {
+    pub embeddings: Vec<Vec<f32>>,
+    pub model: String,
+    pub dims: usize,
+    pub fallback: bool,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct TaggerItem {
@@ -264,6 +283,29 @@ impl AiHttpClient {
             .client
             .post(url)
             .json(&TextEncodeRequest { text, model })
+            .send()
+            .await?
+            .error_for_status()?
+            .json()
+            .await?)
+    }
+
+    pub async fn embed_texts(
+        &self,
+        port: u16,
+        texts: Vec<String>,
+        model: Option<String>,
+        query: bool,
+    ) -> AppResult<TextEmbedResponse> {
+        let url = endpoint(port, "/text/embed");
+        Ok(self
+            .client
+            .post(url)
+            .json(&TextEmbedRequest {
+                texts,
+                model,
+                query,
+            })
             .send()
             .await?
             .error_for_status()?

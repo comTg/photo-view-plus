@@ -352,7 +352,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 | A2 | 全文通道与融合框架：jieba-rs、`search_fts`、索引维护与重建、RRF、界面显示命中来源；先用 RAM 标签和 OCR 喂数据 | A1 | ✅ |
 | A2b | 同义词表与查询扩展（可选） | A2 | ⬜ |
 | A3 | 导入 memora 描述（`image_analysis` + `ai_jobs`）；跑 S2/S3，过 G1 | A2 | ✅ |
-| A4 | 文本向量通道：worker `/text/embed`、LanceDB `image_text_emb_<model>`；跑 S4/S5 | A3、G1 | ⬜ |
+| A4 | 文本向量通道：worker `/text/embed`、LanceDB `image_text_emb_<model>`；跑 S4/S5 | A3、G1 | ✅ |
 | A5 | Chinese-CLIP：worker 图像模型可插拔、新表、全量重算、人脸维度解耦；跑 S1/S5，过 G2，写 ADR-008 | A1 | ✅ |
 | A6 | VLM 打标流水线：`llama-server` 监管、worker `/vlm/analyze`、`AnalysisPipeline`（受 docs/11 R2 调度）、进度界面；200 张样本过 G3 后再全量 | R2（docs/11）、G1 | ⬜ |
 | A6b | 夜间定时：Windows 计划任务在 03:00 运行 `photo-view-plus.exe --background-analyze`（无窗口、单实例）；应用已经开着时交给正在运行的实例；07:00 前处理完或到点退出；与 memora 共用 8081 服务（§12） | A6 | ⬜ |
@@ -438,6 +438,26 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 - **通过标准**：过 G1。
 
 ### A4 文本向量通道
+- **实测 / 备注**（2026-10-23 完成）：
+  - worker：`models/text_loader.py` + `/text/embed`（批量；`query=true` 时按模型卡加检索指令前缀；CUDA 半精度；同一时间驻留一个模型，加载失败进兜底）。和评测时的向量逐条对比余弦 1.0。
+  - Rust：任务类型 `text_embedding`，`input_hash` = 描述文本的 BLAKE3 前 16 位。给 SQLite 注册了自定义函数 `text_hash()`（rusqlite `functions` feature），待处理判断直接在 SQL 里比对指纹：描述被改写（例如 VLM 覆盖 memora）或换模型时自动重算。`ai_jobs` 的重试计数在模型或输入指纹变化时从 1 重新计。批次 128 条，优先级与图像向量同为 P6。
+  - 搜索：第四路"描述语义"（`matchedBy = semantic`）；两路查询编码并行，两路向量检索也并行。描述向量的相似度下限 0.35：评测集里相关图的余弦 p5 是 0.359、不相关图的中位数 0.373；加下限前后 R5 指标不变。
+  - **修了一个触发器的问题**（migration `0010`）：0008 / 0009 的积压触发器用 `INSERT OR IGNORE` 去重，但 SQLite 规定由带冲突子句的语句（`image_analysis` 的 UPSERT 走 DO UPDATE 分支）触发时，触发器里的 OR IGNORE 会被外层冲突策略覆盖成 ABORT，积压表里已有这张图时写入直接报 UNIQUE 错误（memora 重复导入、VLM 覆盖描述都会遇到）。改成 `WHERE NOT EXISTS` 写法，加了回归测试。
+  - 设置：`aiTextModel`（bge-small-zh-v1.5 / bge-base-zh-v1.5），设置页可选，状态栏显示描述向量待处理数。
+  - **耗时**：正式库副本 12,452 条描述，bge-small 19.7 秒、bge-base 27.0 秒（含 worker 启动）。查询编码 + 检索（debug 构建）bge-small p95 84ms、bge-base p95 91ms。四路融合整次搜索 debug 构建 p95 约 300ms，release 会明显更快。
+  - **评测**（本轮补标 39 张拼图、约 245 格，主要来自 bge-base 对比方案）：
+
+    | 方案 | nDCG@20 | P@10 | MRR | Recall@20 |
+    |------|---------|------|-----|-----------|
+    | R4 描述向量（bge-small） | 0.840 | 0.853 | 0.971 | 0.340 |
+    | R4 描述向量（bge-base） | 0.846 | 0.868 | 0.923 | 0.353 |
+    | R5 四路融合（bge-small，默认） | 0.899 | 0.912 | 0.963 | 0.381 |
+    | R5 四路融合（bge-base） | 0.912 | 0.925 | 0.975 | 0.384 |
+    | 原型 S5w（对照） | 0.900 | 0.920 | 0.975 | 0.376 |
+
+    R4 与原型 S4（0.839）一致；R5 与原型最好的 S5w 持平，远高于 R3（0.688），满足"S5 不低于 S3"。
+  - **选型**：默认保留 **bge-small-zh-v1.5**。bge-base 在融合上只多 0.013 nDCG，体积是 4 倍（400MB 对 95MB）、向量 768 维、编码慢约三成；设置里可以改用 bge-base（换模型后全库后台重算，约半分钟）。
+  - 测试：新增 `text_embedding_tests`（3 个：`text_hash` 与 Rust 一致、描述变化 / 换模型重算与兜底不入库、第四路参与融合与降级）；`analysis_tests` 加触发器回归用例。
 - **改动**：
   - worker 端点 `/text/embed`（批量，返回模型名与维度）；Rust 侧任务类型 `text_embedding`，用 `input_hash` 判断是否需要重算。
   - 新 LanceDB 表；融合时加入这一路。

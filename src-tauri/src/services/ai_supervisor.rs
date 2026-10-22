@@ -13,7 +13,7 @@ use tokio::time::Instant;
 use crate::error::{AppError, AppResult};
 use crate::services::ai_client::{
     AiHttpClient, ClipEmbedItem, ClipEmbedResponse, FaceDetectItem, FaceDetectResponse, OcrItem,
-    OcrResponse, TaggerItem, TaggerResponse, TextEncodeResponse, WorkerHealth,
+    OcrResponse, TaggerItem, TaggerResponse, TextEmbedResponse, TextEncodeResponse, WorkerHealth,
 };
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
@@ -217,6 +217,16 @@ impl AiSupervisor {
     ) -> AppResult<TextEncodeResponse> {
         let port = self.ready_port().await?;
         self.client.encode_text(port, text, model).await
+    }
+
+    pub async fn embed_texts(
+        &self,
+        texts: Vec<String>,
+        model: Option<String>,
+        query: bool,
+    ) -> AppResult<TextEmbedResponse> {
+        let port = self.ready_port().await?;
+        self.client.embed_texts(port, texts, model, query).await
     }
 
     pub async fn tag_images(&self, items: Vec<TaggerItem>) -> AppResult<TaggerResponse> {

@@ -88,6 +88,11 @@ pub const DEFAULT_CLIP_MODEL: &str = "chinese-clip-vit-b-16";
 pub const LEGACY_CLIP_MODEL: &str = "clip-vit-b-32";
 /// 设置项可选的图像向量模型。
 pub const CLIP_MODELS: &[&str] = &[DEFAULT_CLIP_MODEL, LEGACY_CLIP_MODEL];
+/// 默认的描述文本向量模型（docs/10 A4）。
+pub const DEFAULT_TEXT_MODEL: &str = "bge-small-zh-v1.5";
+/// 设置项可选的描述文本向量模型。
+pub const TEXT_MODELS: &[&str] = &[DEFAULT_TEXT_MODEL, "bge-base-zh-v1.5"];
+
 /// 图像向量模型的维度（向量表按"模型 + 维度"命名，查已存向量时要先知道维度）。
 pub fn clip_model_dims(model: &str) -> usize {
     match model {
@@ -116,6 +121,8 @@ pub struct AppSettings {
     pub ai_enabled: bool,
     pub ai_idle_stop_minutes: u16,
     pub ai_clip_model: String,
+    /// 描述文本向量模型（"描述语义"检索通道）。
+    pub ai_text_model: String,
     pub ai_tagger_model: String,
     pub ocr_enabled: bool,
     pub face_enabled: bool,
@@ -135,6 +142,7 @@ impl Default for AppSettings {
             ai_enabled: true,
             ai_idle_stop_minutes: 10,
             ai_clip_model: DEFAULT_CLIP_MODEL.to_string(),
+            ai_text_model: DEFAULT_TEXT_MODEL.to_string(),
             ai_tagger_model: "ram-plus".to_string(),
             ocr_enabled: false,
             face_enabled: false,
@@ -155,6 +163,7 @@ pub struct AppSettingsPatch {
     pub ai_enabled: Option<bool>,
     pub ai_idle_stop_minutes: Option<u16>,
     pub ai_clip_model: Option<String>,
+    pub ai_text_model: Option<String>,
     pub ai_tagger_model: Option<String>,
     pub ocr_enabled: Option<bool>,
     pub face_enabled: Option<bool>,
@@ -207,6 +216,12 @@ impl AppSettings {
             let key = sanitize_model_key(ai_clip_model, DEFAULT_CLIP_MODEL);
             if CLIP_MODELS.contains(&key.as_str()) {
                 self.ai_clip_model = key;
+            }
+        }
+        if let Some(ai_text_model) = patch.ai_text_model {
+            let key = sanitize_model_key(ai_text_model, DEFAULT_TEXT_MODEL);
+            if TEXT_MODELS.contains(&key.as_str()) {
+                self.ai_text_model = key;
             }
         }
         if let Some(ai_tagger_model) = patch.ai_tagger_model {

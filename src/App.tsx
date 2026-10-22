@@ -1972,6 +1972,10 @@ function AiSearchView({
           图像向量 {pipeline?.embeddingPending ?? 0} 待处理 / {pipeline?.embeddingInflight ?? 0}{" "}
           运行
         </span>
+        <span title={pipeline?.textEmbeddingModel}>
+          描述向量 {pipeline?.textEmbeddingPending ?? 0} 待处理 /{" "}
+          {pipeline?.textEmbeddingInflight ?? 0} 运行
+        </span>
         <span>
           标签 {pipeline?.taggingPending ?? 0} 待处理 / {pipeline?.taggingInflight ?? 0} 运行
         </span>
@@ -3140,6 +3144,17 @@ function SettingsView({
               </select>
             </label>
             <label className="settings-field">
+              <span>描述向量模型</span>
+              <select
+                value={settings.aiTextModel}
+                title="给画面描述算文本向量，用于按意思搜描述；换模型后会在后台重新计算"
+                onChange={(event) => void onPatch({ aiTextModel: event.target.value })}
+              >
+                <option value="bge-small-zh-v1.5">bge-small-zh（推荐，95MB）</option>
+                <option value="bge-base-zh-v1.5">bge-base-zh（400MB，略准）</option>
+              </select>
+            </label>
+            <label className="settings-field">
               <span>标签模型</span>
               <select
                 value={settings.aiTaggerModel}
@@ -3279,6 +3294,12 @@ function SettingsView({
             <strong title={aiPipeline?.embeddingModel}>
               {aiPipeline
                 ? `${aiPipeline.embeddingPending} 待处理 · ${aiPipeline.embeddingInflight} 运行`
+                : "未知"}
+            </strong>
+            <span>描述向量</span>
+            <strong title={aiPipeline?.textEmbeddingModel}>
+              {aiPipeline
+                ? `${aiPipeline.textEmbeddingPending} 待处理 · ${aiPipeline.textEmbeddingInflight} 运行`
                 : "未知"}
             </strong>
             <span>标签</span>

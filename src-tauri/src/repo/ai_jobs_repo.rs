@@ -38,7 +38,8 @@ pub struct JobCounts {
     pub skipped: i64,
 }
 
-/// 记一条结果（upsert）。同一模型再记一次 `attempts + 1`；换了模型从 1 重新计。
+/// 记一条结果（upsert）。同一模型、同一输入再记一次 `attempts + 1`；换了模型或输入指纹变了，
+/// 从 1 重新计。
 pub fn record(
     conn: &Connection,
     kind: &str,
@@ -53,7 +54,11 @@ pub fn record(
          SELECT ?1, ?2, ?3, ?4, 1, ?5, ?6, ?7
          WHERE EXISTS (SELECT 1 FROM images WHERE id = ?1)
          ON CONFLICT(image_id, kind) DO UPDATE SET
-             attempts = CASE WHEN ai_jobs.model = excluded.model THEN ai_jobs.attempts + 1 ELSE 1 END,
+             attempts = CASE
+                 WHEN ai_jobs.model = excluded.model AND ai_jobs.input_hash IS excluded.input_hash
+                 THEN ai_jobs.attempts + 1
+                 ELSE 1
+             END,
              model = excluded.model,
              status = excluded.status,
              last_error = excluded.last_error,
@@ -107,6 +112,47 @@ pub fn count_pending_image_embedding(conn: &Connection, model: &str) -> AppResul
         "SELECT COUNT(*) FROM images i
          LEFT JOIN ai_jobs j ON j.image_id = i.id AND j.kind = '{KIND_IMAGE_EMBEDDING}'
          WHERE i.deleted_at IS NULL AND i.thumb_status = 'ready' AND {PENDING_CONDITION}"
+    );
+    Ok(conn
+        .prepare_cached(&sql)?
+        .query_row(params![model, MAX_ATTEMPTS], |row| row.get(0))?)
+}
+
+/// 描述的文本向量：有非空描述、当前模型下还没有算过（或描述变了、失败可重试）的图，最多 `limit` 张。
+///
+/// 描述变没变用 SQL 函数 `text_hash()`（见 `db::register_functions`）和 `ai_jobs.input_hash` 比对。
+pub fn pending_text_embedding(conn: &Connection, model: &str, limit: i64) -> AppResult<Vec<i64>> {
+    let sql = format!(
+        "SELECT a.image_id FROM image_analysis a
+         JOIN images i ON i.id = a.image_id
+         LEFT JOIN ai_jobs j ON j.image_id = a.image_id AND j.kind = '{KIND_TEXT_EMBEDDING}'
+         WHERE i.deleted_at IS NULL AND TRIM(a.description) <> ''
+           AND (j.image_id IS NULL
+                OR j.model <> ?1
+                OR j.input_hash IS NOT text_hash(a.description)
+                OR (j.status = 'failed' AND j.attempts < ?2))
+         ORDER BY a.image_id
+         LIMIT ?3"
+    );
+    let mut stmt = conn.prepare_cached(&sql)?;
+    let rows = stmt.query_map(params![model, MAX_ATTEMPTS, limit.max(1)], |row| row.get(0))?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn count_pending_text_embedding(conn: &Connection, model: &str) -> AppResult<i64> {
+    let sql = format!(
+        "SELECT COUNT(*) FROM image_analysis a
+         JOIN images i ON i.id = a.image_id
+         LEFT JOIN ai_jobs j ON j.image_id = a.image_id AND j.kind = '{KIND_TEXT_EMBEDDING}'
+         WHERE i.deleted_at IS NULL AND TRIM(a.description) <> ''
+           AND (j.image_id IS NULL
+                OR j.model <> ?1
+                OR j.input_hash IS NOT text_hash(a.description)
+                OR (j.status = 'failed' AND j.attempts < ?2))"
     );
     Ok(conn
         .prepare_cached(&sql)?

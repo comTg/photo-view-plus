@@ -16,7 +16,9 @@
 //! - `PVP_EVAL_WORKER_PORT`：已在运行的 AI worker 端口；不设时由 `AiSupervisor` 拉起
 //!   `PVP_AI_WORKER_DIR`（默认仓库里的 `ai-worker`）；
 //! - `PVP_EVAL_MEMORA_DB`：memora 数据库（准备阶段导入描述），默认 memora 的本机位置；
-//! - `PVP_EVAL_SYSTEMS`：只跑这些方案（逗号分隔，如 `R3,R5`），默认全部。
+//! - `PVP_EVAL_SYSTEMS`：只跑这些方案（逗号分隔，如 `R3,R5`），默认全部；
+//! - `PVP_EVAL_TEXT_MODEL`：描述文本向量模型，默认 bge-small-zh-v1.5；换成别的模型时，
+//!   用到描述向量的方案名加 `@模型` 后缀（如 `R4@bge-base-zh-v1.5`），便于对比。
 //!
 //! 输出：`<评测目录>\runs\R*.json`（查询 id → 语料 key 列表，key 是忽略大小写的完整路径），
 //! 以及每路查询耗时。之后运行 `make_sheets.py`（只为没标过的图出拼图）和 `score.py`。
@@ -27,9 +29,10 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use async_trait::async_trait;
-use photo_view_plus_lib::config::DEFAULT_CLIP_MODEL;
+use photo_view_plus_lib::config::{DEFAULT_CLIP_MODEL, DEFAULT_TEXT_MODEL};
 use photo_view_plus_lib::db::{self, Pool};
 use photo_view_plus_lib::repo::ai_jobs_repo;
+use photo_view_plus_lib::repo::analysis_repo;
 use photo_view_plus_lib::repo::images_repo;
 use photo_view_plus_lib::repo::lancedb_repo::LanceDbRepo;
 use photo_view_plus_lib::services::ai_client::{AiHttpClient, ClipEmbedItem};
@@ -132,6 +135,11 @@ async fn worker() -> Worker {
 struct EvalEncoder<'a> {
     worker: &'a Worker,
     clip_model: String,
+    text_model: String,
+}
+
+fn eval_text_model() -> String {
+    std::env::var("PVP_EVAL_TEXT_MODEL").unwrap_or_else(|_| DEFAULT_TEXT_MODEL.to_string())
 }
 
 #[async_trait]
@@ -165,6 +173,30 @@ impl QueryEncoder for EvalEncoder<'_> {
         _thumb_path: String,
     ) -> AppResult<Option<Vec<f32>>> {
         Ok(None)
+    }
+
+    fn text_model(&self) -> Option<&str> {
+        Some(&self.text_model)
+    }
+
+    async fn encode_query(&self, text: &str) -> AppResult<Option<Vec<f32>>> {
+        let response = self
+            .worker
+            .client
+            .embed_texts(
+                self.worker.port,
+                vec![text.to_string()],
+                Some(self.text_model.clone()),
+                true,
+            )
+            .await?;
+        if response.fallback {
+            return Err(AppError::Other(format!(
+                "worker 文本向量处于兜底模式（{}），评测无意义",
+                response.model
+            )));
+        }
+        Ok(response.embeddings.into_iter().next())
     }
 }
 
@@ -389,6 +421,48 @@ async fn eval_prepare() {
         "image embedding ({model}) done: {done} ok, {failed} failed in {secs:.1}s ({:.1} img/s)",
         done as f64 / secs.max(0.001)
     );
+
+    // 描述文本向量
+    let text_model = eval_text_model();
+    let started = Instant::now();
+    let mut done = 0usize;
+    loop {
+        let ids = {
+            let conn = env.pool.get().expect("conn");
+            ai_jobs_repo::pending_text_embedding(&conn, &text_model, 256).expect("pending")
+        };
+        if ids.is_empty() {
+            break;
+        }
+        let items = {
+            let conn = env.pool.get().expect("conn");
+            analysis_repo::texts_for(&conn, &ids).expect("texts")
+        }
+        .into_iter()
+        .map(|(id, texts)| (id, texts.description))
+        .collect::<Vec<_>>();
+        let response = worker
+            .client
+            .embed_texts(
+                worker.port,
+                items.iter().map(|(_, text)| text.clone()).collect(),
+                Some(text_model.clone()),
+                false,
+            )
+            .await
+            .expect("embed texts");
+        assert!(!response.fallback, "worker 文本向量处于兜底模式");
+        let outcome =
+            ai_pipeline::apply_text_embed_response(&env.pool, &env.vectors, &items, response, 1)
+                .await
+                .expect("apply");
+        done += outcome.stored;
+    }
+    let secs = started.elapsed().as_secs_f64();
+    println!(
+        "text embedding ({text_model}) done: {done} in {secs:.1}s ({:.0} texts/s)",
+        done as f64 / secs.max(0.001)
+    );
 }
 
 /// 各方案的排名（方案定义见 scripts/search_eval/score.py 的 NAMES）：
@@ -406,9 +480,11 @@ async fn eval_run() {
     let worker = worker().await;
     let queries = load_queries();
     let keys = corpus_keys(&env.pool);
+    let text_model = eval_text_model();
     let encoder = EvalEncoder {
         worker: &worker,
         clip_model: DEFAULT_CLIP_MODEL.to_string(),
+        text_model: text_model.clone(),
     };
     let wanted = std::env::var("PVP_EVAL_SYSTEMS").ok().map(|raw| {
         raw.split(',')
@@ -422,7 +498,15 @@ async fn eval_run() {
         {
             continue;
         }
-        run_system(&env, &encoder, &keys, &queries, name, &options).await;
+        // 换了描述向量模型时，用到这一路的方案名加后缀，不覆盖默认模型的结果。
+        let name = if text_model != DEFAULT_TEXT_MODEL
+            && options.channels.contains(&Channel::TextVector)
+        {
+            format!("{name}@{text_model}")
+        } else {
+            name.to_string()
+        };
+        run_system(&env, &encoder, &keys, &queries, &name, &options).await;
     }
 }
 
@@ -451,6 +535,8 @@ fn systems() -> Vec<(&'static str, SearchOptions)> {
                 ..SearchOptions::only(&[Channel::FullText])
             },
         ),
+        // 只跑描述文本向量（对应原型 S4）
+        ("R4", SearchOptions::only(&[Channel::TextVector])),
         // 图像向量 + 标签 + 全文，不用描述（对应原型 S5b）
         (
             "R5b",

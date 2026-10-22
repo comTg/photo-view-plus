@@ -36,7 +36,8 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 futures = "0.3"
 
 # T2: SQLite + 连接池
-rusqlite = { version = "0.39", features = ["bundled"] }
+# functions：注册 text_hash() 等自定义 SQL 函数（docs/10 A4，见 db::register_functions）
+rusqlite = { version = "0.39", features = ["bundled", "functions"] }
 r2d2 = "0.8"
 r2d2_sqlite = "0.34"
 

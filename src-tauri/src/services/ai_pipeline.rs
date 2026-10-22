@@ -10,11 +10,13 @@ use crate::config::AppPaths;
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Scheduler, Task, TaskContext};
-use crate::repo::ai_jobs_repo::{self, JobResult, KIND_IMAGE_EMBEDDING};
+use crate::repo::ai_jobs_repo::{self, JobResult, KIND_IMAGE_EMBEDDING, KIND_TEXT_EMBEDDING};
 use crate::repo::images_repo::{self, ImageRecord};
 use crate::repo::lancedb_repo::{EmbeddingRecord, LanceDbRepo, VectorTable};
 use crate::repo::tags_repo::{self, NewTagScore};
-use crate::services::ai_client::{ClipEmbedItem, ClipEmbedResponse, TaggerItem, TaggerResponse};
+use crate::services::ai_client::{
+    ClipEmbedItem, ClipEmbedResponse, TaggerItem, TaggerResponse, TextEmbedResponse,
+};
 use crate::services::ai_supervisor::AiSupervisor;
 use crate::services::settings_service;
 use crate::services::startup_gate::StartupGate;
@@ -22,6 +24,8 @@ use crate::services::thumbnail_service;
 
 const EMBED_BATCH: i64 = 32;
 const TAG_BATCH: i64 = 16;
+/// 描述文本向量一批的条数：bge-small 在 GPU 上 128 条约 20 毫秒，批大一点省 HTTP 往返。
+const TEXT_EMBED_BATCH: i64 = 128;
 /// worker 返回兜底结果（缺 torch / open_clip / RAM 权重时的哈希伪向量、占位标签）后，
 /// 多久内不再投递同类批次。兜底结果一律不入库，投了也是白算；worker 换进程时提前解除，
 /// 见 [`FallbackBackoff`]。
@@ -48,8 +52,10 @@ pub struct AiPipeline {
 struct AiPipelineState {
     embed_inflight: HashSet<i64>,
     tag_inflight: HashSet<i64>,
+    text_inflight: HashSet<i64>,
     embed_fallback: FallbackBackoff,
     tag_fallback: FallbackBackoff,
+    text_fallback: FallbackBackoff,
 }
 
 /// 某类 AI 批次（embedding / 打标签）的兜底退避状态。
@@ -193,6 +199,107 @@ pub async fn apply_embed_response(
     })
 }
 
+/// 一批 `/text/embed` 响应的落库结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TextEmbedApplyOutcome {
+    pub stored: usize,
+    pub failed: usize,
+    pub fallback: bool,
+}
+
+/// 把描述文本向量落库：向量写进该模型自己的表（[`VectorTable::image_text`]），状态记进 `ai_jobs`
+/// （kind = `text_embedding`，input_hash = 描述文本的指纹，描述变了会自动重算）。
+///
+/// `items` 是 (image_id, 送去编码的描述) 并与 `response.embeddings` 一一对应。兜底伪向量一律不写。
+pub async fn apply_text_embed_response(
+    pool: &Pool,
+    vectors: &LanceDbRepo,
+    items: &[(i64, String)],
+    response: TextEmbedResponse,
+    now: i64,
+) -> AppResult<TextEmbedApplyOutcome> {
+    if response.fallback {
+        return Ok(TextEmbedApplyOutcome {
+            fallback: true,
+            ..TextEmbedApplyOutcome::default()
+        });
+    }
+    if response.embeddings.len() != items.len() {
+        return Err(AppError::Other(format!(
+            "AI worker 返回 {} 条文本向量，请求了 {} 条",
+            response.embeddings.len(),
+            items.len()
+        )));
+    }
+    let table = VectorTable::image_text(&response.model, response.dims);
+    let mut records = Vec::new();
+    let mut failures = Vec::new();
+    for ((image_id, text), embedding) in items.iter().zip(response.embeddings) {
+        if embedding.len() == response.dims {
+            records.push((
+                EmbeddingRecord {
+                    image_id: *image_id,
+                    model: response.model.clone(),
+                    embedding,
+                    created_at: now,
+                },
+                crate::db::text_hash(text),
+            ));
+        } else {
+            failures.push((
+                *image_id,
+                crate::db::text_hash(text),
+                format!(
+                    "向量维度 {} 与模型维度 {} 不符",
+                    embedding.len(),
+                    response.dims
+                ),
+            ));
+        }
+    }
+    let embeddings = records
+        .iter()
+        .map(|(record, _)| record.clone())
+        .collect::<Vec<_>>();
+    vectors.upsert_embeddings(&table, &embeddings).await?;
+    let conn = pool.get()?;
+    let tx = conn.unchecked_transaction()?;
+    for (record, hash) in &records {
+        ai_jobs_repo::record(
+            &tx,
+            KIND_TEXT_EMBEDDING,
+            &response.model,
+            &JobResult {
+                image_id: record.image_id,
+                status: ai_jobs_repo::STATUS_READY,
+                error: None,
+                input_hash: Some(hash),
+            },
+            now,
+        )?;
+    }
+    for (image_id, hash, error) in &failures {
+        ai_jobs_repo::record(
+            &tx,
+            KIND_TEXT_EMBEDDING,
+            &response.model,
+            &JobResult {
+                image_id: *image_id,
+                status: ai_jobs_repo::STATUS_FAILED,
+                error: Some(error),
+                input_hash: Some(hash),
+            },
+            now,
+        )?;
+    }
+    tx.commit()?;
+    Ok(TextEmbedApplyOutcome {
+        stored: records.len(),
+        failed: failures.len(),
+        fallback: false,
+    })
+}
+
 /// 把打标签响应落库。兜底的占位标签（颜色启发式等，`response.fallback == true`）**一律不写**：
 /// 不动 `image_tags`、不改 `tag_status`，图片保持 pending，等真 tagger 可用后重打。
 pub fn apply_tag_response(
@@ -274,9 +381,14 @@ impl AiPipeline {
     }
 
     pub fn status(&self) -> AiPipelineStatus {
-        let embedding_model = settings_service::read(&self.paths)
-            .map(|settings| settings.ai_clip_model)
-            .unwrap_or_else(|_| crate::config::DEFAULT_CLIP_MODEL.to_string());
+        let (embedding_model, text_embedding_model) = settings_service::read(&self.paths)
+            .map(|settings| (settings.ai_clip_model, settings.ai_text_model))
+            .unwrap_or_else(|_| {
+                (
+                    crate::config::DEFAULT_CLIP_MODEL.to_string(),
+                    crate::config::DEFAULT_TEXT_MODEL.to_string(),
+                )
+            });
         let conn = match self.pool.get() {
             Ok(conn) => conn,
             Err(_) => {
@@ -286,12 +398,17 @@ impl AiPipeline {
                     embedding_inflight: 0,
                     tagging_inflight: 0,
                     embedding_model,
+                    text_embedding_pending: 0,
+                    text_embedding_inflight: 0,
+                    text_embedding_model,
                 }
             }
         };
         let embedding_pending =
             ai_jobs_repo::count_pending_image_embedding(&conn, &embedding_model).unwrap_or(0);
         let tagging_pending = count_pending_tags(&conn).unwrap_or(0);
+        let text_embedding_pending =
+            ai_jobs_repo::count_pending_text_embedding(&conn, &text_embedding_model).unwrap_or(0);
         let state = self.state.lock().ok();
         AiPipelineStatus {
             embedding_pending,
@@ -305,6 +422,12 @@ impl AiPipeline {
                 .map(|state| state.tag_inflight.len())
                 .unwrap_or(0),
             embedding_model,
+            text_embedding_pending,
+            text_embedding_inflight: state
+                .as_ref()
+                .map(|state| state.text_inflight.len())
+                .unwrap_or(0),
+            text_embedding_model,
         }
     }
 
@@ -314,33 +437,37 @@ impl AiPipeline {
             return Ok(());
         }
         let clip_model = settings.ai_clip_model;
+        let text_model = settings.ai_text_model;
         // 先看有没有待处理的图：没有就别去唤醒（启动）Python worker。
-        let (embed_pending, tag_pending) = {
+        let (embed_pending, tag_pending, text_pending) = {
             let conn = self.pool.get()?;
             (
                 ai_jobs_repo::count_pending_image_embedding(&conn, &clip_model)?,
                 count_pending_tags(&conn)?,
+                ai_jobs_repo::count_pending_text_embedding(&conn, &text_model)?,
             )
         };
-        if embed_pending == 0 && tag_pending == 0 {
+        if embed_pending == 0 && tag_pending == 0 && text_pending == 0 {
             return Ok(());
         }
         // 兜底退避：worker 上次对这类任务返回的是伪结果（不入库），同一 worker 进程在窗口内
-        // 不再投递；两类都在退避中时也不去唤醒 worker。
+        // 不再投递；几类都在退避中时也不去唤醒 worker。
         let pid = worker_pid(&self.supervisor).await;
-        let (embed_backoff, tag_backoff) = {
+        let (embed_backoff, tag_backoff, text_backoff) = {
             let now = Instant::now();
             match self.state.lock() {
                 Ok(state) => (
                     state.embed_fallback.is_active(now, pid),
                     state.tag_fallback.is_active(now, pid),
+                    state.text_fallback.is_active(now, pid),
                 ),
-                Err(_) => (false, false),
+                Err(_) => (false, false, false),
             }
         };
         let want_embed = embed_pending > 0 && !embed_backoff;
         let want_tag = tag_pending > 0 && !tag_backoff;
-        if !want_embed && !want_tag {
+        let want_text = text_pending > 0 && !text_backoff;
+        if !want_embed && !want_tag && !want_text {
             return Ok(());
         }
         // worker 未就绪（或正处于启动失败退避窗口内）就跳过本轮：
@@ -354,7 +481,33 @@ impl AiPipeline {
         if want_tag {
             self.enqueue_tag_batch()?;
         }
+        if want_text {
+            self.enqueue_text_embedding_batch(&text_model)?;
+        }
         Ok(())
+    }
+
+    fn enqueue_text_embedding_batch(&self, model: &str) -> AppResult<()> {
+        let conn = self.pool.get()?;
+        let candidates = ai_jobs_repo::pending_text_embedding(&conn, model, TEXT_EMBED_BATCH * 2)?;
+        drop(conn);
+        let ids = take_not_inflight(
+            &candidates,
+            &self.state,
+            |state| &mut state.text_inflight,
+            TEXT_EMBED_BATCH as usize,
+        );
+        if ids.is_empty() {
+            return Ok(());
+        }
+        self.scheduler.enqueue(TextEmbedBatchTask {
+            pool: self.pool.clone(),
+            supervisor: self.supervisor.clone(),
+            vectors: self.vectors.clone(),
+            state: self.state.clone(),
+            model: model.to_string(),
+            image_ids: ids,
+        })
     }
 
     fn enqueue_embedding_batch(&self, model: &str) -> AppResult<()> {
@@ -416,6 +569,10 @@ pub struct AiPipelineStatus {
     pub tagging_inflight: usize,
     /// 当前图像向量模型（设置项 `aiClipModel`）。
     pub embedding_model: String,
+    /// 描述文本向量（docs/10 A4）。
+    pub text_embedding_pending: i64,
+    pub text_embedding_inflight: usize,
+    pub text_embedding_model: String,
 }
 
 struct EmbedBatchTask {
@@ -427,6 +584,82 @@ struct EmbedBatchTask {
     /// 投递时的图像向量模型；worker 按它加载模型，结果写进该模型的表。
     model: String,
     image_ids: Vec<i64>,
+}
+
+struct TextEmbedBatchTask {
+    pool: Pool,
+    supervisor: Arc<AiSupervisor>,
+    vectors: LanceDbRepo,
+    state: Arc<Mutex<AiPipelineState>>,
+    model: String,
+    image_ids: Vec<i64>,
+}
+
+#[async_trait]
+impl Task for TextEmbedBatchTask {
+    fn priority(&self) -> Priority {
+        Priority::P6
+    }
+
+    fn label(&self) -> String {
+        format!("ai-text-embed:{}", self.image_ids.len())
+    }
+
+    async fn run(&self, ctx: TaskContext) -> AppResult<()> {
+        let result = self.run_inner(ctx).await;
+        clear_inflight(&self.state, &self.image_ids, |state| {
+            &mut state.text_inflight
+        });
+        result
+    }
+}
+
+impl TextEmbedBatchTask {
+    async fn run_inner(&self, ctx: TaskContext) -> AppResult<()> {
+        if ctx.is_cancelled() {
+            return Ok(());
+        }
+        // 运行时再读描述：投递之后描述可能又被更新，记录的指纹要对应真正编码的文本。
+        let items = {
+            let conn = self.pool.get()?;
+            crate::repo::analysis_repo::texts_for(&conn, &self.image_ids)?
+        }
+        .into_iter()
+        .filter(|(_, texts)| !texts.description.trim().is_empty())
+        .map(|(image_id, texts)| (image_id, texts.description))
+        .collect::<Vec<_>>();
+        if items.is_empty() {
+            return Ok(());
+        }
+        let response = self
+            .supervisor
+            .embed_texts(
+                items.iter().map(|(_, text)| text.clone()).collect(),
+                Some(self.model.clone()),
+                false,
+            )
+            .await?;
+        let model = response.model.clone();
+        if model != self.model {
+            return Err(AppError::Other(format!(
+                "AI worker 返回的文本向量模型 {model} 与请求的 {} 不一致",
+                self.model
+            )));
+        }
+        let outcome =
+            apply_text_embed_response(&self.pool, &self.vectors, &items, response, now_unix())
+                .await?;
+        track_fallback(
+            &self.supervisor,
+            &self.state,
+            |state| &mut state.text_fallback,
+            outcome.fallback,
+            "text embedding",
+            &model,
+        )
+        .await;
+        Ok(())
+    }
 }
 
 struct TagBatchTask {

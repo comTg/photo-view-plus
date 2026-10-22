@@ -248,6 +248,7 @@ fn query_encoder(
     Ok(WorkerQueryEncoder::new(
         supervisor.clone(),
         settings.ai_clip_model,
+        Some(settings.ai_text_model),
     ))
 }
 

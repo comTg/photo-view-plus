@@ -291,3 +291,40 @@ fn upsert_tag_keeps_the_first_source() {
     );
     assert_eq!(tag.category.as_deref(), Some("category"));
 }
+
+/// 回归：image_analysis 的 UPSERT 走 DO UPDATE 分支时，触发器里的 OR IGNORE 会被外层冲突策略
+/// 覆盖。检索索引积压表里已经有这张图（还没被后台处理）时，更新描述不能报 UNIQUE 约束错误。
+#[test]
+fn updating_analysis_with_pending_index_rows_does_not_conflict() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = open(dir.path());
+    let ids = seed_library(&pool);
+    let memora = memora_db(dir.path());
+    let mut conn = pool.get().expect("conn");
+    // 新入库的图都在积压表里；连续导入两次（第二次全部走 DO UPDATE）。
+    memora_import_service::import_memora(&mut conn, &memora, 1).expect("first import");
+    memora_import_service::import_memora(&mut conn, &memora, 2).expect("re-import");
+    // VLM 覆盖 memora 的描述（同样走 DO UPDATE）。
+    let vlm = ImageAnalysis {
+        image_id: ids[2],
+        source: SOURCE_VLM.to_string(),
+        model: "qwen3.5-9b-q4".to_string(),
+        prompt_version: "search-v1".to_string(),
+        description: "VLM 的描述".to_string(),
+        categories: Vec::new(),
+        keywords: Vec::new(),
+        people_count: None,
+        visible_text: None,
+        sensitive: false,
+        raw_json: None,
+        duration_ms: None,
+        analyzed_at: 3,
+    };
+    assert!(analysis_repo::upsert(&conn, &vlm).expect("vlm overwrite"));
+    let pending: i64 = conn
+        .query_row("SELECT COUNT(*) FROM search_fts_dirty", [], |row| {
+            row.get(0)
+        })
+        .expect("pending");
+    assert_eq!(pending, 5, "每张图只排一次");
+}

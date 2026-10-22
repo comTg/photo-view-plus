@@ -18,8 +18,9 @@ BERT_TOKENIZER_FILES = [
     "special_tokens_map.json",
     "added_tokens.json",
 ]
-# 本机访问 huggingface.co 只有约 10KB/s（docs/10 §5.1）。没设 HF_ENDPOINT 时依次试官方地址和
-# hf-mirror 镜像；ModelScope 写在 manifest 的 modelscope_repo 里，排在最前（它偶尔整站 504）。
+# 本机访问 huggingface.co 只有约 10KB/s（docs/10 §5.1），连上了也下不完，所以没设 HF_ENDPOINT 时
+# 先试 hf-mirror 镜像、再试官方地址；ModelScope 写在 manifest 的 modelscope_repo 里，排在最前
+# （它偶尔整站 504，失败得很快）。
 HF_MIRROR = "https://hf-mirror.com"
 DOWNLOAD_TIMEOUT = 60
 
@@ -92,7 +93,7 @@ def download_sources(spec: dict[str, Any]) -> list[str]:
         sources.append(f"https://www.modelscope.cn/models/{ms_repo}/resolve/master/")
     hf_repo = spec.get("hf_repo")
     if hf_repo:
-        endpoints = [os.environ["HF_ENDPOINT"]] if os.environ.get("HF_ENDPOINT") else ["https://huggingface.co", HF_MIRROR]
+        endpoints = [os.environ["HF_ENDPOINT"]] if os.environ.get("HF_ENDPOINT") else [HF_MIRROR, "https://huggingface.co"]
         sources.extend(f"{endpoint.rstrip('/')}/{hf_repo}/resolve/main/" for endpoint in endpoints)
     return sources
 

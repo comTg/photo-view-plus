@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use r2d2_sqlite::SqliteConnectionManager;
+use rusqlite::functions::FunctionFlags;
 use rusqlite::Connection;
 
 use crate::error::AppResult;
@@ -25,7 +26,8 @@ pub fn open(db_path: &Path) -> AppResult<Pool> {
              PRAGMA foreign_keys = ON;
              PRAGMA busy_timeout = 5000;
              PRAGMA synchronous = NORMAL;",
-        )
+        )?;
+        register_functions(c)
     });
 
     // 16 个连接对应文档里 8-16 并发上限的上端
@@ -36,6 +38,24 @@ pub fn open(db_path: &Path) -> AppResult<Pool> {
     migrations::run(&mut conn)?;
 
     Ok(pool)
+}
+
+/// 文本指纹：BLAKE3 的前 16 个十六进制字符。用作 `ai_jobs.input_hash`（例如描述文本变了，
+/// 它的文本向量就要重算，docs/10 §7）。与 SQL 函数 `text_hash()` 结果一致。
+pub fn text_hash(text: &str) -> String {
+    blake3::hash(text.as_bytes()).to_hex()[..16].to_string()
+}
+
+/// 给连接注册自定义 SQL 函数：
+/// - `text_hash(text)`：同 [`text_hash`]，NULL 进 NULL 出。待处理判断（"描述的指纹和上次算向量时
+///   是否一致"）因此能直接在 SQL 里算，不必把全部描述读进内存比对。
+pub fn register_functions(conn: &Connection) -> rusqlite::Result<()> {
+    conn.create_scalar_function(
+        "text_hash",
+        1,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|text| text_hash(&text))),
+    )
 }
 
 /// 默认数据库路径（开发期可在 Tauri 路径 API 不可用时调用）。
