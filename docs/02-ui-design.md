@@ -132,10 +132,11 @@ PhotoView                 ← App 名 / 设置入口
 └──────────────────────────────────────────────┘
 ```
 
-- 文本：触发 CLIP text→image 检索（MVP3）
+- 文本：四路召回融合（标签、全文、描述语义、画面向量，docs/10 §8），同义说法一起检索；结果卡片下方显示"命中：描述 / 文字 / 标签 / 语义 / 画面"和高亮片段；AI worker 还没就绪时先给文字结果并提示"语义检索启动中"，就绪后自动重搜
 - 拖入图片：图片转 embedding，搜 LanceDB（MVP3）
 - DSL：`#tag` 走标签倒排；`size>10MB`、`taken:2026`、`format:heic` 走 SQL 过滤
-- 组合：文本 + DSL 并存时，先 SQL 过滤候选集，再向量排序
+- 组合：文本 + DSL 并存时，先 SQL 过滤候选集，所有召回通道都只在候选集里检索
+- 标签云：按大模型的主类别分组（docs/10 A7），还没有大模型结果时平铺
 
 ### 2.2 去重对比（中下小图）
 
@@ -175,6 +176,8 @@ PhotoView                 ← App 名 / 设置入口
 - 显示当前并发数、估计剩余时间、CPU/GPU 占用
 - 设置每类任务的优先级、是否仅充电时跑、是否仅闲置时跑
 - AI Worker 状态：运行中 / 加载模型中 / CUDA 不可用 / 已停止
+- **后台处理档位**（docs/11 §5.5，已实现）：状态栏最右侧显示"后台处理：自动（使用中，已降速）/ 自动（空闲，全速）/ 全速 / 已暂停（至 HH:MM）"，圆点颜色区分降速 / 全速 / 暂停；点开向上弹出菜单切换"自动 / 全速 / 暂停 1 小时 / 暂停到重启"，悬停显示当前各类并发预算
+- **大模型打标进度**（docs/10 A6，已实现）：加载模型或分析时，状态栏多一行"大模型 待分析 N · x 秒/张 · 约 y 分钟"；等空闲时显示"待分析 N（空闲时运行）"
 
 ### 2.4 设置（右下小图之二）
 
@@ -183,6 +186,9 @@ PhotoView                 ← App 名 / 设置入口
 - **扫描**：本地/网络并发、忽略规则（glob）、文件监听开关
 - **缩略图**：缓存大小上限、清缓存按钮
 - **AI**：模型选择、CUDA / DirectML / CPU、模型下载管理
+  - 已实现：图像向量模型（Chinese-CLIP / 旧 CLIP）、描述向量模型（bge-small / bge-base）、标签来源（RAM-plus / 大模型）
+- **后台处理**（docs/11）：空闲判定分钟数、"使用电脑时也运行 AI"（默认关）、"大模型只在空闲时运行"（默认开）
+- **大模型打标**（docs/10 A6、A6b、A7）：开关；llama-server / 模型 / 视觉投影路径（可自动查找）；并发槽位；输入图长边；进度、速度、预计剩余、模型服务状态；卸载模型、重试失败、重新分析旧版本；夜间自动分析（注册 Windows 计划任务，时间窗口可调）；RAM 旧标签清理（大模型覆盖率 ≥ 95% 后可用，需确认）
 - **隐私**：人脸识别（默认关）、OCR（默认关）、日志上报（默认关）
 - **关于**：版本、日志目录、问题反馈
 
@@ -288,6 +294,20 @@ events: ai:progress, ai:worker_status
 
 // MVP4
 ocr_run, faces_cluster, smart_album_save, smart_album_query
+
+// docs/10 中文搜索与大模型打标
+ai_search → { results, degraded, degradedReason, channels, elapsedMs }
+search_index_rebuild, search_index_status
+analysis_import_memora, analysis_get, analysis_status
+analysis_progress, analysis_requeue_outdated, analysis_retry_failed
+vlm_detect_paths, vlm_server_stop, tags_ram_status, tags_cleanup_ram
+night_task_status, night_task_set
+events: analysis:progress
+
+// docs/11 后台资源治理
+governor_status, governor_set_override(mode: auto | fullSpeed | pause1h | pauseUntilRestart)
+thumbs_prioritize(ids)          // 可见区域优先的缩略图
+events: system:load_mode
 ```
 
 类型定义集中在 `src/lib/tauri-types.ts`，由 `cargo run --bin gen-types` 从 Rust 生成（用 `ts-rs` crate）。
