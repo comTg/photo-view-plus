@@ -33,5 +33,8 @@ fn embed_common_controls_manifest_into_tests() {
         .join("common-controls-v6.manifest");
     println!("cargo:rerun-if-changed={}", manifest.display());
     println!("cargo:rustc-link-arg-tests=/MANIFEST:EMBED");
-    println!("cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}", manifest.display());
+    println!(
+        "cargo:rustc-link-arg-tests=/MANIFESTINPUT:{}",
+        manifest.display()
+    );
 }

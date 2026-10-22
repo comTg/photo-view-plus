@@ -30,6 +30,9 @@ pub struct ClipEmbedItem {
 #[serde(rename_all = "camelCase")]
 pub struct ClipEmbedRequest {
     pub items: Vec<ClipEmbedItem>,
+    /// 图像向量模型（设置项 `aiClipModel`）；`None` 时 worker 沿用已加载的模型或默认模型。
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -45,12 +48,17 @@ pub struct ClipEmbedResult {
 pub struct ClipEmbedResponse {
     pub items: Vec<ClipEmbedResult>,
     pub model: String,
+    /// 向量维度（旧 worker 不返回，按 512 处理）。
+    #[serde(default = "default_clip_dims")]
+    pub dims: usize,
     pub fallback: bool,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TextEncodeRequest {
     pub text: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -58,7 +66,13 @@ pub struct TextEncodeRequest {
 pub struct TextEncodeResponse {
     pub embedding: Vec<f32>,
     pub model: String,
+    #[serde(default = "default_clip_dims")]
+    pub dims: usize,
     pub fallback: bool,
+}
+
+fn default_clip_dims() -> usize {
+    512
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -225,12 +239,13 @@ impl AiHttpClient {
         &self,
         port: u16,
         items: Vec<ClipEmbedItem>,
+        model: Option<String>,
     ) -> AppResult<ClipEmbedResponse> {
         let url = endpoint(port, "/clip/embed");
         Ok(self
             .client
             .post(url)
-            .json(&ClipEmbedRequest { items })
+            .json(&ClipEmbedRequest { items, model })
             .send()
             .await?
             .error_for_status()?
@@ -238,12 +253,17 @@ impl AiHttpClient {
             .await?)
     }
 
-    pub async fn encode_text(&self, port: u16, text: String) -> AppResult<TextEncodeResponse> {
+    pub async fn encode_text(
+        &self,
+        port: u16,
+        text: String,
+        model: Option<String>,
+    ) -> AppResult<TextEncodeResponse> {
         let url = endpoint(port, "/clip/encode_text");
         Ok(self
             .client
             .post(url)
-            .json(&TextEncodeRequest { text })
+            .json(&TextEncodeRequest { text, model })
             .send()
             .await?
             .error_for_status()?

@@ -140,11 +140,11 @@ impl ThumbnailTask {
         };
         // 事件只需 thumb_status/thumb_hash 等窄字段，走轻量投影（ocr_text=NULL），
         // 避免大扫描时每张缩略图都回读一次 OCR 全文。详情面板的 OCR 由前端单独保留。
-        let updated = self
-            .pool
-            .get()
-            .ok()
-            .and_then(|conn| images_repo::get_detail_light(&conn, self.image_id).ok().flatten());
+        let updated = self.pool.get().ok().and_then(|conn| {
+            images_repo::get_detail_light(&conn, self.image_id)
+                .ok()
+                .flatten()
+        });
         if let Some(updated) = updated {
             let _ = app.emit("thumbnail:updated", updated);
         }

@@ -9,7 +9,7 @@ use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Scheduler, Task, TaskContext};
 use crate::repo::face_repo::{self, FaceBox, NewFace};
 use crate::repo::images_repo::{self, ImageRecord};
-use crate::repo::lancedb_repo::{FaceEmbeddingRecord, LanceDbRepo, CLIP_DIMS};
+use crate::repo::lancedb_repo::{FaceEmbeddingRecord, LanceDbRepo, FACE_DIMS};
 use crate::services::ai_client::FaceDetectItem;
 use crate::services::ai_supervisor::AiSupervisor;
 use crate::services::thumbnail_service;
@@ -135,7 +135,7 @@ impl Task for FaceBatchTask {
                     let Some(embedding) = detected_face.embedding.clone() else {
                         continue;
                     };
-                    if embedding.len() != CLIP_DIMS as usize {
+                    if embedding.len() != FACE_DIMS {
                         continue;
                     }
                     let embedding_ref = format!("face:{}", written_face.id);

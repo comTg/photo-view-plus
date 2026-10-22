@@ -353,7 +353,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 | A2b | 同义词表与查询扩展（可选） | A2 | ⬜ |
 | A3 | 导入 memora 描述（`image_analysis` + `ai_jobs`）；跑 S2/S3，过 G1 | A2 | ⬜ |
 | A4 | 文本向量通道：worker `/text/embed`、LanceDB `image_text_emb_<model>`；跑 S4/S5 | A3、G1 | ⬜ |
-| A5 | Chinese-CLIP：worker 图像模型可插拔、新表、全量重算、人脸维度解耦；跑 S1/S5，过 G2，写 ADR-008 | A1 | ⬜ |
+| A5 | Chinese-CLIP：worker 图像模型可插拔、新表、全量重算、人脸维度解耦；跑 S1/S5，过 G2，写 ADR-008 | A1 | ✅ |
 | A6 | VLM 打标流水线：`llama-server` 监管、worker `/vlm/analyze`、`AnalysisPipeline`（受 docs/11 R2 调度）、进度界面；200 张样本过 G3 后再全量 | R2（docs/11）、G1 | ⬜ |
 | A6b | 夜间定时：Windows 计划任务在 03:00 运行 `photo-view-plus.exe --background-analyze`（无窗口、单实例）；应用已经开着时交给正在运行的实例；07:00 前处理完或到点退出；与 memora 共用 8081 服务（§12） | A6 | ⬜ |
 | A7 | RAM-plus 下线：tagger 设置增加 `vlm`；VLM 覆盖率 ≥ 95% 后，经用户确认再清理旧的 `'ai'` 标签；标签云按类别分组 | A6 | ⬜ |
@@ -431,6 +431,17 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 - **通过标准**：S5 不低于 S3；模型选型结果写进本文件。
 
 ### A5 Chinese-CLIP
+- **实测 / 备注**（2026-10-22 完成）：
+  - worker：`clip_loader` 改成按模型 key 加载的运行时（`chinese-clip-vit-b-16` / `clip-vit-b-32`），同一时间只驻留一个模型，换模型先卸载旧的；整批一次前向；CUDA 上 Chinese-CLIP 用半精度，和评测时的单精度向量逐张对比余弦 ≥ 0.99999。请求和响应都带模型名与维度。
+  - `model_registry`：manifest 支持 `dir`（沿用评测时下好的目录名）和文件清单；下载按 ModelScope → `HF_ENDPOINT`（没设时依次试官方和 hf-mirror）的顺序逐个文件尝试。当天 ModelScope 仍返回 504，实际可用的是 hf-mirror。
+  - migration `0007_ai_jobs.sql`：建 `ai_jobs`，并把旧流水线已就绪的 CLIP 状态继承为 `clip-vit-b-32` 的 ready 行（切回旧模型时不必重算）。§7 的迁移编号顺延：`search_fts` 用 0008，`image_analysis` 用 0009。
+  - `lancedb_repo`：去掉写死的 512，向量表按"模型 + 维度"命名（`VectorTable`），近邻检索改用余弦距离，分数即余弦相似度；人脸表用独立的 `FACE_DIMS`。旧模型继续用旧表 `image_embeddings_clip`。
+  - 流水线：图像向量的待处理改由 `ai_jobs` 现算（`images.embedding_status` 不再维护）；失败最多重试 3 次；文件内容变化时删掉该图的全部 `ai_jobs` 行。
+  - 设置：`AppSettings` 加 `#[serde(default)]`（旧配置缺字段时补默认值，不再整份作废）和 `settingsVersion`；v0 → v1 把旧默认 `clip-vit-b-32` 改成 Chinese-CLIP。设置页去掉英文的 `siglip-so400m`。
+  - 评测夹具 `src-tauri/tests/search_eval.rs`（`#[ignore]`，原计划 A2 才做，提前到这里）：在正式库快照的副本上全量算向量、跑查询、输出排名，正式库不动。
+  - 全库 9,456 张缩略图重算 68 秒（138 张/秒，含 worker 启动约 13 秒）。
+  - **G2 通过**：线上 R1（Rust `search_service` + Chinese-CLIP）nDCG@20 0.818、P@10 0.857，与原型 S1 的 0.817 / 0.857 一致（前 20 名重合 99.5%，补标 2 张）。ADR-008 已写进 docs/08。
+  - 测试：新增 `ai_jobs_tests`（6 个）、`lancedb_tests` 扩到 4 个；`search_tests` 改用新接口。
 - **改动**：
   - worker 的 CLIP 运行时可按设置 `aiClipModel` 切换实现。
   - `lancedb_repo` 去掉写死的 512，改为按表定维度；人脸表用独立常量。

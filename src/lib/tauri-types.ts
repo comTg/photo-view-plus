@@ -170,6 +170,7 @@ export interface QueueStatus {
 }
 
 export interface AppSettings {
+  settingsVersion: number;
   locale: string;
   theme: "system" | "light" | "dark" | string;
   thumbCacheGb: number;
@@ -342,6 +343,8 @@ export interface AiPipelineStatus {
   taggingPending: number;
   embeddingInflight: number;
   taggingInflight: number;
+  /** 当前图像向量模型（设置项 aiClipModel）。 */
+  embeddingModel: string;
 }
 
 export interface AiSearchArgs {

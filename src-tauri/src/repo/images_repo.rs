@@ -257,6 +257,32 @@ pub fn get_details_by_ids(conn: &Connection, ids: &[i64]) -> AppResult<Vec<Image
     Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
+/// 批量取缩略图哈希（只返回缩略图就绪、未删除的图），保持 `ids` 的顺序。
+pub fn ready_thumb_hashes(conn: &Connection, ids: &[i64]) -> AppResult<Vec<(i64, String)>> {
+    if ids.is_empty() {
+        return Ok(Vec::new());
+    }
+    let sql = format!(
+        "SELECT id, thumb_hash FROM images
+         WHERE id IN ({}) AND deleted_at IS NULL AND thumb_status = 'ready' AND thumb_hash IS NOT NULL",
+        placeholders(ids.len())
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(
+        params_from_iter(ids.iter().copied().map(Value::Integer)),
+        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+    )?;
+    let mut by_id = std::collections::HashMap::new();
+    for row in rows {
+        let (id, hash) = row?;
+        by_id.insert(id, hash);
+    }
+    Ok(ids
+        .iter()
+        .filter_map(|id| by_id.remove(id).map(|hash| (*id, hash)))
+        .collect())
+}
+
 pub fn get_thumb_hash(conn: &Connection, id: i64) -> AppResult<Option<String>> {
     Ok(conn
         .prepare_cached("SELECT thumb_hash FROM images WHERE id = ?1")?
@@ -352,36 +378,6 @@ pub fn upsert_scanned_image(
              WHERE id = ?14",
         )?
         .execute(params![
-                image.filename,
-                image.extension,
-                image.size_bytes,
-                image.mtime,
-                image.width,
-                image.height,
-                image.orientation,
-                image.taken_at,
-                image.gps_lat,
-                image.gps_lng,
-                image.camera_make,
-                image.camera_model,
-                now,
-                id
-            ],
-        )?;
-        return Ok(UpsertOutcome::Updated(id));
-    }
-
-    conn.prepare_cached(
-        "INSERT INTO images(
-             root_id, rel_path, filename, extension, size_bytes, mtime,
-             width, height, orientation, taken_at, gps_lat, gps_lng,
-             camera_make, camera_model, thumb_status, indexed_at
-         )
-         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'pending', ?15)",
-    )?
-    .execute(params![
-            image.root_id,
-            image.rel_path,
             image.filename,
             image.extension,
             image.size_bytes,
@@ -394,9 +390,39 @@ pub fn upsert_scanned_image(
             image.gps_lng,
             image.camera_make,
             image.camera_model,
-            now
-        ],
-    )?;
+            now,
+            id
+        ])?;
+        // 新 AI 任务（图像 / 文本向量、VLM 分析）也要按新内容重算（docs/10 §7）。
+        crate::repo::ai_jobs_repo::delete_for_image(conn, id)?;
+        return Ok(UpsertOutcome::Updated(id));
+    }
+
+    conn.prepare_cached(
+        "INSERT INTO images(
+             root_id, rel_path, filename, extension, size_bytes, mtime,
+             width, height, orientation, taken_at, gps_lat, gps_lng,
+             camera_make, camera_model, thumb_status, indexed_at
+         )
+         VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, ?13, ?14, 'pending', ?15)",
+    )?
+    .execute(params![
+        image.root_id,
+        image.rel_path,
+        image.filename,
+        image.extension,
+        image.size_bytes,
+        image.mtime,
+        image.width,
+        image.height,
+        image.orientation,
+        image.taken_at,
+        image.gps_lat,
+        image.gps_lng,
+        image.camera_make,
+        image.camera_model,
+        now
+    ])?;
     Ok(UpsertOutcome::Added(conn.last_insert_rowid()))
 }
 
@@ -716,7 +742,10 @@ pub fn pending_blake3_images(conn: &Connection) -> AppResult<Vec<PendingImage>> 
 /// 的记录，而重复扫描会跳过未改动文件、不再为它们排缩略图，所以需要在启动时主动重排，
 /// 否则这些图会永远停在"生成中"。
 pub fn pending_thumbnail_images(conn: &Connection) -> AppResult<Vec<PendingImage>> {
-    query_pending(conn, "WHERE i.deleted_at IS NULL AND i.thumb_status = 'pending'")
+    query_pending(
+        conn,
+        "WHERE i.deleted_at IS NULL AND i.thumb_status = 'pending'",
+    )
 }
 
 /// 缩略图已就绪但还没算 dHash 的图（视觉哈希依赖 thumb）。

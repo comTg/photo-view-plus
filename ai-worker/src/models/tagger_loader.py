@@ -166,9 +166,11 @@ class TaggerRuntime:
     def _clip_tags(self, path: Path) -> list[dict[str, float | str | None]]:
         clip = clip_runtime()
         image_vec = clip.embed_image(path)
+        # Chinese-CLIP 用中文提示词打分，OpenAI CLIP 用英文。
+        chinese = clip.model_key.startswith("chinese-clip")
         scored: list[dict[str, float | str | None]] = []
         for prompt, name, category in TAG_CANDIDATES:
-            text_vec = clip.encode_text(f"a photo of {prompt}")
+            text_vec = clip.encode_text(f"一张{name}的照片" if chinese else f"a photo of {prompt}")
             score = sum(a * b for a, b in zip(image_vec, text_vec))
             scored.append({"name": name, "score": max(0.0, min(1.0, (score + 1.0) / 2.0)), "category": category})
         return sorted(scored, key=lambda item: float(item["score"]), reverse=True)[:8]

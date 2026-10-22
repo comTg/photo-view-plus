@@ -12,6 +12,7 @@ use crate::services::ai_client::TaggerItem;
 use crate::services::ai_pipeline::{AiPipeline, AiPipelineStatus};
 use crate::services::ai_supervisor::{AiSupervisor, AiWorkerStatus};
 use crate::services::search_service::{self, AiSearchArgs, AiSearchResult, WorkerQueryEncoder};
+use crate::services::settings_service;
 use crate::services::thumbnail_service;
 
 #[tauri::command]
@@ -69,9 +70,10 @@ pub async fn ai_search(
     pool: State<'_, Pool>,
     pipeline: State<'_, Arc<AiPipeline>>,
     supervisor: State<'_, Arc<AiSupervisor>>,
+    paths: State<'_, AppPaths>,
     args: AiSearchArgs,
 ) -> Result<Vec<AiSearchResult>, String> {
-    let encoder = WorkerQueryEncoder::new(supervisor.inner().clone());
+    let encoder = query_encoder(&paths, &supervisor)?;
     search_service::search(&pool, &pipeline.vectors(), &encoder, &args)
         .await
         .map_err(|e| e.to_string())
@@ -86,7 +88,7 @@ pub async fn ai_search_by_image(
     image_id: i64,
     limit: Option<usize>,
 ) -> Result<Vec<AiSearchResult>, String> {
-    let encoder = WorkerQueryEncoder::new(supervisor.inner().clone());
+    let encoder = query_encoder(&paths, &supervisor)?;
     search_service::search_by_image(
         &pool,
         &pipeline.vectors(),
@@ -215,6 +217,17 @@ pub fn ai_images_by_tag(
         offset,
         limit,
     })
+}
+
+fn query_encoder(
+    paths: &AppPaths,
+    supervisor: &Arc<AiSupervisor>,
+) -> Result<WorkerQueryEncoder, String> {
+    let settings = settings_service::read(paths).map_err(|e| e.to_string())?;
+    Ok(WorkerQueryEncoder::new(
+        supervisor.clone(),
+        settings.ai_clip_model,
+    ))
 }
 
 fn thumb_path_for(paths: &AppPaths, image: &ImageRecord) -> Result<String, String> {

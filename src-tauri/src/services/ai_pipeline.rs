@@ -10,8 +10,9 @@ use crate::config::AppPaths;
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Scheduler, Task, TaskContext};
+use crate::repo::ai_jobs_repo::{self, JobResult, KIND_IMAGE_EMBEDDING};
 use crate::repo::images_repo::{self, ImageRecord};
-use crate::repo::lancedb_repo::{EmbeddingRecord, LanceDbRepo};
+use crate::repo::lancedb_repo::{EmbeddingRecord, LanceDbRepo, VectorTable};
 use crate::repo::tags_repo::{self, NewTagScore};
 use crate::services::ai_client::{ClipEmbedItem, ClipEmbedResponse, TaggerItem, TaggerResponse};
 use crate::services::ai_supervisor::AiSupervisor;
@@ -90,11 +91,11 @@ impl FallbackBackoff {
 /// 一批 `/clip/embed` 响应的落库结果。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct EmbedApplyOutcome {
-    /// 写入 LanceDB 并标记 ready 的条数。
+    /// 写入 LanceDB、`ai_jobs` 记为 ready 的条数。
     pub stored: usize,
-    /// worker 报单条错误、标记 failed 的条数。
+    /// worker 报单条错误（或维度不对）、`ai_jobs` 记为 failed 的条数。
     pub failed: usize,
-    /// worker 处于兜底模式：整批一条都没写（图片保持 pending）。
+    /// worker 处于兜底模式：整批一条都没写（图片保持待处理）。
     pub fallback: bool,
 }
 
@@ -109,9 +110,11 @@ pub struct TagApplyOutcome {
     pub fallback: bool,
 }
 
-/// 把 embedding 响应落库。兜底伪向量（`response.fallback == true`）**一律不写**：
-/// 不进 LanceDB、不改 `embedding_status`，图片保持 pending，真模型可用后会被重新拾取。
-/// 否则它们会被标成 ready，换成真模型后也永远不会重算。
+/// 把图像向量响应落库：向量写进该模型自己的表（[`VectorTable::image_clip`]），状态记进
+/// `ai_jobs`（kind = `image_embedding`，model = 响应里的模型）。
+///
+/// 兜底伪向量（`response.fallback == true`）**一律不写**：不进 LanceDB、不记 `ai_jobs`，
+/// 图片保持待处理，真模型可用后会被重新拾取。否则它们会被当成已完成，换成真模型后也永远不会重算。
 pub async fn apply_embed_response(
     pool: &Pool,
     vectors: &LanceDbRepo,
@@ -124,34 +127,68 @@ pub async fn apply_embed_response(
             ..EmbedApplyOutcome::default()
         });
     }
+    let table = VectorTable::image_clip(&response.model, response.dims);
     let mut embeddings = Vec::new();
-    let mut failed = 0;
-    {
-        let conn = pool.get()?;
-        for item in response.items {
-            if let Some(vector) = item.embedding {
-                embeddings.push(EmbeddingRecord {
-                    image_id: item.id,
-                    model: response.model.clone(),
-                    embedding: vector,
-                    created_at: now,
-                });
-            } else {
-                images_repo::set_embedding_status(&conn, item.id, "failed")?;
-                failed += 1;
-            }
+    let mut failures = Vec::new();
+    for item in response.items {
+        match item.embedding {
+            Some(vector) if vector.len() == response.dims => embeddings.push(EmbeddingRecord {
+                image_id: item.id,
+                model: response.model.clone(),
+                embedding: vector,
+                created_at: now,
+            }),
+            Some(vector) => failures.push((
+                item.id,
+                format!(
+                    "向量维度 {} 与模型维度 {} 不符",
+                    vector.len(),
+                    response.dims
+                ),
+            )),
+            None => failures.push((
+                item.id,
+                item.error
+                    .unwrap_or_else(|| "AI worker 未返回向量".to_string()),
+            )),
         }
     }
-    if !embeddings.is_empty() {
-        vectors.upsert_embeddings(&embeddings).await?;
-        let conn = pool.get()?;
-        for record in &embeddings {
-            images_repo::set_embedding_status(&conn, record.image_id, "ready")?;
-        }
+    // 先写向量再记 ready：中途失败时状态仍是待处理，下一轮重算（upsert 按 image_id 覆盖）。
+    vectors.upsert_embeddings(&table, &embeddings).await?;
+    let conn = pool.get()?;
+    let tx = conn.unchecked_transaction()?;
+    for record in &embeddings {
+        ai_jobs_repo::record(
+            &tx,
+            KIND_IMAGE_EMBEDDING,
+            &response.model,
+            &JobResult {
+                image_id: record.image_id,
+                status: ai_jobs_repo::STATUS_READY,
+                error: None,
+                input_hash: None,
+            },
+            now,
+        )?;
     }
+    for (image_id, error) in &failures {
+        ai_jobs_repo::record(
+            &tx,
+            KIND_IMAGE_EMBEDDING,
+            &response.model,
+            &JobResult {
+                image_id: *image_id,
+                status: ai_jobs_repo::STATUS_FAILED,
+                error: Some(error),
+                input_hash: None,
+            },
+            now,
+        )?;
+    }
+    tx.commit()?;
     Ok(EmbedApplyOutcome {
         stored: embeddings.len(),
-        failed,
+        failed: failures.len(),
         fallback: false,
     })
 }
@@ -237,6 +274,9 @@ impl AiPipeline {
     }
 
     pub fn status(&self) -> AiPipelineStatus {
+        let embedding_model = settings_service::read(&self.paths)
+            .map(|settings| settings.ai_clip_model)
+            .unwrap_or_else(|_| crate::config::DEFAULT_CLIP_MODEL.to_string());
         let conn = match self.pool.get() {
             Ok(conn) => conn,
             Err(_) => {
@@ -245,11 +285,13 @@ impl AiPipeline {
                     tagging_pending: 0,
                     embedding_inflight: 0,
                     tagging_inflight: 0,
+                    embedding_model,
                 }
             }
         };
-        let embedding_pending = count_pending(&conn, "embedding_status").unwrap_or(0);
-        let tagging_pending = count_pending(&conn, "tag_status").unwrap_or(0);
+        let embedding_pending =
+            ai_jobs_repo::count_pending_image_embedding(&conn, &embedding_model).unwrap_or(0);
+        let tagging_pending = count_pending_tags(&conn).unwrap_or(0);
         let state = self.state.lock().ok();
         AiPipelineStatus {
             embedding_pending,
@@ -262,19 +304,22 @@ impl AiPipeline {
                 .as_ref()
                 .map(|state| state.tag_inflight.len())
                 .unwrap_or(0),
+            embedding_model,
         }
     }
 
     pub async fn enqueue_pending(&self) -> AppResult<()> {
-        if !settings_service::read(&self.paths)?.ai_enabled {
+        let settings = settings_service::read(&self.paths)?;
+        if !settings.ai_enabled {
             return Ok(());
         }
+        let clip_model = settings.ai_clip_model;
         // 先看有没有待处理的图：没有就别去唤醒（启动）Python worker。
         let (embed_pending, tag_pending) = {
             let conn = self.pool.get()?;
             (
-                count_pending(&conn, "embedding_status")?,
-                count_pending(&conn, "tag_status")?,
+                ai_jobs_repo::count_pending_image_embedding(&conn, &clip_model)?,
+                count_pending_tags(&conn)?,
             )
         };
         if embed_pending == 0 && tag_pending == 0 {
@@ -304,7 +349,7 @@ impl AiPipeline {
             return Ok(());
         }
         if want_embed {
-            self.enqueue_embedding_batch()?;
+            self.enqueue_embedding_batch(&clip_model)?;
         }
         if want_tag {
             self.enqueue_tag_batch()?;
@@ -312,12 +357,12 @@ impl AiPipeline {
         Ok(())
     }
 
-    fn enqueue_embedding_batch(&self) -> AppResult<()> {
+    fn enqueue_embedding_batch(&self, model: &str) -> AppResult<()> {
         let conn = self.pool.get()?;
-        let mut candidates = images_repo::pending_embedding_images(&conn, EMBED_BATCH * 2)?;
+        let candidates = ai_jobs_repo::pending_image_embedding(&conn, model, EMBED_BATCH * 2)?;
         drop(conn);
         let ids = take_not_inflight(
-            &mut candidates,
+            &candidates,
             &self.state,
             |state| &mut state.embed_inflight,
             EMBED_BATCH as usize,
@@ -331,16 +376,20 @@ impl AiPipeline {
             vectors: self.vectors.clone(),
             thumbs_dir: self.thumbs_dir.clone(),
             state: self.state.clone(),
+            model: model.to_string(),
             image_ids: ids,
         })
     }
 
     fn enqueue_tag_batch(&self) -> AppResult<()> {
         let conn = self.pool.get()?;
-        let mut candidates = images_repo::pending_tag_images(&conn, TAG_BATCH * 2)?;
+        let candidates = images_repo::pending_tag_images(&conn, TAG_BATCH * 2)?
+            .into_iter()
+            .map(|record| record.id)
+            .collect::<Vec<_>>();
         drop(conn);
         let ids = take_not_inflight(
-            &mut candidates,
+            &candidates,
             &self.state,
             |state| &mut state.tag_inflight,
             TAG_BATCH as usize,
@@ -365,6 +414,8 @@ pub struct AiPipelineStatus {
     pub tagging_pending: i64,
     pub embedding_inflight: usize,
     pub tagging_inflight: usize,
+    /// 当前图像向量模型（设置项 `aiClipModel`）。
+    pub embedding_model: String,
 }
 
 struct EmbedBatchTask {
@@ -373,6 +424,8 @@ struct EmbedBatchTask {
     vectors: LanceDbRepo,
     thumbs_dir: PathBuf,
     state: Arc<Mutex<AiPipelineState>>,
+    /// 投递时的图像向量模型；worker 按它加载模型，结果写进该模型的表。
+    model: String,
     image_ids: Vec<i64>,
 }
 
@@ -408,19 +461,33 @@ impl EmbedBatchTask {
         if ctx.is_cancelled() {
             return Ok(());
         }
-        let items = self.load_items()?;
-        if items.is_empty() {
+        let request_items = {
+            let conn = self.pool.get()?;
+            images_repo::ready_thumb_hashes(&conn, &self.image_ids)?
+        }
+        .into_iter()
+        .map(|(id, hash)| ClipEmbedItem {
+            id,
+            thumb_path: thumbnail_service::thumb_path(&self.thumbs_dir, &hash)
+                .to_string_lossy()
+                .to_string(),
+        })
+        .collect::<Vec<_>>();
+        if request_items.is_empty() {
             return Ok(());
         }
-        let request_items = items
-            .iter()
-            .map(|item| ClipEmbedItem {
-                id: item.id,
-                thumb_path: item.thumb_path.clone(),
-            })
-            .collect();
-        let response = self.supervisor.embed_images(request_items).await?;
+        let response = self
+            .supervisor
+            .embed_images(request_items, Some(self.model.clone()))
+            .await?;
         let model = response.model.clone();
+        if model != self.model {
+            // worker 回的不是请求的模型（理论上不会发生）：结果不入库，免得写进别的模型的表。
+            return Err(AppError::Other(format!(
+                "AI worker 返回的图像向量模型 {model} 与请求的 {} 不一致",
+                self.model
+            )));
+        }
         let outcome = apply_embed_response(&self.pool, &self.vectors, response, now_unix()).await?;
         track_fallback(
             &self.supervisor,
@@ -432,12 +499,6 @@ impl EmbedBatchTask {
         )
         .await;
         Ok(())
-    }
-
-    fn load_items(&self) -> AppResult<Vec<AiImageItem>> {
-        let conn = self.pool.get()?;
-        let records = images_repo::get_details_by_ids(&conn, &self.image_ids)?;
-        records_to_ai_items(&records, &self.thumbs_dir)
     }
 }
 
@@ -522,7 +583,7 @@ fn records_to_ai_items(records: &[ImageRecord], thumbs_dir: &Path) -> AppResult<
 }
 
 fn take_not_inflight(
-    candidates: &mut [ImageRecord],
+    candidates: &[i64],
     state: &Arc<Mutex<AiPipelineState>>,
     inflight: impl Fn(&mut AiPipelineState) -> &mut HashSet<i64>,
     limit: usize,
@@ -532,12 +593,12 @@ fn take_not_inflight(
         return selected;
     };
     let set = inflight(&mut state);
-    for record in candidates.iter() {
+    for id in candidates {
         if selected.len() >= limit {
             break;
         }
-        if set.insert(record.id) {
-            selected.push(record.id);
+        if set.insert(*id) {
+            selected.push(*id);
         }
     }
     selected
@@ -593,15 +654,14 @@ fn clear_inflight(
     }
 }
 
-fn count_pending(conn: &rusqlite::Connection, column: &str) -> AppResult<i64> {
-    if !matches!(column, "embedding_status" | "tag_status") {
-        return Err(AppError::Other("invalid AI status column".to_string()));
-    }
-    let sql = format!(
+/// RAM-plus 标签仍用 images.tag_status（docs/10 A7 由 VLM 接管后下线）。
+fn count_pending_tags(conn: &rusqlite::Connection) -> AppResult<i64> {
+    Ok(conn.query_row(
         "SELECT COUNT(*) FROM images
-         WHERE deleted_at IS NULL AND thumb_status = 'ready' AND {column} = 'pending'"
-    );
-    Ok(conn.query_row(&sql, [], |row| row.get(0))?)
+         WHERE deleted_at IS NULL AND thumb_status = 'ready' AND tag_status = 'pending'",
+        [],
+        |row| row.get(0),
+    )?)
 }
 
 fn now_unix() -> i64 {

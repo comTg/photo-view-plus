@@ -82,9 +82,32 @@ fn shared_models_dir() -> Option<PathBuf> {
         .map(|local| PathBuf::from(local).join("PhotoViewPlus").join("models"))
 }
 
+/// 默认图像向量模型（ADR-008，docs/10 A5）：Chinese-CLIP，中文查询直接检索图片。
+pub const DEFAULT_CLIP_MODEL: &str = "chinese-clip-vit-b-16";
+/// 旧默认（OpenAI CLIP，只懂英文），仅作回退。
+pub const LEGACY_CLIP_MODEL: &str = "clip-vit-b-32";
+/// 设置项可选的图像向量模型。
+pub const CLIP_MODELS: &[&str] = &[DEFAULT_CLIP_MODEL, LEGACY_CLIP_MODEL];
+/// 图像向量模型的维度（向量表按"模型 + 维度"命名，查已存向量时要先知道维度）。
+pub fn clip_model_dims(model: &str) -> usize {
+    match model {
+        DEFAULT_CLIP_MODEL | LEGACY_CLIP_MODEL => 512,
+        _ => 512,
+    }
+}
+
+/// 当前设置文件版本：每次需要迁移旧配置时 +1，见 [`AppSettings::migrate`]。
+pub const SETTINGS_VERSION: u32 = 1;
+
+/// 应用设置（config.json）。`#[serde(default)]`：旧配置文件缺的字段用默认值补齐，
+/// 而不是整份解析失败、把用户的全部设置重置成默认。
 #[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
+#[serde(rename_all = "camelCase", default)]
 pub struct AppSettings {
+    /// 配置格式版本。旧文件没有这个字段，读出来是 0（字段级 default 用 `u32::default()`，
+    /// 不取 `AppSettings::default()` 里的当前版本，否则旧文件永远不会被迁移）。
+    #[serde(default)]
+    pub settings_version: u32,
     pub locale: String,
     pub theme: String,
     pub thumb_cache_gb: u32,
@@ -103,6 +126,7 @@ pub struct AppSettings {
 impl Default for AppSettings {
     fn default() -> Self {
         Self {
+            settings_version: SETTINGS_VERSION,
             locale: "zh-CN".to_string(),
             theme: "system".to_string(),
             thumb_cache_gb: 5,
@@ -110,7 +134,7 @@ impl Default for AppSettings {
             network_scan_concurrency: 4,
             ai_enabled: true,
             ai_idle_stop_minutes: 10,
-            ai_clip_model: "clip-vit-b-32".to_string(),
+            ai_clip_model: DEFAULT_CLIP_MODEL.to_string(),
             ai_tagger_model: "ram-plus".to_string(),
             ocr_enabled: false,
             face_enabled: false,
@@ -139,6 +163,24 @@ pub struct AppSettingsPatch {
 }
 
 impl AppSettings {
+    /// 把旧版本的配置迁移到当前版本，返回是否有改动（有改动时调用方应写回文件）。
+    ///
+    /// - v0 → v1（docs/10 A5 / ADR-008）：旧默认 `clip-vit-b-32` 只懂英文，中文查询接近随机，
+    ///   换成 Chinese-CLIP。旧版界面只有这一个能用的选项，保存的值就是默认值，不代表用户特意选了它。
+    pub fn migrate(&mut self) -> bool {
+        if self.settings_version >= SETTINGS_VERSION {
+            return false;
+        }
+        if self.settings_version < 1 && self.ai_clip_model == LEGACY_CLIP_MODEL {
+            self.ai_clip_model = DEFAULT_CLIP_MODEL.to_string();
+        }
+        if !CLIP_MODELS.contains(&self.ai_clip_model.as_str()) {
+            self.ai_clip_model = DEFAULT_CLIP_MODEL.to_string();
+        }
+        self.settings_version = SETTINGS_VERSION;
+        true
+    }
+
     pub fn apply_patch(&mut self, patch: AppSettingsPatch) {
         if let Some(locale) = patch.locale {
             self.locale = locale;
@@ -162,7 +204,10 @@ impl AppSettings {
             self.ai_idle_stop_minutes = ai_idle_stop_minutes.clamp(1, 120);
         }
         if let Some(ai_clip_model) = patch.ai_clip_model {
-            self.ai_clip_model = sanitize_model_key(ai_clip_model, "clip-vit-b-32");
+            let key = sanitize_model_key(ai_clip_model, DEFAULT_CLIP_MODEL);
+            if CLIP_MODELS.contains(&key.as_str()) {
+                self.ai_clip_model = key;
+            }
         }
         if let Some(ai_tagger_model) = patch.ai_tagger_model {
             self.ai_tagger_model = sanitize_model_key(ai_tagger_model, "ram-plus");

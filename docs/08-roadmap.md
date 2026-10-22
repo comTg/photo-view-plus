@@ -226,6 +226,22 @@
   - **5 万图扫描+哈希性能**：与 MVP1 T16 一起在 Windows 实机测。
 - 后果：M2 主体功能完整可用；Windows 实机验收（T14）后可关闭 M2，开始 M3。
 
+### ADR-008 · 图像向量模型改用 Chinese-CLIP（取代 OpenAI CLIP，不选 SigLIP）
+- 状态：已决（docs/10 A5）
+- 时间：2026-10-22
+- 上下文：MVP3 用 open_clip ViT-B/32 + OpenAI 权重，只懂英文。中文查询的结果接近随机：40 个中文查询 nDCG@20 只有 0.079，前 10 条平均 0.8 条相关（docs/10 §9.1）。`models.json` 里备着的 `siglip-so400m` 也是英文模型，换上它解决不了中文问题。
+- 决定：
+  - 默认图像向量模型改为 Chinese-CLIP ViT-B/16（OFA-Sys，MIT），worker 用 transformers 的 `ChineseCLIPModel` 从本地目录加载，CUDA 上半精度推理（与单精度向量余弦 ≥ 0.99999）。设置项 `aiClipModel` 可切回旧模型。
+  - 向量表按"模型 + 维度"命名（`image_clip_emb_<model>_<dims>`），旧表 `image_embeddings_clip` 留给旧模型，便于回退；人脸向量改用独立维度常量。
+  - 任务状态记在 `ai_jobs`（kind = `image_embedding`，带模型名）：换模型后全库自动重算，旧模型的向量和状态都保留。
+  - 旧配置里保存的 `clip-vit-b-32` 是旧默认值，设置迁移（`settingsVersion` 0 → 1）时改为 Chinese-CLIP。
+- 依据：
+  - 离线原型：nDCG@20 0.079 → 0.817，P@10 0.082 → 0.857（G2 通过）。
+  - 线上复核（Rust `search_service`，正式库副本，同一套查询与判定）：nDCG@20 0.818，P@10 0.857，与原型一致（`tests/search_eval/report.md` 的 R1）。
+  - 全库 9,456 张缩略图重算向量 68 秒（138 张/秒，RTX 5070，含 worker 启动）。
+- 不选 SigLIP 的理由：`siglip-so400m` 是英文模型；多语言的 SigLIP 2 可以作为以后的候选，用同一套评测对比后再定。
+- 后果：中文查询直接可用；换模型需要全库重算一次（几分钟）；worker 多依赖 transformers（已在 `cuda` extra 里）。
+
 ### ADR-009 · MVP4 人脸聚类与地图/备份实现
 - 状态：待实机验收（M4）
 - 时间：2026-06-18
@@ -240,8 +256,7 @@
   - 功能面已闭合，前端可操作；OCR/人脸准确率、文件监听 5s 入库、地图瓦片网络可用性仍需 Windows 实机与真实模型验收。
   - 聚类算法可用但不是最终高精度方案；后续可替换为 HDBSCAN/Chinese Whispers，不改变 DB/UI 契约。
 
-后续每个 MVP 完成时追加新的 ADR：
-- ADR-008 · MVP3 CLIP vs SigLIP 选型（待填；提议改为 Chinese-CLIP。离线原型已过门槛 G2：nDCG@20 从 0.079 升到 0.817，见 [docs/10](10-vlm-tagging-and-search.md) §9.1；A5 落地并复核后正式记录）
+后续每个 MVP 完成时追加新的 ADR。
 
 ## 6. 未决议题（讨论后再写 ADR）
 

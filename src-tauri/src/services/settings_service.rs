@@ -9,10 +9,20 @@ pub fn read(paths: &AppPaths) -> AppResult<AppSettings> {
     }
 
     let raw = fs::read_to_string(&paths.config_path)?;
-    let settings = serde_json::from_str(&raw).unwrap_or_else(|error| {
+    let mut settings: AppSettings = serde_json::from_str(&raw).unwrap_or_else(|error| {
         tracing::warn!(%error, path = ?paths.config_path, "failed to parse config, using defaults");
         AppSettings::default()
     });
+    if settings.migrate() {
+        tracing::info!(
+            version = settings.settings_version,
+            clip_model = %settings.ai_clip_model,
+            "settings migrated"
+        );
+        if let Err(error) = write(paths, &settings) {
+            tracing::warn!(%error, "failed to persist migrated settings");
+        }
+    }
     Ok(settings)
 }
 

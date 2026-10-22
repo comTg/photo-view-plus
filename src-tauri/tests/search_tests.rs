@@ -12,8 +12,9 @@ use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use photo_view_plus_lib::db::{self, Pool};
+use photo_view_plus_lib::repo::ai_jobs_repo::{self, KIND_IMAGE_EMBEDDING};
 use photo_view_plus_lib::repo::images_repo::{self, NewImageMetadata};
-use photo_view_plus_lib::repo::lancedb_repo::{EmbeddingRecord, LanceDbRepo, CLIP_DIMS};
+use photo_view_plus_lib::repo::lancedb_repo::{EmbeddingRecord, LanceDbRepo, VectorTable};
 use photo_view_plus_lib::repo::roots_repo::{self, NewRoot};
 use photo_view_plus_lib::repo::tags_repo::{self, NewTagScore};
 use photo_view_plus_lib::services::ai_client::{
@@ -30,6 +31,14 @@ use tempfile::TempDir;
 // ---------------------------------------------------------------------------
 // 测试夹具
 // ---------------------------------------------------------------------------
+
+/// 测试用的图像向量模型与维度（与线上默认的 Chinese-CLIP 一致）。
+const MODEL: &str = "chinese-clip-vit-b-16";
+const DIMS: usize = 512;
+
+fn clip_table() -> VectorTable {
+    VectorTable::image_clip(MODEL, DIMS)
+}
 
 struct Env {
     pool: Pool,
@@ -111,7 +120,7 @@ fn tag(pool: &Pool, image_id: i64, names: &[&str]) {
 
 /// `primary * e0 + secondary * e_axis` 归一化。查询向量固定是 e0：primary 越大离查询越近。
 fn vector(primary: f32, axis: usize, secondary: f32) -> Vec<f32> {
-    let mut v = vec![0.0_f32; CLIP_DIMS as usize];
+    let mut v = vec![0.0_f32; DIMS];
     v[0] = primary;
     v[axis] += secondary;
     let norm = v.iter().map(|x| x * x).sum::<f32>().sqrt();
@@ -127,12 +136,15 @@ async fn store_vectors(vectors: &LanceDbRepo, items: &[(i64, Vec<f32>)]) {
         .iter()
         .map(|(image_id, embedding)| EmbeddingRecord {
             image_id: *image_id,
-            model: "clip-vit-b-32".to_string(),
+            model: MODEL.to_string(),
             embedding: embedding.clone(),
             created_at: 1,
         })
         .collect::<Vec<_>>();
-    vectors.upsert_embeddings(&records).await.expect("upsert");
+    vectors
+        .upsert_embeddings(&clip_table(), &records)
+        .await
+        .expect("upsert");
 }
 
 fn args(text: &str, root_ids: Option<Vec<i64>>, limit: usize) -> AiSearchArgs {
@@ -181,6 +193,10 @@ impl FakeEncoder {
 
 #[async_trait]
 impl QueryEncoder for FakeEncoder {
+    fn clip_model(&self) -> &str {
+        MODEL
+    }
+
     async fn encode_text(&self, _text: &str) -> AppResult<Option<Vec<f32>>> {
         self.text_calls.fetch_add(1, Ordering::SeqCst);
         Ok(self.text.clone())
@@ -201,6 +217,10 @@ struct UnreachableEncoder;
 
 #[async_trait]
 impl QueryEncoder for UnreachableEncoder {
+    fn clip_model(&self) -> &str {
+        MODEL
+    }
+
     async fn encode_text(&self, text: &str) -> AppResult<Option<Vec<f32>>> {
         Err(AppError::Other(format!(
             "encoder must not be called: {text}"
@@ -459,11 +479,12 @@ async fn semantic_search_with_filters_is_not_crowded_out_by_global_top_k() {
 async fn lancedb_top_k_filtered_prefilters_candidates() {
     let dir = tempfile::tempdir().expect("tempdir");
     let repo = LanceDbRepo::new(dir.path().join("vectors"));
+    let table = clip_table();
     let query = query_vector();
 
     // 表还不存在：空结果，不报错。
     assert!(repo
-        .top_k_filtered(&query, 10, Some(&[1]))
+        .top_k_filtered(&table, &query, 10, Some(&[1]))
         .await
         .expect("missing table")
         .is_empty());
@@ -478,7 +499,7 @@ async fn lancedb_top_k_filtered_prefilters_candidates() {
     )
     .await;
 
-    let all = repo.top_k(&query, 10).await.expect("top_k");
+    let all = repo.top_k(&table, &query, 10).await.expect("top_k");
     assert_eq!(
         all.iter().map(|hit| hit.image_id).collect::<Vec<_>>(),
         vec![1, 2, 3]
@@ -486,7 +507,7 @@ async fn lancedb_top_k_filtered_prefilters_candidates() {
 
     // limit=1 且只允许最远的 3：prefilter 必须返回 3，而不是"取全局最近 1 条再过滤"得到空。
     let only_far = repo
-        .top_k_filtered(&query, 1, Some(&[3]))
+        .top_k_filtered(&table, &query, 1, Some(&[3]))
         .await
         .expect("filtered");
     assert_eq!(
@@ -495,7 +516,7 @@ async fn lancedb_top_k_filtered_prefilters_candidates() {
     );
 
     let two = repo
-        .top_k_filtered(&query, 1, Some(&[2, 3]))
+        .top_k_filtered(&table, &query, 1, Some(&[2, 3]))
         .await
         .expect("filtered");
     assert_eq!(
@@ -504,12 +525,12 @@ async fn lancedb_top_k_filtered_prefilters_candidates() {
     );
 
     assert!(repo
-        .top_k_filtered(&query, 10, Some(&[]))
+        .top_k_filtered(&table, &query, 10, Some(&[]))
         .await
         .expect("empty candidates")
         .is_empty());
     assert!(repo
-        .top_k_filtered(&query, 10, Some(&[99]))
+        .top_k_filtered(&table, &query, 10, Some(&[99]))
         .await
         .expect("absent id")
         .is_empty());
@@ -685,15 +706,17 @@ async fn fallback_embedding_response_is_not_written() {
                 error: Some("thumbnail missing".to_string()),
             },
         ],
-        model: "clip-vit-b-32".to_string(),
+        model: MODEL.to_string(),
+        dims: DIMS,
         fallback,
     };
-    let status = |id: i64| {
+    let pending = || {
         let conn = env.pool.get().expect("conn");
-        images_repo::get_detail(&conn, id)
-            .expect("detail")
-            .expect("exists")
-            .embedding_status
+        ai_jobs_repo::pending_image_embedding(&conn, MODEL, 10).expect("pending")
+    };
+    let counts = || {
+        let conn = env.pool.get().expect("conn");
+        ai_jobs_repo::counts(&conn, KIND_IMAGE_EMBEDDING, MODEL).expect("counts")
     };
 
     let outcome = ai_pipeline::apply_embed_response(&env.pool, &env.vectors, response(true), 1)
@@ -702,26 +725,26 @@ async fn fallback_embedding_response_is_not_written() {
     assert!(outcome.fallback);
     assert_eq!((outcome.stored, outcome.failed), (0, 0));
     assert_eq!(
-        env.vectors.count().await.expect("count"),
+        env.vectors.count(&clip_table()).await.expect("count"),
         0,
         "伪向量不能进 LanceDB"
     );
-    assert_eq!(status(ids[0]), "pending", "保持 pending，真模型可用后重算");
-    assert_eq!(status(ids[1]), "pending", "兜底批次里的单条错误也不落库");
-    {
-        let conn = env.pool.get().expect("conn");
-        let pending = images_repo::pending_embedding_images(&conn, 10).expect("pending");
-        assert_eq!(pending.len(), 2);
-    }
+    assert_eq!(
+        pending(),
+        ids,
+        "保持待处理，真模型可用后重算；兜底批次里的单条错误也不落库"
+    );
+    assert_eq!(counts(), ai_jobs_repo::JobCounts::default());
 
     let outcome = ai_pipeline::apply_embed_response(&env.pool, &env.vectors, response(false), 2)
         .await
         .expect("apply real");
     assert!(!outcome.fallback);
     assert_eq!((outcome.stored, outcome.failed), (1, 1));
-    assert_eq!(env.vectors.count().await.expect("count"), 1);
-    assert_eq!(status(ids[0]), "ready");
-    assert_eq!(status(ids[1]), "failed");
+    assert_eq!(env.vectors.count(&clip_table()).await.expect("count"), 1);
+    let after = counts();
+    assert_eq!((after.ready, after.failed), (1, 1));
+    assert_eq!(pending(), vec![ids[1]], "失败的会重试（attempts < 3）");
 }
 
 #[test]

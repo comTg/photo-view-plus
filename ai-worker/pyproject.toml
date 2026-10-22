@@ -17,6 +17,9 @@ cuda = [
     "torchvision>=0.21.0",
     "onnxruntime-gpu>=1.20.0",
     "open_clip_torch>=2.26.0",
+    # Chinese-CLIP（默认图像向量模型，ADR-008）与 bge 中文文本向量都用 transformers 加载；
+    # 与 tagger extra 同一约束（RAM 的 BERT 实现不兼容 5.x）。
+    "transformers>=4.44.0,<5",
 ]
 models = [
     "huggingface_hub>=0.24.0",

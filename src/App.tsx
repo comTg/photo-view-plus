@@ -1888,8 +1888,8 @@ function AiSearchView({
 
       <div className="ai-status-strip">
         <span>Worker {aiStatusText(workerStatus?.status)}</span>
-        <span>
-          Embedding {pipeline?.embeddingPending ?? 0} 待处理 / {pipeline?.embeddingInflight ?? 0}{" "}
+        <span title={pipeline?.embeddingModel}>
+          图像向量 {pipeline?.embeddingPending ?? 0} 待处理 / {pipeline?.embeddingInflight ?? 0}{" "}
           运行
         </span>
         <span>
@@ -2987,13 +2987,14 @@ function SettingsView({
               />
             </label>
             <label className="settings-field">
-              <span>CLIP 模型</span>
+              <span>图像向量模型</span>
               <select
                 value={settings.aiClipModel}
+                title="换模型后，全库图像向量会在后台重新计算；旧模型的向量保留，可随时切回"
                 onChange={(event) => void onPatch({ aiClipModel: event.target.value })}
               >
-                <option value="clip-vit-b-32">clip-vit-b-32</option>
-                <option value="siglip-so400m">siglip-so400m</option>
+                <option value="chinese-clip-vit-b-16">Chinese-CLIP（中文，推荐）</option>
+                <option value="clip-vit-b-32">OpenAI CLIP（仅英文，旧）</option>
               </select>
             </label>
             <label className="settings-field">
@@ -3112,8 +3113,8 @@ function SettingsView({
             </strong>
             <span>重启</span>
             <strong>{aiStatus?.restartsLastMinute ?? 0}/min</strong>
-            <span>Embedding</span>
-            <strong>
+            <span>图像向量</span>
+            <strong title={aiPipeline?.embeddingModel}>
               {aiPipeline
                 ? `${aiPipeline.embeddingPending} 待处理 · ${aiPipeline.embeddingInflight} 运行`
                 : "未知"}

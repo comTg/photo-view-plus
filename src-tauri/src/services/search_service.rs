@@ -14,10 +14,11 @@ use async_trait::async_trait;
 use rusqlite::Connection;
 use serde::{Deserialize, Serialize};
 
+use crate::config::clip_model_dims;
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::repo::images_repo::{self, ImageQueryParams, ImageRecord};
-use crate::repo::lancedb_repo::{LanceDbRepo, VectorSearchHit};
+use crate::repo::lancedb_repo::{LanceDbRepo, VectorSearchHit, VectorTable};
 use crate::services::ai_client::ClipEmbedItem;
 use crate::services::ai_supervisor::AiSupervisor;
 use crate::services::thumbnail_service;
@@ -56,10 +57,13 @@ pub struct AiSearchResult {
 
 /// 查询向量的来源。线上是 Python worker（[`WorkerQueryEncoder`]），测试里换成假实现。
 ///
-/// worker 缺 torch / open_clip 时不会报错，而是返回 `fallback: true` 的哈希伪向量——它和
+/// worker 缺 torch / 模型权重时不会报错，而是返回 `fallback: true` 的哈希伪向量——它和
 /// 查询内容无关，拿去检索只会得到随机结果，所以这种情况必须返回 `Ok(None)`，由调用方跳过语义通道。
 #[async_trait]
 pub trait QueryEncoder: Send + Sync {
+    /// 图像向量模型（设置项 `aiClipModel`），决定查哪张向量表（[`VectorTable::image_clip`]）。
+    fn clip_model(&self) -> &str;
+
     /// 文本 → 图像向量空间里的查询向量；worker 处于兜底模式时返回 `Ok(None)`。
     async fn encode_text(&self, text: &str) -> AppResult<Option<Vec<f32>>>;
 
@@ -70,18 +74,41 @@ pub trait QueryEncoder: Send + Sync {
 /// 线上实现：经 [`AiSupervisor`] 调 Python worker（worker 没启动时会先拉起）。
 pub struct WorkerQueryEncoder {
     supervisor: Arc<AiSupervisor>,
+    clip_model: String,
 }
 
 impl WorkerQueryEncoder {
-    pub fn new(supervisor: Arc<AiSupervisor>) -> Self {
-        Self { supervisor }
+    pub fn new(supervisor: Arc<AiSupervisor>, clip_model: String) -> Self {
+        Self {
+            supervisor,
+            clip_model,
+        }
+    }
+
+    /// worker 回的模型和请求的不一致时不用它的向量：维度相同也不在同一个向量空间里。
+    fn check_model(&self, model: &str) -> AppResult<()> {
+        if model == self.clip_model {
+            Ok(())
+        } else {
+            Err(AppError::Other(format!(
+                "AI worker 返回的图像向量模型 {model} 与设置的 {} 不一致",
+                self.clip_model
+            )))
+        }
     }
 }
 
 #[async_trait]
 impl QueryEncoder for WorkerQueryEncoder {
+    fn clip_model(&self) -> &str {
+        &self.clip_model
+    }
+
     async fn encode_text(&self, text: &str) -> AppResult<Option<Vec<f32>>> {
-        let response = self.supervisor.encode_text(text.to_string()).await?;
+        let response = self
+            .supervisor
+            .encode_text(text.to_string(), Some(self.clip_model.clone()))
+            .await?;
         if response.fallback {
             tracing::info!(
                 model = %response.model,
@@ -89,16 +116,20 @@ impl QueryEncoder for WorkerQueryEncoder {
             );
             return Ok(None);
         }
+        self.check_model(&response.model)?;
         Ok(Some(response.embedding))
     }
 
     async fn encode_image(&self, image_id: i64, thumb_path: String) -> AppResult<Option<Vec<f32>>> {
         let response = self
             .supervisor
-            .embed_images(vec![ClipEmbedItem {
-                id: image_id,
-                thumb_path,
-            }])
+            .embed_images(
+                vec![ClipEmbedItem {
+                    id: image_id,
+                    thumb_path,
+                }],
+                Some(self.clip_model.clone()),
+            )
             .await?;
         if response.fallback {
             tracing::info!(
@@ -108,6 +139,7 @@ impl QueryEncoder for WorkerQueryEncoder {
             );
             return Ok(None);
         }
+        self.check_model(&response.model)?;
         let item = response
             .items
             .into_iter()
@@ -164,8 +196,10 @@ pub async fn search(
 
     let mut results = match encoder.encode_text(&filter.text).await? {
         Some(embedding) => {
+            let table = VectorTable::image_clip(encoder.clip_model(), embedding.len());
             let hits = vectors
                 .top_k_filtered(
+                    &table,
                     &embedding,
                     limit.saturating_mul(VECTOR_OVERFETCH),
                     candidates.as_deref(),
@@ -196,8 +230,10 @@ pub async fn search_by_image(
     limit: Option<usize>,
 ) -> AppResult<Vec<AiSearchResult>> {
     let limit = clamp_limit(limit);
-    let embedding = match vectors.embedding_for_image(image_id).await? {
-        Some(vector) if !vector.is_empty() => vector,
+    let model = encoder.clip_model();
+    let stored_table = VectorTable::image_clip(model, clip_model_dims(model));
+    let embedding = match vectors.embedding_for_image(&stored_table, image_id).await? {
+        Some(vector) => vector,
         _ => {
             let thumb_path = {
                 let conn = pool.get()?;
@@ -211,8 +247,13 @@ pub async fn search_by_image(
             }
         }
     };
+    let table = VectorTable::image_clip(model, embedding.len());
     let hits = vectors
-        .top_k(&embedding, limit.saturating_mul(VECTOR_OVERFETCH) + 1)
+        .top_k(
+            &table,
+            &embedding,
+            limit.saturating_mul(VECTOR_OVERFETCH) + 1,
+        )
         .await?;
     let conn = pool.get()?;
     hydrate_hits(&conn, &hits, SOURCE_IMAGE, limit, Some(image_id))

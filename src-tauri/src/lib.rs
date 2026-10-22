@@ -10,7 +10,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::EnvFilter;
 
 mod commands;
-mod config;
+pub mod config;
 pub mod db;
 pub mod error;
 pub mod migrations;

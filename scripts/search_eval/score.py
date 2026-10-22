@@ -15,7 +15,7 @@ from datetime import date
 
 from common import REPO_ROOT, eval_dir, load_queries, metrics_for
 
-ORDER = ["S0", "S1", "S2", "S3", "S4", "S5", "S5a", "S5b", "S5c", "S6"]
+ORDER = ["S0", "S1", "S2", "S3", "S4", "S5", "S5a", "S5b", "S5c", "S5d", "S5w", "S6", "R1", "R2", "R3", "R4", "R5", "R6"]
 NAMES = {
     "S0": "OpenAI CLIP（现状）",
     "S1": "Chinese-CLIP",
@@ -29,6 +29,13 @@ NAMES = {
     "S5d": "融合 S1+S4（两路向量）",
     "S5w": "加权融合 S1×1 + S2×0.3 + S3×0.6 + S4×1",
     "S6": "融合（VLM 描述）",
+    # R*：线上 Rust search_service 在正式库副本上的复核结果（src-tauri/tests/search_eval.rs）
+    "R1": "线上·图像向量（Chinese-CLIP）",
+    "R2": "线上·标签 + 全文（RAM 标签、OCR）",
+    "R3": "线上·全文（含 memora 描述）",
+    "R4": "线上·描述文本向量",
+    "R5": "线上·融合（默认权重）",
+    "R6": "线上·融合（VLM 描述）",
 }
 
 

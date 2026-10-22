@@ -201,14 +201,22 @@ impl AiSupervisor {
         self.client.model_download(port, model_key).await
     }
 
-    pub async fn embed_images(&self, items: Vec<ClipEmbedItem>) -> AppResult<ClipEmbedResponse> {
+    pub async fn embed_images(
+        &self,
+        items: Vec<ClipEmbedItem>,
+        model: Option<String>,
+    ) -> AppResult<ClipEmbedResponse> {
         let port = self.ready_port().await?;
-        self.client.embed_images(port, items).await
+        self.client.embed_images(port, items, model).await
     }
 
-    pub async fn encode_text(&self, text: String) -> AppResult<TextEncodeResponse> {
+    pub async fn encode_text(
+        &self,
+        text: String,
+        model: Option<String>,
+    ) -> AppResult<TextEncodeResponse> {
         let port = self.ready_port().await?;
-        self.client.encode_text(port, text).await
+        self.client.encode_text(port, text, model).await
     }
 
     pub async fn tag_images(&self, items: Vec<TaggerItem>) -> AppResult<TaggerResponse> {

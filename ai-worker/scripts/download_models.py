@@ -1,49 +1,30 @@
+"""按需下载模型到 %LOCALAPPDATA%\\PhotoViewPlus\\models（CLAUDE.md 红线 7：权重不进 git）。
+
+用法：pnpm ai:download chinese-clip-vit-b-16
+来源顺序：ModelScope → HF_ENDPOINT（未设置时依次试 huggingface.co、hf-mirror.com）。
+"""
+
 from __future__ import annotations
 
 import argparse
 import os
+import sys
 from pathlib import Path
 
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-def default_model_dir() -> Path:
-    # 与 src/model_registry.py 同规则：优先 PVP_MODEL_DIR，保证下载目录与 worker 查找目录一致。
-    env_dir = os.environ.get("PVP_MODEL_DIR")
-    if env_dir:
-        return Path(env_dir)
-    local_app_data = os.environ.get("LOCALAPPDATA")
-    if local_app_data:
-        return Path(local_app_data) / "PhotoViewPlus" / "models"
-    return Path.home() / ".photo-view-plus" / "models"
+from src.model_registry import download_model, model_manifest  # noqa: E402
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Download PhotoView+ model snapshots")
-    parser.add_argument("model_key", choices=["clip-vit-b-32", "ram-plus", "siglip-so400m"])
-    parser.add_argument("--dest", type=Path, default=default_model_dir())
+    manifest = model_manifest()
+    parser = argparse.ArgumentParser(description="Download PhotoView+ models")
+    parser.add_argument("model_key", choices=sorted(manifest))
+    parser.add_argument("--dest", type=Path, help="模型根目录（默认 PVP_MODEL_DIR 或 %%LOCALAPPDATA%%\\PhotoViewPlus\\models）")
     args = parser.parse_args()
-
-    try:
-        from huggingface_hub import snapshot_download
-    except ImportError as exc:
-        raise SystemExit("Install the models extra first: uv sync --extra models") from exc
-
-    import sys
-
-    sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
-    from src.model_registry import BERT_TOKENIZER_REPO, download_bert_tokenizer, model_manifest
-
-    model = model_manifest()[args.model_key]
-    target = args.dest / args.model_key
-    target.mkdir(parents=True, exist_ok=True)
-    snapshot_download(
-        repo_id=model["hf_repo"],
-        local_dir=target,
-        local_dir_use_symlinks=False,
-        resume_download=True,
-    )
-    if args.model_key == "ram-plus":
-        download_bert_tokenizer(target / BERT_TOKENIZER_REPO)
-    print(target)
+    if args.dest:
+        os.environ["PVP_MODEL_DIR"] = str(args.dest)
+    print(download_model(args.model_key))
 
 
 if __name__ == "__main__":

@@ -12,14 +12,73 @@ use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
 use lancedb::expr::{col, lit};
 use lancedb::query::{ExecutableQuery, QueryBase};
+use lancedb::DistanceType;
 use serde::Serialize;
 
 use crate::error::{AppError, AppResult};
 
-const TABLE_NAME: &str = "image_embeddings_clip";
+/// 旧的 OpenAI CLIP 模型（只懂英文）。docs/10 A5 之后仅作回退，向量留在旧表里。
+pub const LEGACY_CLIP_MODEL: &str = "clip-vit-b-32";
+/// 旧模型的向量表：表名不带模型和维度，保留到 A5 评测通过之后，便于回退。
+const LEGACY_CLIP_TABLE: &str = "image_embeddings_clip";
 const FACE_TABLE_NAME: &str = "face_embeddings";
 const VECTOR_COLUMN: &str = "embedding";
-pub const CLIP_DIMS: i32 = 512;
+/// 人脸向量维度（insightface ArcFace）。以前复用 CLIP 的 512，换图像模型会连带弄坏人脸，现独立出来。
+pub const FACE_DIMS: usize = 512;
+
+/// 一张"按图片 id 存向量"的 LanceDB 表。表名带模型和维度（docs/10 §5.3、§7），换模型就换表，
+/// 新旧向量互不覆盖；维度由模型决定，不再写死 512。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct VectorTable {
+    name: String,
+    dims: usize,
+}
+
+impl VectorTable {
+    /// 图像向量（CLIP 系，文本 → 图像检索）：`image_clip_emb_<model>_<dims>`。旧模型沿用旧表。
+    pub fn image_clip(model: &str, dims: usize) -> Self {
+        if model == LEGACY_CLIP_MODEL && dims == 512 {
+            return Self {
+                name: LEGACY_CLIP_TABLE.to_string(),
+                dims,
+            };
+        }
+        Self {
+            name: format!("image_clip_emb_{}_{dims}", table_token(model)),
+            dims,
+        }
+    }
+
+    /// 描述文本向量（文本 → 描述检索）：`image_text_emb_<model>_<dims>`。
+    pub fn image_text(model: &str, dims: usize) -> Self {
+        Self {
+            name: format!("image_text_emb_{}_{dims}", table_token(model)),
+            dims,
+        }
+    }
+
+    pub fn name(&self) -> &str {
+        &self.name
+    }
+
+    pub fn dims(&self) -> usize {
+        self.dims
+    }
+}
+
+/// 模型名 → 表名片段：只留小写字母、数字，其余换成下划线（LanceDB 表名限制）。
+fn table_token(model: &str) -> String {
+    model
+        .chars()
+        .map(|c| {
+            if c.is_ascii_alphanumeric() {
+                c.to_ascii_lowercase()
+            } else {
+                '_'
+            }
+        })
+        .collect()
+}
 
 #[derive(Debug, Clone)]
 pub struct EmbeddingRecord {
@@ -40,6 +99,7 @@ pub struct FaceEmbeddingRecord {
 #[serde(rename_all = "camelCase")]
 pub struct VectorSearchHit {
     pub image_id: i64,
+    /// 余弦相似度（向量都已归一化），越大越近。
     pub score: f32,
 }
 
@@ -76,29 +136,63 @@ impl LanceDbRepo {
             .await
     }
 
-    pub async fn upsert_embeddings(&self, records: &[EmbeddingRecord]) -> AppResult<()> {
+    pub async fn upsert_embeddings(
+        &self,
+        table: &VectorTable,
+        records: &[EmbeddingRecord],
+    ) -> AppResult<()> {
         if records.is_empty() {
             return Ok(());
         }
-        validate_records(records)?;
-        let table = self.open_or_create_table().await?;
+        validate_dims(
+            table.dims,
+            records
+                .iter()
+                .map(|record| (record.image_id, record.embedding.len())),
+            "image",
+        )?;
+        let lance_table = self.open_or_create_table(table).await?;
         let ids: Vec<i64> = records.iter().map(|record| record.image_id).collect();
         let predicate = format!("image_id IN ({})", join_i64(&ids));
-        let _ = table.delete(predicate.as_str()).await;
-        let batch = records_to_batch(records)?;
+        let _ = lance_table.delete(predicate.as_str()).await;
+        let batch = records_to_batch(table.dims, records)?;
         let schema = batch.schema();
         let data = RecordBatchIterator::new(vec![Ok(batch)].into_iter(), schema);
         let reader: Box<dyn RecordBatchReader + Send> = Box::new(data);
-        table.add(reader).execute().await.map_err(lance_error)?;
+        lance_table
+            .add(reader)
+            .execute()
+            .await
+            .map_err(lance_error)?;
         Ok(())
     }
 
-    pub async fn embedding_for_image(&self, image_id: i64) -> AppResult<Option<Vec<f32>>> {
-        let table = match self.open_table().await {
-            Ok(table) => table,
+    /// 删掉这些图的向量（表不存在时什么也不做）。
+    pub async fn delete_embeddings(&self, table: &VectorTable, image_ids: &[i64]) -> AppResult<()> {
+        if image_ids.is_empty() {
+            return Ok(());
+        }
+        let Ok(lance_table) = self.open_table(table).await else {
+            return Ok(());
+        };
+        let predicate = format!("image_id IN ({})", join_i64(image_ids));
+        lance_table
+            .delete(predicate.as_str())
+            .await
+            .map_err(lance_error)?;
+        Ok(())
+    }
+
+    pub async fn embedding_for_image(
+        &self,
+        table: &VectorTable,
+        image_id: i64,
+    ) -> AppResult<Option<Vec<f32>>> {
+        let lance_table = match self.open_table(table).await {
+            Ok(lance_table) => lance_table,
             Err(_) => return Ok(None),
         };
-        let stream = table
+        let stream = lance_table
             .query()
             .only_if(format!("image_id = {image_id}"))
             .limit(1)
@@ -108,14 +202,20 @@ impl LanceDbRepo {
         let batches = stream.try_collect::<Vec<_>>().await.map_err(lance_error)?;
         Ok(batches
             .first()
-            .and_then(|batch| vector_from_batch(batch, 0).ok()))
+            .and_then(|batch| vector_from_batch(batch, 0).ok())
+            .filter(|vector| !vector.is_empty()))
     }
 
-    pub async fn top_k(&self, query: &[f32], limit: usize) -> AppResult<Vec<VectorSearchHit>> {
-        self.top_k_filtered(query, limit, None).await
+    pub async fn top_k(
+        &self,
+        table: &VectorTable,
+        query: &[f32],
+        limit: usize,
+    ) -> AppResult<Vec<VectorSearchHit>> {
+        self.top_k_filtered(table, query, limit, None).await
     }
 
-    /// 近邻检索，按距离从近到远返回。
+    /// 近邻检索（余弦距离），按相似度从高到低返回。
     ///
     /// `candidate_ids` 为 `Some` 时只在这些 image_id 里检索：条件经 `only_if_expr` 交给
     /// LanceDB，而 lancedb 的查询默认是 **prefilter**（`QueryRequest::prefilter = true`，
@@ -125,28 +225,31 @@ impl LanceDbRepo {
     /// 条件用 DataFusion 表达式（`image_id IN (...)`）而非 SQL 字符串，候选集上万时也不用拼接、解析大段 SQL。
     pub async fn top_k_filtered(
         &self,
+        table: &VectorTable,
         query: &[f32],
         limit: usize,
         candidate_ids: Option<&[i64]>,
     ) -> AppResult<Vec<VectorSearchHit>> {
-        if query.len() != CLIP_DIMS as usize {
+        if query.len() != table.dims {
             return Err(AppError::Other(format!(
-                "CLIP embedding 维度错误：expected {}, got {}",
-                CLIP_DIMS,
+                "查询向量维度错误（表 {}）：expected {}, got {}",
+                table.name,
+                table.dims,
                 query.len()
             )));
         }
         if limit == 0 || candidate_ids.is_some_and(|ids| ids.is_empty()) {
             return Ok(Vec::new());
         }
-        let table = match self.open_table().await {
-            Ok(table) => table,
+        let lance_table = match self.open_table(table).await {
+            Ok(lance_table) => lance_table,
             Err(_) => return Ok(Vec::new()),
         };
-        let mut vector_query = table
+        let mut vector_query = lance_table
             .query()
             .nearest_to(query)
             .map_err(lance_error)?
+            .distance_type(DistanceType::Cosine)
             .limit(limit);
         if let Some(ids) = candidate_ids {
             let list = ids.iter().map(|id| lit(*id)).collect::<Vec<_>>();
@@ -170,29 +273,37 @@ impl LanceDbRepo {
                 let distance = distances
                     .filter(|array| !array.is_null(row))
                     .map(|array| array.value(row))
-                    .unwrap_or(0.0);
+                    .unwrap_or(1.0);
                 out.push(VectorSearchHit {
                     image_id: image_ids.value(row),
-                    score: 1.0 / (1.0 + distance.max(0.0)),
+                    // 余弦距离 = 1 − 余弦相似度
+                    score: (1.0 - distance).clamp(-1.0, 1.0),
                 });
             }
         }
+        out.sort_by(|a, b| b.score.total_cmp(&a.score));
         Ok(out)
     }
 
-    pub async fn count(&self) -> AppResult<usize> {
-        let table = match self.open_table().await {
-            Ok(table) => table,
+    pub async fn count(&self, table: &VectorTable) -> AppResult<usize> {
+        let lance_table = match self.open_table(table).await {
+            Ok(lance_table) => lance_table,
             Err(_) => return Ok(0),
         };
-        table.count_rows(None).await.map_err(lance_error)
+        lance_table.count_rows(None).await.map_err(lance_error)
     }
 
     pub async fn upsert_face_embeddings(&self, records: &[FaceEmbeddingRecord]) -> AppResult<()> {
         if records.is_empty() {
             return Ok(());
         }
-        validate_face_records(records)?;
+        validate_dims(
+            FACE_DIMS,
+            records
+                .iter()
+                .map(|record| (record.face_id, record.embedding.len())),
+            "face",
+        )?;
         let table = self.open_or_create_face_table().await?;
         let ids = records
             .iter()
@@ -231,20 +342,30 @@ impl LanceDbRepo {
         Ok(out)
     }
 
-    async fn open_table(&self) -> AppResult<lancedb::Table> {
+    async fn open_table(&self, table: &VectorTable) -> AppResult<lancedb::Table> {
         let db = self.connection().await?;
-        db.open_table(TABLE_NAME)
+        db.open_table(table.name.as_str())
             .execute()
             .await
             .map_err(lance_error)
     }
 
-    async fn open_or_create_table(&self) -> AppResult<lancedb::Table> {
+    /// 打开（不存在就建）向量表，并核对已有表的维度：同名表维度对不上说明数据错乱，宁可报错也不写。
+    async fn open_or_create_table(&self, table: &VectorTable) -> AppResult<lancedb::Table> {
         let db = self.connection().await?;
-        if let Ok(table) = db.open_table(TABLE_NAME).execute().await {
-            return Ok(table);
+        if let Ok(existing) = db.open_table(table.name.as_str()).execute().await {
+            let schema = existing.schema().await.map_err(lance_error)?;
+            match vector_dims(&schema) {
+                Some(dims) if dims == table.dims => return Ok(existing),
+                found => {
+                    return Err(AppError::Other(format!(
+                        "向量表 {} 的维度是 {:?}，与模型维度 {} 不一致",
+                        table.name, found, table.dims
+                    )))
+                }
+            }
         }
-        db.create_empty_table(TABLE_NAME, embedding_schema())
+        db.create_empty_table(table.name.as_str(), embedding_schema(table.dims))
             .execute()
             .await
             .map_err(lance_error)
@@ -270,18 +391,29 @@ impl LanceDbRepo {
     }
 }
 
-fn embedding_schema() -> SchemaRef {
+fn vector_field(dims: usize) -> Field {
+    Field::new(
+        VECTOR_COLUMN,
+        DataType::FixedSizeList(
+            Arc::new(Field::new("item", DataType::Float32, true)),
+            dims as i32,
+        ),
+        false,
+    )
+}
+
+fn vector_dims(schema: &Schema) -> Option<usize> {
+    match schema.field_with_name(VECTOR_COLUMN).ok()?.data_type() {
+        DataType::FixedSizeList(_, size) => usize::try_from(*size).ok(),
+        _ => None,
+    }
+}
+
+fn embedding_schema(dims: usize) -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("image_id", DataType::Int64, false),
         Field::new("model", DataType::Utf8, false),
-        Field::new(
-            VECTOR_COLUMN,
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                CLIP_DIMS,
-            ),
-            false,
-        ),
+        vector_field(dims),
         Field::new("created_at", DataType::Int64, false),
     ]))
 }
@@ -289,35 +421,26 @@ fn embedding_schema() -> SchemaRef {
 fn face_embedding_schema() -> SchemaRef {
     Arc::new(Schema::new(vec![
         Field::new("face_id", DataType::Int64, false),
-        Field::new(
-            VECTOR_COLUMN,
-            DataType::FixedSizeList(
-                Arc::new(Field::new("item", DataType::Float32, true)),
-                CLIP_DIMS,
-            ),
-            false,
-        ),
+        vector_field(FACE_DIMS),
         Field::new("created_at", DataType::Int64, false),
     ]))
 }
 
-fn records_to_batch(records: &[EmbeddingRecord]) -> AppResult<RecordBatch> {
-    let schema = embedding_schema();
+fn vectors_array<'a>(
+    dims: usize,
+    vectors: impl Iterator<Item = &'a Vec<f32>>,
+) -> FixedSizeListArray {
+    FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
+        vectors.map(|vector| Some(vector.iter().copied().map(Some).collect::<Vec<_>>())),
+        dims as i32,
+    )
+}
+
+fn records_to_batch(dims: usize, records: &[EmbeddingRecord]) -> AppResult<RecordBatch> {
+    let schema = embedding_schema(dims);
     let image_ids = Int64Array::from_iter_values(records.iter().map(|record| record.image_id));
     let models = StringArray::from_iter_values(records.iter().map(|record| record.model.as_str()));
-    let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        records.iter().map(|record| {
-            Some(
-                record
-                    .embedding
-                    .iter()
-                    .copied()
-                    .map(Some)
-                    .collect::<Vec<_>>(),
-            )
-        }),
-        CLIP_DIMS,
-    );
+    let embeddings = vectors_array(dims, records.iter().map(|record| &record.embedding));
     let created_at = Int64Array::from_iter_values(records.iter().map(|record| record.created_at));
     RecordBatch::try_new(
         schema,
@@ -334,19 +457,7 @@ fn records_to_batch(records: &[EmbeddingRecord]) -> AppResult<RecordBatch> {
 fn face_records_to_batch(records: &[FaceEmbeddingRecord]) -> AppResult<RecordBatch> {
     let schema = face_embedding_schema();
     let face_ids = Int64Array::from_iter_values(records.iter().map(|record| record.face_id));
-    let embeddings = FixedSizeListArray::from_iter_primitive::<Float32Type, _, _>(
-        records.iter().map(|record| {
-            Some(
-                record
-                    .embedding
-                    .iter()
-                    .copied()
-                    .map(Some)
-                    .collect::<Vec<_>>(),
-            )
-        }),
-        CLIP_DIMS,
-    );
+    let embeddings = vectors_array(FACE_DIMS, records.iter().map(|record| &record.embedding));
     let created_at = Int64Array::from_iter_values(records.iter().map(|record| record.created_at));
     RecordBatch::try_new(
         schema,
@@ -375,28 +486,15 @@ fn vector_from_batch(batch: &RecordBatch, row: usize) -> AppResult<Vec<f32>> {
     Ok((0..floats.len()).map(|index| floats.value(index)).collect())
 }
 
-fn validate_records(records: &[EmbeddingRecord]) -> AppResult<()> {
-    for record in records {
-        if record.embedding.len() != CLIP_DIMS as usize {
+fn validate_dims(
+    dims: usize,
+    items: impl Iterator<Item = (i64, usize)>,
+    kind: &str,
+) -> AppResult<()> {
+    for (id, len) in items {
+        if len != dims {
             return Err(AppError::Other(format!(
-                "image {} embedding 维度错误：expected {}, got {}",
-                record.image_id,
-                CLIP_DIMS,
-                record.embedding.len()
-            )));
-        }
-    }
-    Ok(())
-}
-
-fn validate_face_records(records: &[FaceEmbeddingRecord]) -> AppResult<()> {
-    for record in records {
-        if record.embedding.len() != CLIP_DIMS as usize {
-            return Err(AppError::Other(format!(
-                "face {} embedding 维度错误：expected {}, got {}",
-                record.face_id,
-                CLIP_DIMS,
-                record.embedding.len()
+                "{kind} {id} embedding 维度错误：expected {dims}, got {len}"
             )));
         }
     }
@@ -413,35 +511,4 @@ fn join_i64(values: &[i64]) -> String {
 
 fn lance_error(error: impl std::fmt::Display) -> AppError {
     AppError::Other(format!("lancedb: {error}"))
-}
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[tokio::test]
-    async fn lancedb_roundtrip() {
-        let dir = tempfile::tempdir().expect("tempdir");
-        let repo = LanceDbRepo::new(dir.path().join("vectors"));
-        let mut vector = vec![0.0; CLIP_DIMS as usize];
-        vector[0] = 1.0;
-        repo.upsert_embeddings(&[EmbeddingRecord {
-            image_id: 42,
-            model: "clip-vit-b-32".to_string(),
-            embedding: vector.clone(),
-            created_at: 1,
-        }])
-        .await
-        .expect("upsert");
-        assert_eq!(repo.count().await.expect("count"), 1);
-        assert_eq!(
-            repo.embedding_for_image(42)
-                .await
-                .expect("embedding")
-                .expect("some")[0],
-            1.0
-        );
-        let hits = repo.top_k(&vector, 10).await.expect("top_k");
-        assert_eq!(hits[0].image_id, 42);
-    }
 }

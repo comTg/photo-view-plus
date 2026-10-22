@@ -1,15 +1,62 @@
 {
   "clip-vit-b-32": {
+    "kind": "clip",
     "hf_repo": "timm/vit_base_patch32_clip_224.openai",
     "format": "open_clip",
-    "size_mb": 580
+    "dims": 512,
+    "size_mb": 580,
+    "note": "OpenAI CLIP，只懂英文；docs/10 A5 之后仅作回退"
+  },
+  "chinese-clip-vit-b-16": {
+    "kind": "clip",
+    "dir": "chinese-clip-vit-base-patch16",
+    "hf_repo": "OFA-Sys/chinese-clip-vit-base-patch16",
+    "modelscope_repo": "AI-ModelScope/chinese-clip-vit-base-patch16",
+    "format": "chinese_clip",
+    "dims": 512,
+    "files": ["config.json", "preprocessor_config.json", "vocab.txt", "pytorch_model.bin"],
+    "size_mb": 720,
+    "note": "Chinese-CLIP ViT-B/16（MIT），默认图像向量模型（ADR-008）"
+  },
+  "bge-small-zh-v1.5": {
+    "kind": "text",
+    "hf_repo": "BAAI/bge-small-zh-v1.5",
+    "modelscope_repo": "BAAI/bge-small-zh-v1.5",
+    "format": "bge",
+    "dims": 512,
+    "query_prefix": "为这个句子生成表示以用于检索相关文章：",
+    "files": [
+      "config.json",
+      "special_tokens_map.json",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vocab.txt",
+      "pytorch_model.bin"
+    ],
+    "size_mb": 95,
+    "note": "中文文本向量（MIT），描述检索默认模型"
+  },
+  "bge-base-zh-v1.5": {
+    "kind": "text",
+    "hf_repo": "BAAI/bge-base-zh-v1.5",
+    "modelscope_repo": "BAAI/bge-base-zh-v1.5",
+    "format": "bge",
+    "dims": 768,
+    "query_prefix": "为这个句子生成表示以用于检索相关文章：",
+    "files": [
+      "config.json",
+      "special_tokens_map.json",
+      "tokenizer.json",
+      "tokenizer_config.json",
+      "vocab.txt",
+      "pytorch_model.bin"
+    ],
+    "size_mb": 400,
+    "note": "中文文本向量（MIT），评测对比用"
   },
   "ram-plus": {
+    "kind": "tagger",
     "hf_repo": "xinyu1205/recognize-anything-plus-model",
     "size_mb": 1200
-  },
-  "siglip-so400m": {
-    "hf_repo": "google/siglip-so400m-patch14-384",
-    "size_mb": 3700
   }
 }
