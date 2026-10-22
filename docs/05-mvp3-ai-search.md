@@ -315,6 +315,7 @@ T1 ─→ T2 ─→ T3 ─→ T4 ─→ T5
 - **LanceDB 索引重建时机**：每新增 1 万向量后台 reindex 一次，不要每条都重建
 - **HNSW 召回不是 100%**：top_k 取 200 然后业务层过滤到 100，避免边缘漏掉
 - **中文搜索**：CLIP 原版主要是英文，中文需要 SigLIP 或 ChineseCLIP 才稳。MVP3 先 CLIP；遇到中文 query 效果差时升级 SigLIP（已在 models.json 备好）
+  - **更正（2026-10-22）**：`models.json` 里的 `siglip-so400m` 是英文模型，解决不了中文。中文搜索的方案改为 Chinese-CLIP，再加上大模型描述的文字检索通道，见 [docs/10](10-vlm-tagging-and-search.md) §5.3、§8。
 - **隐私**：不上传任何图片到 HuggingFace 或任何远端，AI Worker 不开外网（除模型下载）
 
 ## 5. 完成判据

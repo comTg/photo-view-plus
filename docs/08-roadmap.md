@@ -241,7 +241,7 @@
   - 聚类算法可用但不是最终高精度方案；后续可替换为 HDBSCAN/Chinese Whispers，不改变 DB/UI 契约。
 
 后续每个 MVP 完成时追加新的 ADR：
-- ADR-008 · MVP3 CLIP vs SigLIP 选型（待填）
+- ADR-008 · MVP3 CLIP vs SigLIP 选型（待填；提议改为 Chinese-CLIP。离线原型已过门槛 G2：nDCG@20 从 0.079 升到 0.817，见 [docs/10](10-vlm-tagging-and-search.md) §9.1；A5 落地并复核后正式记录）
 
 ## 6. 未决议题（讨论后再写 ADR）
 

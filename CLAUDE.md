@@ -23,6 +23,9 @@
 | `docs/06-mvp4-advanced.md` | 第四阶段（OCR / 人脸 / 时间轴） |
 | `docs/07-windows-platform.md` | 任何依赖 Windows 行为的代码（CUDA / HEIC / SMB / 回收站） |
 | `docs/08-roadmap.md` | 规划新阶段、调里程碑、记 ADR |
+| `docs/09-performance-optimization.md` | 查询 / 渲染类性能优化（进度台账） |
+| `docs/10-vlm-tagging-and-search.md` | 本地视觉大模型打标、中文自然语言搜索（方案与进度） |
+| `docs/11-background-resource-governance.md` | 后台任务资源治理：整机卡顿、负载模式、GPU 占空比（方案与进度） |
 
 文档没说的，**先开 issue / 改 docs 再写代码**，不要在代码里反向定规则。
 
