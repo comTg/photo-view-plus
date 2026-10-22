@@ -1,6 +1,6 @@
 # 10 · 本地视觉大模型打标与中文自然语言搜索
 
-> 状态：方案（2026-10-22），待评审。实施按 §10 的阶段逐项推进，每项完成后更新进度表里的状态与实测数据（做法同 [docs/09](09-performance-optimization.md)：一项一提交，提交信息引用条目 ID）。
+> 状态：A0–A8 已实施（2026-10-23），各项的实测数据见 §10。实施按 §10 的阶段逐项推进，每项完成后更新进度表里的状态与实测数据（做法同 [docs/09](09-performance-optimization.md)：一项一提交，提交信息引用条目 ID）。
 > 关联：[docs/05](05-mvp3-ai-search.md)（MVP3 原设计）、[docs/11](11-background-resource-governance.md)（后台资源治理，VLM 批处理受它调度）、参考实现 memora（`D:\code\mygit\memora`）。
 
 ## 0. 结论
@@ -175,7 +175,7 @@ worker 从 NAS 读原图，这条读取路径也必须遵守"网络盘并发 ≤
 ```
 
 - 约束只用 llama.cpp 支持的 Schema 子集，越界的值在代码里夹取，例如 `people_count` 限制在 0–10。
-- 推理参数：`temperature` 0.2，`max_tokens` 约 500；JSON 解析失败时最多重试 2 次（同 memora）。
+- 推理参数：`temperature` 0.2，`max_tokens` 1024（初稿写的约 500，全量运行里文档类图片偶有截断，A6 调高）；JSON 解析失败时最多重试 2 次（同 memora）。
 - 提示词带版本号（如 `search-v1`）。改提示词就升版本号，是否重跑由用户手动触发。
 
 **规范化**（在 worker 里做，带单元测试）：
@@ -357,7 +357,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 | A6 | VLM 打标流水线：`llama-server` 监管、worker `/vlm/analyze`、`AnalysisPipeline`（受 docs/11 R2 调度）、进度界面；200 张样本过 G3 后再全量 | R2（docs/11）、G1 | ✅ G3 通过 |
 | A6b | 夜间定时：Windows 计划任务在 03:00 运行 `photo-view-plus.exe --background-analyze`（无窗口、单实例）；应用已经开着时交给正在运行的实例；07:00 前处理完或到点退出；与 memora 共用 8081 服务（§12） | A6 | ✅ |
 | A7 | RAM-plus 下线：tagger 设置增加 `vlm`；VLM 覆盖率 ≥ 95% 后，经用户确认再清理旧的 `'ai'` 标签；标签云按类别分组 | A6 | ✅ |
-| A8 | 收尾：更新 docs/05、docs/08（ADR-008 / ADR-010）、设置页、测试 | 全部 | ⬜ |
+| A8 | 收尾：更新 docs/05、docs/08（ADR-008 / ADR-010）、设置页、测试 | 全部 | ✅ |
 
 **与 docs/11 交错的执行顺序**（2026-10-22 按 §9.1 的结果调整：A5 收益最大、成本最低，提前做）：
 1. R0 测量，再做 R1 止血。

@@ -1,7 +1,8 @@
 # 05 · MVP3 · AI 标签与语义搜索
 
 > 范围：Python AI Worker 进程 + CLIP 向量化 + LanceDB + 自然语言搜图 + 自动标签 + 以图搜图。  
-> 前置：MVP1 + MVP2 完成。
+> 前置：MVP1 + MVP2 完成。  
+> **更新（2026-10-23）**：中文搜索和打标已按 [docs/10](10-vlm-tagging-and-search.md) 重做——图像向量换成 Chinese-CLIP，搜索改为四路召回融合，标签和画面描述改由本地视觉大模型生成，RAM-plus 下线。下面 §2 的任务清单保留 MVP3 当时的设计，与现状不同的地方见 §6。
 
 ## 0. 目标与验收
 
@@ -323,3 +324,19 @@ T1 ─→ T2 ─→ T3 ─→ T4 ─→ T5
 - 16 个任务"验收"段全部打勾
 - benchmark 文件 `tests/ai_bench.md` 记录 RTX 5070 上的实际性能数据
 - ADR 写入 `docs/08-roadmap.md`：CLIP vs SigLIP 选型与切换路径
+
+## 6. 现状（docs/10 之后，2026-10-23）
+
+| 任务 | MVP3 设计 | 现状 | 详见 |
+|------|-----------|------|------|
+| T6 图像向量 | open_clip ViT-B/32（OpenAI 权重，只懂英文） | 默认 Chinese-CLIP ViT-B/16（FP16），设置可切回；向量表按"模型 + 维度"命名，换模型自动全量重算 | docs/10 A5、ADR-008 |
+| T7 / T8 状态与流水线 | `images.embedding_status` | 新任务状态统一记在 `ai_jobs`（图像向量、描述向量、VLM 分析），兜底结果不入库；后台 GPU 任务受资源治理器调度 | docs/10 §7、docs/11 R2 |
+| T9 自然语言搜图 | CLIP 文本向量 + LanceDB top-k | 四路召回 + RRF 融合：标签、全文（FTS5，CJK 双字 + 单字、同义词扩展）、描述文本向量（bge-small-zh）、图像向量（Chinese-CLIP）；结果带命中来源和高亮片段；worker 没就绪时降级为文字通道 | docs/10 §8、A1–A4、A2b |
+| T11 自动标签 | RAM++（批量 16） | 默认仍可用 RAM-plus；开启大模型打标后选"大模型"，标签、类别、画面描述、同义词、画面文字由 Qwen3.5-9B（llama-server）在空闲时生成，RAM-plus 不再加载 | docs/10 A6、A7 |
+| T12 标签云 | 按 category 分组 | 按大模型的主类别分组；RAM 旧标签在大模型覆盖率 ≥ 95% 后经用户确认清理 | docs/10 A7 |
+| T13 搜索 DSL | `#tag`、`format:`、`size:` + CLIP 重排 | DSL 条件先在 SQL 里求候选集，各召回通道都只在候选集里检索（修掉了"先取 400 行再筛"的漏召回） | docs/10 A1 |
+| T14 AI 状态面板 | 队列、速度、剩余时间 | 另有大模型打标进度（速度、预计剩余、模型服务状态）和底部状态栏的"后台处理"档位 | docs/10 A6、docs/11 R2 |
+| T15 容错 | 超时、健康检查、重启上限 | 另加：空闲自动停止 worker、作业对象（主进程崩溃时子进程一起结束）、llama-server 的独立监管 | docs/11 R1-4、docs/10 A6 |
+
+**中文查询的检索质量**（40 个查询、池化标注，见 `tests/search_eval/report.md`）：MVP3 时 nDCG@20 0.079；Chinese-CLIP 0.816；四路融合 + 同义词扩展 0.906。
+
