@@ -13,6 +13,7 @@ use std::collections::VecDeque;
 use std::fs::OpenOptions;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex as StdMutex};
 use std::time::Duration;
 
@@ -136,6 +137,8 @@ pub enum VlmStartError {
     Vram { free_mb: u64 },
     /// 1 分钟内启动次数用完。
     RestartLimit,
+    /// 加载途中被强制停止（进入全屏、用户手动卸载）打断。
+    Aborted,
     /// 进程退出、超时、找不到程序等。
     Failed(String),
 }
@@ -150,6 +153,7 @@ impl std::fmt::Display for VlmStartError {
                 MIN_FREE_VRAM_MB as f64 / 1024.0
             ),
             Self::RestartLimit => write!(f, "1 分钟内已启动 {START_LIMIT} 次，暂停启动大模型服务"),
+            Self::Aborted => f.write_str("大模型服务的启动被取消"),
             Self::Failed(reason) => f.write_str(reason),
         }
     }
@@ -172,6 +176,8 @@ pub struct VlmSupervisor {
     inner: Mutex<Inner>,
     /// 串行化启动：并发的 ensure_running 只有一个真正去拉进程。
     start_lock: Mutex<()>,
+    /// 强制停止时置位：正在加载的 ensure_running 看到后立即结束进程退出，不用等满 300 秒。
+    abort_start: AtomicBool,
     last_used: StdMutex<Instant>,
 }
 
@@ -200,6 +206,7 @@ impl VlmSupervisor {
                 starts: VecDeque::new(),
             }),
             start_lock: Mutex::new(()),
+            abort_start: AtomicBool::new(false),
             last_used: StdMutex::new(Instant::now()),
         })
     }
@@ -277,6 +284,9 @@ impl VlmSupervisor {
     ) -> Result<VlmServerStatus, VlmStartError> {
         self.touch();
         let _start = self.start_lock.lock().await;
+        if self.abort_start.load(Ordering::SeqCst) {
+            return Err(VlmStartError::Aborted);
+        }
         {
             let mut inner = self.inner.lock().await;
             reap(&mut inner);
@@ -352,7 +362,18 @@ impl VlmSupervisor {
                 );
                 Ok(inner.status.clone())
             }
-            Err(reason) => {
+            Err(WaitError::Aborted) => {
+                let _ = child.start_kill();
+                // 被打断的启动不算一次失败的启动。
+                inner.starts.pop_back();
+                refresh_window(&mut inner);
+                inner.status.state = "stopped".to_string();
+                inner.status.pid = None;
+                inner.status.owned = false;
+                tracing::info!("llama-server start aborted");
+                Err(VlmStartError::Aborted)
+            }
+            Err(WaitError::Failed(reason)) => {
                 let _ = child.start_kill();
                 inner.status.state = if inner.starts.len() >= START_LIMIT {
                     "degraded".to_string()
@@ -417,23 +438,31 @@ impl VlmSupervisor {
         Some((Stdio::from(file), Stdio::from(err)))
     }
 
-    async fn wait_healthy(&self, child: &mut Child, timeout: Duration) -> Result<(), String> {
+    async fn wait_healthy(&self, child: &mut Child, timeout: Duration) -> Result<(), WaitError> {
         let started = Instant::now();
         loop {
+            if self.abort_start.load(Ordering::SeqCst) {
+                return Err(WaitError::Aborted);
+            }
             if self.healthy().await {
                 return Ok(());
             }
             match child.try_wait() {
                 Ok(Some(status)) => {
-                    return Err(format!(
+                    return Err(WaitError::Failed(format!(
                         "llama-server 启动失败（{status}），详见日志 llama-*.log"
-                    ))
+                    )))
                 }
                 Ok(None) => {}
-                Err(error) => return Err(format!("llama-server 状态未知：{error}")),
+                Err(error) => {
+                    return Err(WaitError::Failed(format!("llama-server 状态未知：{error}")))
+                }
             }
             if started.elapsed() >= timeout {
-                return Err(format!("llama-server {} 秒内没有就绪", timeout.as_secs()));
+                return Err(WaitError::Failed(format!(
+                    "llama-server {} 秒内没有就绪",
+                    timeout.as_secs()
+                )));
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
@@ -460,9 +489,14 @@ impl VlmSupervisor {
     }
 
     /// 停掉自己启动的服务。`force = false` 时，有槽位还在处理就不停（返回 false）。
-    /// 复用的外部服务从不关闭。
+    /// 复用的外部服务从不关闭。`force = true` 还会打断正在进行的加载（不用等它加载完）。
     pub async fn stop(&self, force: bool) -> bool {
+        if force {
+            self.abort_start.store(true, Ordering::SeqCst);
+        }
         let _start = self.start_lock.lock().await;
+        // 拿到锁时，进行中的加载（如果有）已经被打断退出；之后的启动不受影响。
+        self.abort_start.store(false, Ordering::SeqCst);
         {
             let mut inner = self.inner.lock().await;
             reap(&mut inner);
@@ -504,6 +538,11 @@ impl VlmSupervisor {
         }
         self.stop(false).await
     }
+}
+
+enum WaitError {
+    Aborted,
+    Failed(String),
 }
 
 fn slot_is_idle(slot: &serde_json::Value) -> bool {

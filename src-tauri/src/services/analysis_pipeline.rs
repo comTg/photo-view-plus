@@ -48,6 +48,10 @@ pub const IDLE_UNLOAD_AFTER: Duration = Duration::from_secs(5 * 60);
 
 const CANDIDATE_BATCH: i64 = 48;
 const TRANSIENT_RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
+/// 这张图失败（算一次失败次数）后，多久再试：不立刻连试三次，给 SMB 目录缓存之类的偶发情况留时间。
+const FAILURE_RETRY_AFTER: Duration = Duration::from_secs(10 * 60);
+/// 用户在设置页手动"卸载模型"后，多久内不再自动加载。
+pub const MANUAL_UNLOAD_PAUSE: Duration = Duration::from_secs(30 * 60);
 const BREAKER_THRESHOLD: usize = 6;
 const BREAKER_PAUSE: Duration = Duration::from_secs(5 * 60);
 const SERVER_RETRY_AFTER: Duration = Duration::from_secs(2 * 60);
@@ -136,8 +140,11 @@ struct PipelineState {
     queue: VecDeque<VlmCandidate>,
     inflight_ids: HashSet<i64>,
     inflight_keys: HashSet<String>,
-    retry_after: HashMap<i64, Instant>,
+    /// 退避中的图，按忽略大小写的路径记（同一文件的大小写重复行一起退避）。
+    retry_after: HashMap<String, Instant>,
     consecutive_transient: usize,
+    /// 用户手动卸载模型后暂停自动加载到这个时刻。
+    suspended_until: Option<Instant>,
     breaker_until: Option<Instant>,
     server_retry_after: Option<Instant>,
     session_done: usize,
@@ -314,10 +321,26 @@ impl AnalysisPipeline {
             .unwrap_or((0, 0))
     }
 
-    /// 熔断（连续临时错误）或服务启动失败后的等待。
+    /// 用户手动卸载模型：一段时间内不再自动加载，在途请求的失败也不退避、不计入熔断。
+    pub fn suspend(&self, duration: Duration) {
+        if let Ok(mut state) = self.state.lock() {
+            state.suspended_until = Some(Instant::now() + duration);
+        }
+    }
+
+    /// 熔断（连续临时错误）、服务启动失败或手动卸载后的等待。
     fn paused_reason(&self) -> Option<String> {
         let mut state = self.state.lock().ok()?;
         let now = Instant::now();
+        if let Some(until) = state.suspended_until {
+            if until > now {
+                return Some(format!(
+                    "已手动卸载模型，{} 分钟后再自动加载",
+                    until.duration_since(now).as_secs().div_ceil(60)
+                ));
+            }
+            state.suspended_until = None;
+        }
         if let Some(until) = state.breaker_until {
             if until > now {
                 let error = state.last_error.clone().unwrap_or_default();
@@ -373,7 +396,7 @@ impl AnalysisPipeline {
                     .cloned()
                     .chain(state.queue.iter().map(path_key))
                     .collect::<HashSet<_>>(),
-                state.retry_after.keys().copied().collect::<HashSet<_>>(),
+                state.retry_after.keys().cloned().collect::<HashSet<_>>(),
             )
         };
         let pool = self.pool.clone();
@@ -388,9 +411,10 @@ impl AnalysisPipeline {
         let fresh = rows
             .into_iter()
             .filter(|candidate| {
+                let key = path_key(candidate);
                 !skip_ids.contains(&candidate.image_id)
-                    && !backoff.contains(&candidate.image_id)
-                    && keys.insert(path_key(candidate))
+                    && !backoff.contains(&key)
+                    && keys.insert(key)
             })
             .take(CANDIDATE_BATCH as usize)
             .collect::<Vec<_>>();
@@ -419,11 +443,14 @@ impl AnalysisPipeline {
                     result = this.vlm.ensure_running(&spec).await;
                 }
             }
-            if let Err(error) = result {
-                tracing::warn!(%error, "llama-server unavailable");
-                if let Ok(mut state) = this.state.lock() {
-                    state.last_error = Some(error.to_string());
-                    state.server_retry_after = Some(Instant::now() + SERVER_RETRY_AFTER);
+            match result {
+                Ok(_) | Err(VlmStartError::Aborted) => {}
+                Err(error) => {
+                    tracing::warn!(%error, "llama-server unavailable");
+                    if let Ok(mut state) = this.state.lock() {
+                        state.last_error = Some(error.to_string());
+                        state.server_retry_after = Some(Instant::now() + SERVER_RETRY_AFTER);
+                    }
                 }
             }
             this.starting.store(false, Ordering::SeqCst);
@@ -462,6 +489,8 @@ impl AnalysisPipeline {
             state.inflight_ids.remove(&candidate.image_id);
             state.inflight_keys.remove(&key);
             let now = Instant::now();
+            // 自己卸载（全屏 / 降档 / 用户手动卸载）造成的失败不退避、不计入熔断。
+            let penalize = allowed && !state.suspended_until.is_some_and(|until| until > now);
             match &outcome {
                 Ok(()) => {
                     state.session_done += 1;
@@ -472,11 +501,10 @@ impl AnalysisPipeline {
                     }
                 }
                 Err(Failure::Transient(message)) => {
-                    // 自己卸载（全屏 / 降档）造成的失败不退避、不计入熔断。
-                    if allowed {
+                    if penalize {
                         state
                             .retry_after
-                            .insert(candidate.image_id, now + TRANSIENT_RETRY_AFTER);
+                            .insert(key.clone(), now + TRANSIENT_RETRY_AFTER);
                         state.consecutive_transient += 1;
                         if state.consecutive_transient >= BREAKER_THRESHOLD {
                             state.breaker_until = Some(now + BREAKER_PAUSE);
@@ -487,6 +515,10 @@ impl AnalysisPipeline {
                     tracing::debug!(image_id = candidate.image_id, %message, "VLM transient failure");
                 }
                 Err(Failure::Permanent(message)) => {
+                    // 失败次数照记，但不立刻重试：在同一把锁里设退避，下一轮补候选时一定看得到。
+                    state
+                        .retry_after
+                        .insert(key.clone(), now + FAILURE_RETRY_AFTER);
                     state.session_failed += 1;
                     state.consecutive_transient = 0;
                     state.last_error = Some(message.clone());
@@ -515,7 +547,8 @@ impl AnalysisPipeline {
                 .await
                 .map_err(|error| Failure::Transient(error.to_string()))?;
             let path = full_path.clone();
-            tokio::task::spawn_blocking(move || read_original(&path))
+            let root = PathBuf::from(&candidate.root_path);
+            tokio::task::spawn_blocking(move || read_original(&root, &path))
                 .await
                 .map_err(|error| Failure::Transient(error.to_string()))??
         };
@@ -652,8 +685,14 @@ fn path_key(candidate: &VlmCandidate) -> String {
 }
 
 /// 读原图字节。文件不存在 / 没有权限算这张图的失败；其他 I/O 错误（NAS 断开等）是临时错误。
-pub fn read_original(path: &Path) -> Result<Vec<u8>, Failure> {
+///
+/// 盘符不在、共享不可达时 Windows 返回"找不到路径"，Rust 里也是 `NotFound`：先看图库根目录
+/// 还在不在，不在就按临时错误处理，免得 NAS 一断就把整个目录的图都记成失败。
+pub fn read_original(root: &Path, path: &Path) -> Result<Vec<u8>, Failure> {
     let classify = |error: std::io::Error| match error.kind() {
+        std::io::ErrorKind::NotFound if !root.is_dir() => {
+            Failure::Transient(format!("图库目录暂时不可用：{}", root.display()))
+        }
         std::io::ErrorKind::NotFound => Failure::Permanent("文件不存在".to_string()),
         std::io::ErrorKind::PermissionDenied => Failure::Permanent("没有读取权限".to_string()),
         _ => Failure::Transient(format!("读取原图失败：{error}")),

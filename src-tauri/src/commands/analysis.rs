@@ -214,8 +214,10 @@ pub async fn night_task_set(
 }
 
 /// 立即卸载本应用启动的 llama-server（复用的外部服务不受影响）。返回是否卸载了。
+/// 卸载后 30 分钟内流水线不再自动加载，否则下一秒就又加载回来了。
 #[tauri::command]
 pub async fn vlm_server_stop(pipeline: State<'_, Arc<AnalysisPipeline>>) -> Result<bool, String> {
+    pipeline.suspend(analysis_pipeline::MANUAL_UNLOAD_PAUSE);
     Ok(pipeline.vlm().stop(true).await)
 }
 

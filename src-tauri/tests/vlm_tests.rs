@@ -564,15 +564,24 @@ fn vlm_paths_come_from_settings_or_detection() {
 }
 
 #[test]
-fn missing_original_is_a_permanent_failure() {
+fn missing_original_is_permanent_but_missing_root_is_transient() {
     let dir = tempfile::tempdir().expect("tempdir");
     assert_eq!(
-        read_original(&dir.path().join("missing.jpg")),
+        read_original(dir.path(), &dir.path().join("missing.jpg")),
         Err(Failure::Permanent("文件不存在".to_string()))
     );
     let file = dir.path().join("a.jpg");
     std::fs::write(&file, b"jpeg bytes").expect("write");
-    assert_eq!(read_original(&file).expect("read"), b"jpeg bytes");
+    assert_eq!(
+        read_original(dir.path(), &file).expect("read"),
+        b"jpeg bytes"
+    );
+    // 整个图库目录不在（盘符拔掉、NAS 断开）：临时错误，不记失败次数。
+    let gone = dir.path().join("unplugged-drive");
+    assert!(matches!(
+        read_original(&gone, &gone.join("a.jpg")),
+        Err(Failure::Transient(_))
+    ));
 }
 
 // ---------------------------------------------------------------------------

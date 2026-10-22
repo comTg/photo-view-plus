@@ -263,8 +263,9 @@ async fn vlm_sample() {
         let base_url = base_url.clone();
         async move {
             let begin = Instant::now();
-            let path = PathBuf::from(&image.candidate.root_path).join(&image.candidate.rel_path);
-            let bytes = tokio::task::spawn_blocking(move || read_original(&path))
+            let root = PathBuf::from(&image.candidate.root_path);
+            let path = root.join(&image.candidate.rel_path);
+            let bytes = tokio::task::spawn_blocking(move || read_original(&root, &path))
                 .await
                 .expect("join");
             let read_ms = begin.elapsed().as_millis();
