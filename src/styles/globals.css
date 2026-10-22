@@ -1834,6 +1834,17 @@ body {
   color: var(--text-muted);
 }
 
+.settings-hours {
+  display: inline-flex;
+  flex: 0 0 auto;
+  align-items: center;
+  gap: 6px;
+}
+
+.settings-hours select {
+  width: 88px;
+}
+
 .settings-toggle--inline {
   flex: 1;
   min-width: 0;

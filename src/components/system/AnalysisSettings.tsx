@@ -362,7 +362,7 @@ export const AnalysisSettings = memo(function AnalysisSettings({
             }
           />
         </label>
-        <span>
+        <span className="settings-hours">
           <select
             value={settings.nightStartHour}
             disabled={busy}
@@ -381,7 +381,7 @@ export const AnalysisSettings = memo(function AnalysisSettings({
               </option>
             ))}
           </select>
-          {" 至 "}
+          <span>至</span>
           <select
             value={settings.nightEndHour}
             disabled={busy}
