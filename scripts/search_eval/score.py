@@ -15,7 +15,7 @@ from datetime import date
 
 from common import REPO_ROOT, eval_dir, load_queries, metrics_for
 
-ORDER = ["S0", "S1", "S2", "S3", "S4", "S5", "S5a", "S5b", "S5c", "S5d", "S5w", "S6", "R1", "R2", "R2s", "R3", "R3s", "R4", "R5b", "R5", "R5s", "R6"]
+ORDER = ["S0", "S1", "S2", "S3", "S4", "S5", "S5a", "S5b", "S5c", "S5d", "S5w", "S6", "R1", "R2", "R2s", "R3", "R3s", "R4", "R5b", "R5", "R5s", "R6-R3", "R6-R4", "R6", "R6c-R3", "R6c-R4", "R6c"]
 NAMES = {
     "S0": "OpenAI CLIP（现状）",
     "S1": "Chinese-CLIP",
@@ -41,7 +41,12 @@ NAMES = {
     "R2s": "线上·标签 + 全文 + 同义词扩展（A2b）",
     "R3s": "线上·描述全文 + 同义词扩展（A2b）",
     "R5s": "线上·融合 + 同义词扩展（A2b）",
-    "R6": "线上·融合（VLM 描述）",
+    "R6-R3": "线上·描述全文（VLM 描述，只查描述列）",
+    "R6-R4": "线上·描述文本向量（VLM 描述 + 关键词）",
+    "R6": "线上·融合（VLM 描述 + 标签，RAM 旧标签仍在）",
+    "R6c-R3": "线上·描述全文（VLM，RAM 旧标签已清理）",
+    "R6c-R4": "线上·描述文本向量（VLM 描述 + 关键词，RAM 旧标签已清理）",
+    "R6c": "线上·融合（VLM，RAM 旧标签已清理）",
 }
 
 
@@ -81,7 +86,7 @@ def main() -> None:
         f"- 日期：{date.today().isoformat()}；查询 {len(queries)} 个，已标注 {len(labeled)} 个，其中有相关结果的 {len(with_rel)} 个",
         f"- 标注：共 {n_judged} 条判定，{n_rel} 条相关（池化深度 20；召回率为相对召回）",
         f"- Recall@20 的理论上限为 {fmt(recall_cap)}（多数查询的相关图超过 20 张），比较时以 nDCG@20 和 P@10 为主",
-        "- 语料：正式库按忽略大小写的路径去重后的图；图像向量只覆盖已有缩略图的图，描述来自 memora 导入",
+        "- 语料：正式库按忽略大小写的路径去重后的图；图像向量只覆盖已有缩略图的图；描述：R3–R5 来自 memora 导入，R6 来自本项目 VLM 全量分析（search-v1）",
         "",
         "| 方案 | Recall@20 | nDCG@20 | MRR | P@10 | 前 20 未标注数（均值） |",
         "|------|-----------|---------|-----|------|----------------------|",
