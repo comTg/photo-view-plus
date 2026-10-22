@@ -239,6 +239,20 @@ pub fn requeue_outdated_vlm(conn: &Connection, model: &str) -> AppResult<usize> 
     )?)
 }
 
+/// VLM 覆盖率：（已有任一版本就绪结果的未删除图片数, 未删除图片总数）。
+pub fn vlm_coverage(conn: &Connection) -> AppResult<(i64, i64)> {
+    Ok(conn.query_row(
+        &format!(
+            "SELECT
+                 (SELECT COUNT(*) FROM images i JOIN ai_jobs j ON j.image_id = i.id
+                  WHERE i.deleted_at IS NULL AND j.kind = '{KIND_VLM_ANALYSIS}' AND j.status = 'ready'),
+                 (SELECT COUNT(*) FROM images WHERE deleted_at IS NULL)"
+        ),
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
+}
+
 /// 清掉 VLM 的失败记录，让它们重新排队（例如 NAS 修好之后）。返回张数。
 pub fn retry_failed_vlm(conn: &Connection) -> AppResult<usize> {
     Ok(conn.execute(

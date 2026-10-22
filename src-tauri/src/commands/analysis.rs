@@ -11,6 +11,7 @@ use crate::config::AppPaths;
 use crate::db::Pool;
 use crate::repo::ai_jobs_repo;
 use crate::repo::analysis_repo::{self, ImageAnalysis};
+use crate::repo::tags_repo;
 use crate::services::analysis_pipeline::{self, AnalysisPipeline, AnalysisProgress};
 use crate::services::memora_import_service::{self, MemoraImportOutcome};
 use crate::services::search_index_service;
@@ -87,6 +88,64 @@ pub fn analysis_requeue_outdated(pool: State<'_, Pool>) -> Result<usize, String>
 pub fn analysis_retry_failed(pool: State<'_, Pool>) -> Result<usize, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;
     ai_jobs_repo::retry_failed_vlm(&conn).map_err(|e| e.to_string())
+}
+
+/// RAM-plus 旧标签与 VLM 覆盖率（docs/10 A7：覆盖率 ≥ 95% 后才允许清理旧标签）。
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct RamTagStatus {
+    pub ram_images: i64,
+    pub ram_tags: i64,
+    pub vlm_analyzed: i64,
+    pub total_images: i64,
+    pub coverage: f64,
+    pub can_cleanup: bool,
+}
+
+pub const RAM_CLEANUP_COVERAGE: f64 = 0.95;
+
+fn ram_tag_status(conn: &rusqlite::Connection) -> crate::error::AppResult<RamTagStatus> {
+    let (ram_images, ram_tags) = tags_repo::ram_tag_counts(conn)?;
+    let (vlm_analyzed, total_images) = ai_jobs_repo::vlm_coverage(conn)?;
+    let coverage = if total_images > 0 {
+        vlm_analyzed as f64 / total_images as f64
+    } else {
+        0.0
+    };
+    Ok(RamTagStatus {
+        ram_images,
+        ram_tags,
+        vlm_analyzed,
+        total_images,
+        coverage,
+        can_cleanup: ram_images > 0 && coverage >= RAM_CLEANUP_COVERAGE,
+    })
+}
+
+#[tauri::command]
+pub fn tags_ram_status(pool: State<'_, Pool>) -> Result<RamTagStatus, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    ram_tag_status(&conn).map_err(|e| e.to_string())
+}
+
+/// 清理 RAM-plus 的旧标签（用户在界面上确认后调用）。VLM 覆盖率不到 95% 时拒绝。返回清理后的状态。
+#[tauri::command]
+pub fn tags_cleanup_ram(pool: State<'_, Pool>) -> Result<RamTagStatus, String> {
+    let mut conn = pool.get().map_err(|e| e.to_string())?;
+    let status = ram_tag_status(&conn).map_err(|e| e.to_string())?;
+    if !status.can_cleanup {
+        return Err(format!(
+            "大模型已分析 {:.1}% 的图片，到 95% 后才能清理旧标签",
+            status.coverage * 100.0
+        ));
+    }
+    tags_repo::clear_ai_tags_and_reset(&mut conn).map_err(|e| e.to_string())?;
+    tracing::info!(
+        images = status.ram_images,
+        tags = status.ram_tags,
+        "RAM-plus tags cleaned up"
+    );
+    ram_tag_status(&conn).map_err(|e| e.to_string())
 }
 
 /// 立即卸载本应用启动的 llama-server（复用的外部服务不受影响）。返回是否卸载了。

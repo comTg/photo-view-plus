@@ -11,6 +11,7 @@ use crate::repo::tags_repo::{self, ImageTag, NewTagScore, Tag};
 use crate::services::ai_client::TaggerItem;
 use crate::services::ai_pipeline::{AiPipeline, AiPipelineStatus};
 use crate::services::ai_supervisor::{AiSupervisor, AiWorkerStatus};
+use crate::services::analysis_pipeline::AnalysisPipeline;
 use crate::services::search_index_service::{self, RebuildOutcome, SearchIndexStatus};
 use crate::services::search_service::{
     self, AiSearchArgs, AiSearchResponse, AiSearchResult, WorkerQueryEncoder,
@@ -109,8 +110,21 @@ pub async fn ai_tag_image(
     pool: State<'_, Pool>,
     paths: State<'_, AppPaths>,
     supervisor: State<'_, Arc<AiSupervisor>>,
+    analysis: State<'_, Arc<AnalysisPipeline>>,
     image_id: i64,
 ) -> Result<Vec<ImageTag>, String> {
+    // 标签来源是大模型（docs/10 A7）：对这张图跑一次 VLM 分析，标签随结果写入。
+    let tagger = settings_service::read(&paths)
+        .map(|settings| settings.ai_tagger_model)
+        .unwrap_or_default();
+    if tagger == crate::config::TAGGER_VLM {
+        analysis
+            .analyze_now(image_id)
+            .await
+            .map_err(|e| e.to_string())?;
+        let conn = pool.get().map_err(|e| e.to_string())?;
+        return tags_repo::tags_for_image(&conn, image_id).map_err(|e| e.to_string());
+    }
     let detail = {
         let conn = pool.get().map_err(|e| e.to_string())?;
         images_repo::get_detail(&conn, image_id)
@@ -169,8 +183,15 @@ pub async fn ai_process_pending(pipeline: State<'_, Arc<AiPipeline>>) -> Result<
 #[tauri::command]
 pub async fn ai_retag_all(
     pool: State<'_, Pool>,
+    paths: State<'_, AppPaths>,
     pipeline: State<'_, Arc<AiPipeline>>,
 ) -> Result<usize, String> {
+    let tagger = settings_service::read(&paths)
+        .map(|settings| settings.ai_tagger_model)
+        .unwrap_or_default();
+    if tagger == crate::config::TAGGER_VLM {
+        return Err("当前标签由大模型生成：要重新分析，请在设置的\"大模型打标\"里操作".to_string());
+    }
     let reset = {
         let mut conn = pool.get().map_err(|e| e.to_string())?;
         tags_repo::clear_ai_tags_and_reset(&mut conn).map_err(|e| e.to_string())?

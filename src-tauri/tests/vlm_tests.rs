@@ -574,3 +574,157 @@ fn missing_original_is_a_permanent_failure() {
     std::fs::write(&file, b"jpeg bytes").expect("write");
     assert_eq!(read_original(&file).expect("read"), b"jpeg bytes");
 }
+
+// ---------------------------------------------------------------------------
+// A7：RAM-plus 下线
+// ---------------------------------------------------------------------------
+
+fn vlm_result(categories: &[&str], tags: &[&str]) -> VlmResult {
+    VlmResult {
+        description: format!("{}的照片", tags.join("、")),
+        categories: categories.iter().map(|c| c.to_string()).collect(),
+        tags: tags
+            .iter()
+            .enumerate()
+            .map(|(index, name)| VlmTag {
+                name: name.to_string(),
+                score: 0.95 - index as f64 * 0.02,
+            })
+            .collect(),
+        keywords: Vec::new(),
+        people_count: 0,
+        visible_text: String::new(),
+        sensitive: false,
+        raw_json: None,
+    }
+}
+
+fn save(pool: &Pool, image_id: i64, result: &VlmResult) {
+    let mut conn = pool.get().expect("conn");
+    let candidate = ai_jobs_repo::pending_vlm_analysis(&conn, &job_model(), 100)
+        .expect("pending")
+        .into_iter()
+        .find(|candidate| candidate.image_id == image_id)
+        .expect("candidate");
+    save_vlm_result(&mut conn, &candidate, result, None, 1).expect("save");
+}
+
+fn ram_tags(pool: &Pool, image_id: i64, names: &[&str]) {
+    let mut conn = pool.get().expect("conn");
+    let tags = names
+        .iter()
+        .map(|name| tags_repo::NewTagScore {
+            name: name.to_string(),
+            score: 0.9,
+            source: "ai".to_string(),
+            category: None,
+        })
+        .collect::<Vec<_>>();
+    tags_repo::replace_image_tags(&mut conn, image_id, &tags, 1).expect("ram tags");
+}
+
+#[test]
+fn tag_cloud_groups_tags_by_dominant_vlm_category() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = open(dir.path());
+    let ids = add_images(
+        &pool,
+        r"D:\photos",
+        &[
+            ("a.jpg", None),
+            ("b.jpg", None),
+            ("c.jpg", None),
+            ("d.jpg", None),
+        ],
+    );
+    save(&pool, ids[0], &vlm_result(&["宠物"], &["猫", "窗台"]));
+    save(&pool, ids[1], &vlm_result(&["宠物"], &["猫"]));
+    save(&pool, ids[2], &vlm_result(&["日常生活"], &["窗台", "沙发"]));
+    ram_tags(&pool, ids[3], &["沙发", "地毯"]);
+    let conn = pool.get().expect("conn");
+    let tags = tags_repo::list_tags(&conn, 50).expect("tags");
+    let group = |name: &str| {
+        tags.iter()
+            .find(|tag| tag.name == name)
+            .unwrap_or_else(|| panic!("tag {name}"))
+            .group
+            .clone()
+    };
+    assert_eq!(group("猫").as_deref(), Some("宠物"));
+    // 类别标签自成一组。
+    assert_eq!(group("宠物").as_deref(), Some("宠物"));
+    assert_eq!(group("日常生活").as_deref(), Some("日常生活"));
+    // 平票时按类别名排序取第一个，结果稳定。
+    assert_eq!(group("窗台").as_deref(), Some("宠物"));
+    // VLM 和 RAM 都打过的标签按 VLM 的图归组；只有 RAM 打过的没有分组。
+    assert_eq!(group("沙发").as_deref(), Some("日常生活"));
+    assert_eq!(group("地毯"), None);
+}
+
+#[test]
+fn ram_tag_counts_and_vlm_coverage_drive_the_cleanup() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = open(dir.path());
+    let ids = add_images(
+        &pool,
+        r"D:\photos",
+        &[
+            ("a.jpg", None),
+            ("b.jpg", None),
+            ("c.jpg", None),
+            ("d.jpg", None),
+        ],
+    );
+    ram_tags(&pool, ids[0], &["沙发", "地毯"]);
+    ram_tags(&pool, ids[1], &["沙发"]);
+    save(&pool, ids[0], &vlm_result(&["日常生活"], &["沙发"]));
+    let mut conn = pool.get().expect("conn");
+    assert_eq!(tags_repo::ram_tag_counts(&conn).expect("ram"), (2, 2));
+    assert_eq!(ai_jobs_repo::vlm_coverage(&conn).expect("coverage"), (1, 4));
+    // VLM 写入不碰 RAM 的标签（来源不同），清理只删 RAM 的。
+    tags_repo::clear_ai_tags_and_reset(&mut conn).expect("cleanup");
+    assert_eq!(tags_repo::ram_tag_counts(&conn).expect("ram"), (0, 0));
+    let remaining = tags_repo::tags_for_image(&conn, ids[0]).expect("tags");
+    assert!(remaining.iter().all(|tag| tag.source == "vlm"));
+    assert!(remaining.iter().any(|tag| tag.name == "沙发"));
+}
+
+#[test]
+fn vlm_tagger_switches_ram_tagging_off() {
+    use photo_view_plus_lib::config::{AppPaths, AppSettingsPatch, TAGGER_VLM};
+    use photo_view_plus_lib::queue::Scheduler;
+    use photo_view_plus_lib::services::ai_pipeline::AiPipeline;
+    use photo_view_plus_lib::services::ai_supervisor::AiSupervisor;
+    use photo_view_plus_lib::services::settings_service;
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let paths = AppPaths::from_data_dir(dir.path().to_path_buf());
+    std::fs::create_dir_all(paths.db_path.parent().expect("db dir")).expect("mkdir");
+    let pool = db::open(&paths.db_path).expect("db");
+    let ids = add_images(&pool, r"D:\photos", &[("a.jpg", None)]);
+    {
+        let conn = pool.get().expect("conn");
+        images_repo::update_thumbnail_ready(&conn, ids[0], "abcd", Some(10), Some(10))
+            .expect("thumb");
+    }
+    let supervisor = std::sync::Arc::new(
+        AiSupervisor::new(dir.path().join("worker"), dir.path().join("models")).expect("sup"),
+    );
+    let pipeline = AiPipeline::new(pool.clone(), Scheduler::start(1), supervisor, &paths);
+    assert_eq!(pipeline.status().tagging_pending, 1);
+
+    let mut settings = AppSettings::default();
+    settings.apply_patch(AppSettingsPatch {
+        ai_tagger_model: Some(TAGGER_VLM.to_string()),
+        ..AppSettingsPatch::default()
+    });
+    assert_eq!(settings.ai_tagger_model, TAGGER_VLM);
+    // 不认识的值不改设置。
+    settings.apply_patch(AppSettingsPatch {
+        ai_tagger_model: Some("siglip".to_string()),
+        ..AppSettingsPatch::default()
+    });
+    assert_eq!(settings.ai_tagger_model, TAGGER_VLM);
+    settings_service::write(&paths, &settings).expect("write settings");
+    assert_eq!(pipeline.status().tagging_pending, 0);
+}

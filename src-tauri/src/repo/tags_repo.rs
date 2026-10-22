@@ -12,6 +12,8 @@ pub struct Tag {
     pub category: Option<String>,
     pub created_at: i64,
     pub image_count: i64,
+    /// 标签云分组（docs/10 A7）：带这个标签的图里最常见的 VLM 主类别；没有 VLM 结果时为空。
+    pub group: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -175,14 +177,38 @@ pub fn tags_for_image(conn: &Connection, image_id: i64) -> AppResult<Vec<ImageTa
     Ok(out)
 }
 
+/// 按图片数排序的标签，带标签云分组：类别标签（`tags.category = 'category'`）自成一组；
+/// 其他标签归到"带它的图里最常见的 VLM 主类别"。
 pub fn list_tags(conn: &Connection, limit: i64) -> AppResult<Vec<Tag>> {
     let mut stmt = conn.prepare(
-        "SELECT t.id, t.name, t.source, t.category, t.created_at, COUNT(it.image_id) AS image_count
-         FROM tags t
-         LEFT JOIN image_tags it ON it.tag_id = t.id
-         GROUP BY t.id
-         ORDER BY image_count DESC, t.name ASC
-         LIMIT ?1",
+        "WITH counts AS (
+             SELECT t.id, t.name, t.source, t.category, t.created_at,
+                    COUNT(it.image_id) AS image_count
+             FROM tags t
+             LEFT JOIN image_tags it ON it.tag_id = t.id
+             GROUP BY t.id
+             ORDER BY image_count DESC, t.name ASC
+             LIMIT ?1
+         ),
+         tag_groups AS (
+             SELECT it.tag_id, json_extract(a.categories, '$[0]') AS grp, COUNT(*) AS n
+             FROM image_tags it
+             JOIN image_analysis a ON a.image_id = it.image_id
+             WHERE it.tag_id IN (SELECT id FROM counts) AND a.source = 'vlm'
+             GROUP BY it.tag_id, grp
+         ),
+         best AS (
+             SELECT tag_id, grp FROM (
+                 SELECT tag_id, grp,
+                        ROW_NUMBER() OVER (PARTITION BY tag_id ORDER BY n DESC, grp) AS rank
+                 FROM tag_groups WHERE grp IS NOT NULL
+             ) WHERE rank = 1
+         )
+         SELECT c.id, c.name, c.source, c.category, c.created_at, c.image_count,
+                CASE WHEN c.category = 'category' THEN c.name ELSE best.grp END
+         FROM counts c
+         LEFT JOIN best ON best.tag_id = c.id
+         ORDER BY c.image_count DESC, c.name ASC",
     )?;
     let rows = stmt.query_map([limit.clamp(1, 500)], |row| {
         Ok(Tag {
@@ -192,6 +218,7 @@ pub fn list_tags(conn: &Connection, limit: i64) -> AppResult<Vec<Tag>> {
             category: row.get(3)?,
             created_at: row.get(4)?,
             image_count: row.get(5)?,
+            group: row.get(6)?,
         })
     })?;
     let mut out = Vec::new();
@@ -199,6 +226,15 @@ pub fn list_tags(conn: &Connection, limit: i64) -> AppResult<Vec<Tag>> {
         out.push(row?);
     }
     Ok(out)
+}
+
+/// RAM-plus 旧标签（`source = 'ai'`）的规模：（有这类标签的图片数, 不同标签数）。
+pub fn ram_tag_counts(conn: &Connection) -> AppResult<(i64, i64)> {
+    Ok(conn.query_row(
+        "SELECT COUNT(DISTINCT image_id), COUNT(DISTINCT tag_id) FROM image_tags WHERE source = 'ai'",
+        [],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?)
 }
 
 pub fn get_tag_by_name(conn: &Connection, name: &str) -> AppResult<Option<Tag>> {
@@ -218,6 +254,7 @@ pub fn get_tag_by_name(conn: &Connection, name: &str) -> AppResult<Option<Tag>> 
                     category: row.get(3)?,
                     created_at: row.get(4)?,
                     image_count: row.get(5)?,
+                    group: None,
                 })
             },
         )

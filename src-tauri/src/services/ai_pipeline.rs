@@ -381,14 +381,19 @@ impl AiPipeline {
     }
 
     pub fn status(&self) -> AiPipelineStatus {
-        let (embedding_model, text_embedding_model) = settings_service::read(&self.paths)
-            .map(|settings| (settings.ai_clip_model, settings.ai_text_model))
-            .unwrap_or_else(|_| {
-                (
-                    crate::config::DEFAULT_CLIP_MODEL.to_string(),
-                    crate::config::DEFAULT_TEXT_MODEL.to_string(),
-                )
-            });
+        let (embedding_model, text_embedding_model, ram_tagging) =
+            settings_service::read(&self.paths)
+                .map(|settings| {
+                    let ram_tagging = settings.ai_tagger_model != crate::config::TAGGER_VLM;
+                    (settings.ai_clip_model, settings.ai_text_model, ram_tagging)
+                })
+                .unwrap_or_else(|_| {
+                    (
+                        crate::config::DEFAULT_CLIP_MODEL.to_string(),
+                        crate::config::DEFAULT_TEXT_MODEL.to_string(),
+                        true,
+                    )
+                });
         let conn = match self.pool.get() {
             Ok(conn) => conn,
             Err(_) => {
@@ -406,7 +411,11 @@ impl AiPipeline {
         };
         let embedding_pending =
             ai_jobs_repo::count_pending_image_embedding(&conn, &embedding_model).unwrap_or(0);
-        let tagging_pending = count_pending_tags(&conn).unwrap_or(0);
+        let tagging_pending = if ram_tagging {
+            count_pending_tags(&conn).unwrap_or(0)
+        } else {
+            0
+        };
         let text_embedding_pending =
             ai_jobs_repo::count_pending_text_embedding(&conn, &text_embedding_model).unwrap_or(0);
         let state = self.state.lock().ok();
@@ -445,12 +454,18 @@ impl AiPipeline {
         }
         let clip_model = settings.ai_clip_model;
         let text_model = settings.ai_text_model;
+        // 标签由大模型出（docs/10 A7）时 RAM-plus 停用：不投递 TagBatchTask，worker 也就不加载它。
+        let ram_tagging = settings.ai_tagger_model != crate::config::TAGGER_VLM;
         // 先看有没有待处理的图：没有就别去唤醒（启动）Python worker。
         let (embed_pending, tag_pending, text_pending) = {
             let conn = self.pool.get()?;
             (
                 ai_jobs_repo::count_pending_image_embedding(&conn, &clip_model)?,
-                count_pending_tags(&conn)?,
+                if ram_tagging {
+                    count_pending_tags(&conn)?
+                } else {
+                    0
+                },
                 ai_jobs_repo::count_pending_text_embedding(&conn, &text_model)?,
             )
         };

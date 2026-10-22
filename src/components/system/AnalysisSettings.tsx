@@ -3,11 +3,19 @@ import {
   analysisProgress,
   analysisRequeueOutdated,
   analysisRetryFailed,
+  tagsCleanupRam,
+  tagsRamStatus,
   vlmDetectPaths,
   vlmServerStop,
 } from "@/lib/tauri";
-import type { AnalysisProgress, AppSettings, AppSettingsPatch } from "@/lib/tauri-types";
-import { RotateCcw, Search, Square } from "lucide-react";
+import type {
+  AnalysisProgress,
+  AppSettings,
+  AppSettingsPatch,
+  RamTagStatus,
+} from "@/lib/tauri-types";
+import { ask } from "@tauri-apps/plugin-dialog";
+import { Eraser, RotateCcw, Search, Square } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
 
 const SERVER_TEXT: Record<string, string> = {
@@ -126,6 +134,15 @@ export const AnalysisSettings = memo(function AnalysisSettings({
 }) {
   const progress = useAnalysisProgress();
   const [busy, setBusy] = useState(false);
+  const [ram, setRam] = useState<RamTagStatus | null>(null);
+  // 覆盖率每分析 100 张刷新一次就够了。
+  const analyzedBucket = Math.floor((progress?.analyzed ?? 0) / 100);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: analyzedBucket 只是刷新信号
+  useEffect(() => {
+    tagsRamStatus()
+      .then(setRam)
+      .catch((error) => console.warn("读取 RAM 旧标签状态失败", error));
+  }, [analyzedBucket]);
 
   const run = useCallback(
     async (action: () => Promise<string>) => {
@@ -155,6 +172,18 @@ export const AnalysisSettings = memo(function AnalysisSettings({
 
   const total = progress ? progress.analyzed + progress.pending : 0;
 
+  const cleanupRam = () =>
+    run(async () => {
+      if (!ram) return "RAM 旧标签状态未知";
+      const confirmed = await ask(
+        `将删除 ${ram.ramImages.toLocaleString("zh-CN")} 张图片上的 RAM-plus 旧标签（共 ${ram.ramTags.toLocaleString("zh-CN")} 个不同标签）。大模型已分析 ${(ram.coverage * 100).toFixed(1)}% 的图片，标签以后由大模型提供。删除后不能恢复，要继续吗？`,
+        { title: "清理 RAM 旧标签", kind: "warning" },
+      );
+      if (!confirmed) return "已取消";
+      const next = await tagsCleanupRam();
+      setRam(next);
+      return "RAM 旧标签已清理";
+    });
   return (
     <div className="settings-panel settings-panel--wide">
       <div className="settings-panel__header">
@@ -296,6 +325,26 @@ export const AnalysisSettings = memo(function AnalysisSettings({
       </div>
       {progress?.lastError && progress.state !== "running" && (
         <p className="settings-warning">最近的错误：{progress.lastError}</p>
+      )}
+      {ram && ram.ramImages > 0 && (
+        <div className="settings-inline-row">
+          <span>
+            RAM-plus 旧标签：{ram.ramImages.toLocaleString("zh-CN")} 张图、
+            {ram.ramTags.toLocaleString("zh-CN")} 个标签；大模型已覆盖{" "}
+            {(ram.coverage * 100).toFixed(1)}%
+            {ram.canCleanup ? "，可以清理" : "（到 95% 后可清理）"}
+          </span>
+          <button
+            type="button"
+            className="toolbar-button"
+            disabled={busy || !ram.canCleanup}
+            onClick={() => void cleanupRam()}
+            title="大模型覆盖率到 95% 后，删除 RAM-plus 打的旧标签（需要确认）"
+          >
+            <Eraser aria-hidden="true" />
+            清理 RAM 旧标签
+          </button>
+        </div>
       )}
     </div>
   );

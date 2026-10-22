@@ -262,6 +262,8 @@ pub fn run() {
             commands::analysis::analysis_requeue_outdated,
             commands::analysis::analysis_retry_failed,
             commands::analysis::vlm_server_stop,
+            commands::analysis::tags_ram_status,
+            commands::analysis::tags_cleanup_ram,
             commands::ocr::ocr_run,
             commands::ocr::ocr_status,
             commands::face::face_run,

@@ -265,7 +265,7 @@ export default function App() {
     aiPipelineStatus()
       .then(setAiPipeline)
       .catch(() => undefined);
-    aiTagsList(80)
+    aiTagsList(120)
       .then(setAiTags)
       .catch(() => undefined);
   }, []);
@@ -866,7 +866,7 @@ export default function App() {
   }, []);
 
   const refreshAiState = useCallback(async () => {
-    const [pipeline, tags] = await Promise.all([aiPipelineStatus(), aiTagsList(80)]);
+    const [pipeline, tags] = await Promise.all([aiPipelineStatus(), aiTagsList(120)]);
     setAiPipeline(pipeline);
     setAiTags(tags);
   }, []);
@@ -1849,6 +1849,69 @@ interface AiSearchViewProps {
   busy: boolean;
 }
 
+/** 标签按大模型类别分组（docs/10 A7）；还没有大模型结果时退回平铺。 */
+function groupTags(tags: AiTag[]): { name: string; tags: AiTag[]; total: number }[] {
+  const groups = new Map<string, AiTag[]>();
+  for (const tag of tags) {
+    const key = tag.group ?? "其他";
+    const list = groups.get(key) ?? [];
+    list.push(tag);
+    groups.set(key, list);
+  }
+  return [...groups.entries()]
+    .map(([name, list]) => ({
+      name,
+      // 类别标签本身排在组首。
+      tags: [...list].sort(
+        (a, b) =>
+          Number(b.category === "category" && b.name === name) -
+          Number(a.category === "category" && a.name === name),
+      ),
+      total: list.reduce((sum, tag) => sum + tag.imageCount, 0),
+    }))
+    .sort((a, b) => {
+      if (a.name === "其他") return 1;
+      if (b.name === "其他") return -1;
+      return b.total - a.total;
+    });
+}
+
+const TagCloud = memo(function TagCloud({
+  tags,
+  onSelectTag,
+}: {
+  tags: AiTag[];
+  onSelectTag: (tag: AiTag) => Promise<void>;
+}) {
+  const groups = useMemo(() => groupTags(tags), [tags]);
+  if (tags.length === 0) {
+    return (
+      <div className="ai-tag-cloud">
+        <span className="muted">还没有标签</span>
+      </div>
+    );
+  }
+  const chip = (tag: AiTag) => (
+    <button key={tag.id} type="button" className="tag-chip" onClick={() => void onSelectTag(tag)}>
+      #{tag.name}
+      <small>{tag.imageCount}</small>
+    </button>
+  );
+  if (groups.length === 1) {
+    return <div className="ai-tag-cloud">{tags.map(chip)}</div>;
+  }
+  return (
+    <div className="ai-tag-groups">
+      {groups.map((group) => (
+        <div key={group.name} className="ai-tag-group">
+          <span className="ai-tag-group__title">{group.name}</span>
+          <div className="ai-tag-cloud">{group.tags.map(chip)}</div>
+        </div>
+      ))}
+    </div>
+  );
+});
+
 interface TimelineViewProps {
   buckets: TimelineBucket[];
   busy: boolean;
@@ -1987,23 +2050,7 @@ function AiSearchView({
         </span>
       </div>
 
-      <div className="ai-tag-cloud">
-        {tags.length === 0 ? (
-          <span className="muted">还没有标签</span>
-        ) : (
-          tags.map((tag) => (
-            <button
-              key={tag.id}
-              type="button"
-              className="tag-chip"
-              onClick={() => void onSelectTag(tag)}
-            >
-              #{tag.name}
-              <small>{tag.imageCount}</small>
-            </button>
-          ))
-        )}
-      </div>
+      <TagCloud tags={tags} onSelectTag={onSelectTag} />
 
       <div className="ai-results-panel">
         <div className="ai-results-header">
@@ -3222,9 +3269,11 @@ function SettingsView({
               <span>标签模型</span>
               <select
                 value={settings.aiTaggerModel}
+                title="标签由大模型生成时，RAM-plus 不再加载（省约 2GB 显存）；需要先开启下面的大模型打标"
                 onChange={(event) => void onPatch({ aiTaggerModel: event.target.value })}
               >
-                <option value="ram-plus">ram-plus</option>
+                <option value="ram-plus">RAM-plus（旧）</option>
+                <option value="vlm">大模型（推荐，随画面分析生成）</option>
               </select>
             </label>
           </div>
@@ -3355,9 +3404,13 @@ function SettingsView({
               <button
                 type="button"
                 className="toolbar-button"
-                disabled={aiBusy}
+                disabled={aiBusy || settings.aiTaggerModel === "vlm"}
                 onClick={() => void onAiRetagAll()}
-                title="清空已有 AI 标签（含旧的英文标签），并用当前模型重新打一遍"
+                title={
+                  settings.aiTaggerModel === "vlm"
+                    ? '标签由大模型生成：重新分析请用下面的"重新分析旧版本"'
+                    : "清空已有 AI 标签（含旧的英文标签），并用当前模型重新打一遍"
+                }
               >
                 <Tags aria-hidden="true" />
                 清空并重打标签

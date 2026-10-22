@@ -356,7 +356,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 | A5 | Chinese-CLIP：worker 图像模型可插拔、新表、全量重算、人脸维度解耦；跑 S1/S5，过 G2，写 ADR-008 | A1 | ✅ |
 | A6 | VLM 打标流水线：`llama-server` 监管、worker `/vlm/analyze`、`AnalysisPipeline`（受 docs/11 R2 调度）、进度界面；200 张样本过 G3 后再全量 | R2（docs/11）、G1 | ✅ G3 通过 |
 | A6b | 夜间定时：Windows 计划任务在 03:00 运行 `photo-view-plus.exe --background-analyze`（无窗口、单实例）；应用已经开着时交给正在运行的实例；07:00 前处理完或到点退出；与 memora 共用 8081 服务（§12） | A6 | ⬜ |
-| A7 | RAM-plus 下线：tagger 设置增加 `vlm`；VLM 覆盖率 ≥ 95% 后，经用户确认再清理旧的 `'ai'` 标签；标签云按类别分组 | A6 | ⬜ |
+| A7 | RAM-plus 下线：tagger 设置增加 `vlm`；VLM 覆盖率 ≥ 95% 后，经用户确认再清理旧的 `'ai'` 标签；标签云按类别分组 | A6 | ✅ |
 | A8 | 收尾：更新 docs/05、docs/08（ADR-008 / ADR-010）、设置页、测试 | 全部 | ⬜ |
 
 **与 docs/11 交错的执行顺序**（2026-10-22 按 §9.1 的结果调整：A5 收益最大、成本最低，提前做）：
@@ -543,6 +543,12 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 - **通过标准**：过 G3 后，在空闲时段全量运行。
 
 ### A7 RAM-plus 下线
+- **实测 / 备注**（2026-10-23 完成）：
+  - 设置 `aiTaggerModel` 可选 `ram-plus` / `vlm`（只接受这两个值）。选 `vlm` 时 AI 流水线不再投递 `TagBatchTask`，worker 也就不会加载 RAM-plus；状态栏的标签待处理数为 0。详情面板"生成标签"改为对这张图立即跑一次大模型分析（用户在等，不看负载模式；模型没加载就加载，5 分钟没活照常卸载）。"清空并重打标签"在 `vlm` 下停用，重新分析走"大模型打标"一节。
+  - **旧标签清理**：命令 `tags_ram_status`（RAM 旧标签的图片数、标签数，大模型覆盖率 = 有就绪 VLM 结果的图 / 全部未删除的图）和 `tags_cleanup_ram`。设置页"大模型打标"一节显示这一行；覆盖率到 95% 后按钮才可用，点了先弹系统确认框，确认后才删（后端也会再检查覆盖率）。清理删除 `source = 'ai'` 的标签和不再被引用的标签，并把 RAM 的打标状态重置为待处理（以后切回 RAM-plus 会重新打）。
+  - **标签云按类别分组**：`list_tags` 给每个标签算一个分组——带这个标签的图里最常见的 VLM 主类别（平票按类别名取第一个）；类别标签自成一组；没有 VLM 结果的标签归"其他"。前端按组显示，每组按图片数排序；还没有任何 VLM 结果时退回平铺。评测库副本上（已分析约 1,000 张）抽查：截图组是"快递 / 取件码 / 物流 / 电商"，宠物组是"猫 / 狗 / 柴犬"，美食组是"午餐 / 家常菜 / 餐桌"，分组合理。
+  - **显存对比**（A6 时实测）：torch worker 只加载 Chinese-CLIP + bge-small 时 0.67GB，再加载 RAM-plus 共 2.68GB（+2.0GB）。和 llama-server（7.6GB）、桌面（1.2GB）同时驻留：用 RAM-plus 约 11.5 / 12GB，切到 `vlm` 约 9.5 / 12GB。
+  - 测试：`vlm_tests` 加 3 个（按主类别分组、RAM 旧标签计数与覆盖率、`vlm` 下不再统计 RAM 待打标签且设置只接受已知值）。
 - **改动**：`aiTaggerModel` 增加 `vlm`，选中时 `TagBatchTask` 停用、不加载 RAM-plus；VLM 覆盖率 ≥ 95% 后，在界面里提示用户确认，再清理 `source='ai'` 的旧标签；标签云按 VLM 类别分组。
 - **验证**：显存占用对比；标签云抽查。
 

@@ -22,7 +22,7 @@ use tauri::Emitter;
 
 use crate::config::{AppPaths, AppSettings};
 use crate::db::Pool;
-use crate::error::AppResult;
+use crate::error::{AppError, AppResult};
 use crate::repo::ai_jobs_repo::{
     self, JobResult, VlmCandidate, KIND_VLM_ANALYSIS, STATUS_FAILED, STATUS_READY,
 };
@@ -558,6 +558,34 @@ impl AnalysisPipeline {
         Ok(())
     }
 
+    /// 用户手动对一张图跑大模型分析（详情面板"生成标签"在标签来源是大模型时）：
+    /// 不看负载模式（用户在等），模型没加载就加载，空闲 5 分钟后照常卸载。
+    pub async fn analyze_now(&self, image_id: i64) -> AppResult<()> {
+        let settings = settings_service::read(&self.paths)?;
+        let vlm_paths =
+            resolve_vlm_paths(&settings, &self.paths.models_dir).map_err(AppError::Other)?;
+        let pool = self.pool.clone();
+        let candidate = tokio::task::spawn_blocking(move || -> AppResult<VlmCandidate> {
+            let conn = pool.get()?;
+            candidate_for(&conn, image_id)
+        })
+        .await??;
+        self.vlm
+            .ensure_running(&LaunchSpec::llama(
+                &vlm_paths,
+                settings.vlm_parallel,
+                DEFAULT_PORT,
+            ))
+            .await?;
+        self.analyze(&candidate, settings.vlm_long_edge)
+            .await
+            .map_err(|failure| match failure {
+                Failure::Transient(message) | Failure::Permanent(message) => {
+                    AppError::Other(message)
+                }
+            })
+    }
+
     pub async fn progress(&self) -> AnalysisProgress {
         let pool = self.pool.clone();
         let model = job_model();
@@ -638,6 +666,30 @@ pub fn read_original(path: &Path) -> Result<Vec<u8>, Failure> {
         )));
     }
     std::fs::read(path).map_err(classify)
+}
+
+/// 一张图的分析候选信息。
+fn candidate_for(conn: &Connection, image_id: i64) -> AppResult<VlmCandidate> {
+    conn.query_row(
+        "SELECT i.id, r.path, i.rel_path, i.taken_at,
+                EXISTS (SELECT 1 FROM image_analysis a WHERE a.image_id = i.id)
+         FROM images i JOIN roots r ON r.id = i.root_id
+         WHERE i.id = ?1 AND i.deleted_at IS NULL",
+        [image_id],
+        |row| {
+            Ok(VlmCandidate {
+                image_id: row.get(0)?,
+                root_path: row.get(1)?,
+                rel_path: row.get(2)?,
+                taken_at: row.get(3)?,
+                has_analysis: row.get(4)?,
+            })
+        },
+    )
+    .map_err(|error| match error {
+        rusqlite::Error::QueryReturnedNoRows => AppError::Other(format!("图片不存在：{image_id}")),
+        other => other.into(),
+    })
 }
 
 /// 同一路径只差大小写的未删除行（含自己）。

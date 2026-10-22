@@ -92,6 +92,10 @@ pub const CLIP_MODELS: &[&str] = &[DEFAULT_CLIP_MODEL, LEGACY_CLIP_MODEL];
 pub const DEFAULT_TEXT_MODEL: &str = "bge-small-zh-v1.5";
 /// 设置项可选的描述文本向量模型。
 pub const TEXT_MODELS: &[&str] = &[DEFAULT_TEXT_MODEL, "bge-base-zh-v1.5"];
+/// 标签来源：RAM-plus（torch worker，约 2GB 显存）或视觉大模型（docs/10 A7，VLM 打标时顺带出标签）。
+pub const TAGGER_RAM_PLUS: &str = "ram-plus";
+pub const TAGGER_VLM: &str = "vlm";
+pub const TAGGERS: &[&str] = &[TAGGER_RAM_PLUS, TAGGER_VLM];
 
 /// 图像向量模型的维度（向量表按"模型 + 维度"命名，查已存向量时要先知道维度）。
 pub fn clip_model_dims(model: &str) -> usize {
@@ -259,7 +263,10 @@ impl AppSettings {
             }
         }
         if let Some(ai_tagger_model) = patch.ai_tagger_model {
-            self.ai_tagger_model = sanitize_model_key(ai_tagger_model, "ram-plus");
+            let key = sanitize_model_key(ai_tagger_model, TAGGER_RAM_PLUS);
+            if TAGGERS.contains(&key.as_str()) {
+                self.ai_tagger_model = key;
+            }
         }
         if let Some(ocr_enabled) = patch.ocr_enabled {
             self.ocr_enabled = ocr_enabled;

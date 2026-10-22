@@ -261,6 +261,16 @@ export interface AnalysisProgress {
   server: VlmServerStatus;
 }
 
+/** RAM-plus 旧标签与大模型覆盖率（覆盖率 ≥ 95% 才允许清理旧标签）。 */
+export interface RamTagStatus {
+  ramImages: number;
+  ramTags: number;
+  vlmAnalyzed: number;
+  totalImages: number;
+  coverage: number;
+  canCleanup: boolean;
+}
+
 export interface VlmPaths {
   exe: string;
   model: string;
@@ -538,6 +548,8 @@ export interface AiTag {
   category: string | null;
   createdAt: number;
   imageCount: number;
+  /** 标签云分组（docs/10 A7）：带这个标签的图里最常见的大模型主类别；没有大模型结果时为 null。 */
+  group: string | null;
 }
 
 export interface ImageTag {

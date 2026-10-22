@@ -41,6 +41,7 @@ import type {
   MemoraImportOutcome,
   OcrStatus,
   QueueStatus,
+  RamTagStatus,
   RemoveResult,
   RenameImageArgs,
   Root,
@@ -248,6 +249,14 @@ export async function analysisRequeueOutdated(): Promise<number> {
 
 export async function analysisRetryFailed(): Promise<number> {
   return invoke<number>("analysis_retry_failed");
+}
+
+export async function tagsRamStatus(): Promise<RamTagStatus> {
+  return invoke<RamTagStatus>("tags_ram_status");
+}
+
+export async function tagsCleanupRam(): Promise<RamTagStatus> {
+  return invoke<RamTagStatus>("tags_cleanup_ram");
 }
 
 export async function vlmServerStop(): Promise<boolean> {
