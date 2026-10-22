@@ -390,6 +390,36 @@ export interface AiSearchResponse {
   elapsedMs: number;
 }
 
+/** 画面分析结果（memora 导入或 VLM 打标，docs/10 §7）。 */
+export interface ImageAnalysis {
+  imageId: number;
+  source: "memora" | "vlm" | string;
+  model: string;
+  promptVersion: string;
+  description: string;
+  categories: string[];
+  keywords: string[];
+  peopleCount: number | null;
+  visibleText: string | null;
+  sensitive: boolean;
+  durationMs: number | null;
+  analyzedAt: number;
+}
+
+export interface MemoraImportOutcome {
+  memoraRows: number;
+  matchedPhotos: number;
+  imagesWritten: number;
+  skippedVlm: number;
+  elapsedMs: number;
+}
+
+export interface AnalysisStatus {
+  /** [来源, 条数] */
+  bySource: [string, number][];
+  defaultMemoraDb: string;
+}
+
 export interface SearchIndexStatus {
   indexed: number;
   pending: number;

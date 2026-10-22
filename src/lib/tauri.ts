@@ -8,6 +8,7 @@ import type {
   AiSearchResult,
   AiTag,
   AiWorkerStatus,
+  AnalysisStatus,
   AppSettings,
   AppSettingsPatch,
   BackupExportArgs,
@@ -28,11 +29,13 @@ import type {
   Face,
   FaceCluster,
   FaceStatus,
+  ImageAnalysis,
   ImagePage,
   ImageQueryParams,
   ImageRecord,
   ImageTag,
   MapImagePoint,
+  MemoraImportOutcome,
   OcrStatus,
   QueueStatus,
   RemoveResult,
@@ -203,6 +206,19 @@ export async function searchIndexRebuild(): Promise<SearchIndexRebuildOutcome> {
 
 export async function searchIndexStatus(): Promise<SearchIndexStatus> {
   return invoke<SearchIndexStatus>("search_index_status");
+}
+
+// 画面分析（docs/10 A3）
+export async function analysisImportMemora(dbPath: string): Promise<MemoraImportOutcome> {
+  return invoke<MemoraImportOutcome>("analysis_import_memora", { dbPath });
+}
+
+export async function analysisGet(imageId: number): Promise<ImageAnalysis | null> {
+  return invoke<ImageAnalysis | null>("analysis_get", { imageId });
+}
+
+export async function analysisStatus(): Promise<AnalysisStatus> {
+  return invoke<AnalysisStatus>("analysis_status");
 }
 
 export async function aiSearchByImage(imageId: number, limit?: number): Promise<AiSearchResult[]> {

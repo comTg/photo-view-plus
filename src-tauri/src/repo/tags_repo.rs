@@ -33,6 +33,10 @@ pub struct NewTagScore {
     pub category: Option<String>,
 }
 
+/// 取（不存在就建）同名标签的 id。
+///
+/// `tags.source` 只记最先创建它的来源，不再被后来者覆盖：同一个标签名可能同时来自 RAM（ai）、
+/// memora、VLM、用户，谁打的以 `image_tags.source` 为准（docs/10 §7）。
 pub fn upsert_tag(
     conn: &Connection,
     name: &str,
@@ -40,18 +44,17 @@ pub fn upsert_tag(
     category: Option<&str>,
     now: i64,
 ) -> AppResult<i64> {
-    conn.execute(
+    conn.prepare_cached(
         "INSERT INTO tags(name, source, category, created_at)
          VALUES (?1, ?2, ?3, ?4)
          ON CONFLICT(name) DO UPDATE SET
-             source = excluded.source,
              category = COALESCE(excluded.category, tags.category)",
-        params![name, source, category, now],
-    )?;
+    )?
+    .execute(params![name, source, category, now])?;
 
-    let id = conn.query_row("SELECT id FROM tags WHERE name = ?1", [name], |row| {
-        row.get(0)
-    })?;
+    let id = conn
+        .prepare_cached("SELECT id FROM tags WHERE name = ?1")?
+        .query_row([name], |row| row.get(0))?;
     Ok(id)
 }
 

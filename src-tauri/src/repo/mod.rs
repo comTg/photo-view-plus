@@ -1,4 +1,5 @@
 pub mod ai_jobs_repo;
+pub mod analysis_repo;
 pub mod duplicates_repo;
 pub mod face_repo;
 pub mod images_repo;

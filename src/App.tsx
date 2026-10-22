@@ -18,6 +18,9 @@ import {
   aiWorkerStart,
   aiWorkerStatus,
   aiWorkerStop,
+  analysisGet,
+  analysisImportMemora,
+  analysisStatus,
   bustThumbnailCache,
   faceClusterRename,
   faceRun,
@@ -66,6 +69,7 @@ import type {
   BackupExportResult,
   FaceCluster,
   FaceStatus,
+  ImageAnalysis,
   ImageQueryParams,
   ImageRecord,
   ImageTag,
@@ -146,6 +150,7 @@ export default function App() {
   const [aiPipeline, setAiPipeline] = useState<AiPipelineStatus | null>(null);
   const [aiTags, setAiTags] = useState<AiTag[]>([]);
   const [imageTags, setImageTags] = useState<ImageTag[]>([]);
+  const [imageAnalysis, setImageAnalysis] = useState<ImageAnalysis | null>(null);
   const [aiSearchDraft, setAiSearchDraft] = useState("");
   const [aiResults, setAiResults] = useState<AiSearchResult[]>([]);
   const [aiResultsTitle, setAiResultsTitle] = useState("语义搜索");
@@ -564,6 +569,7 @@ export default function App() {
     if (primarySelectedId === null) {
       setDetail(null);
       setImageTags([]);
+      setImageAnalysis(null);
       return;
     }
     imagesGetDetail(primarySelectedId)
@@ -572,6 +578,9 @@ export default function App() {
     aiImageTags(primarySelectedId)
       .then(setImageTags)
       .catch(() => setImageTags([]));
+    analysisGet(primarySelectedId)
+      .then(setImageAnalysis)
+      .catch(() => setImageAnalysis(null));
   }, [primarySelectedId]);
 
   useEffect(() => {
@@ -1167,6 +1176,34 @@ export default function App() {
     }
   }, [refreshAiState]);
 
+  const handleImportMemora = useCallback(async () => {
+    let defaultPath: string | undefined;
+    try {
+      defaultPath = (await analysisStatus()).defaultMemoraDb;
+    } catch {
+      defaultPath = undefined;
+    }
+    const picked = await open({
+      multiple: false,
+      defaultPath,
+      filters: [{ name: "memora 数据库", extensions: ["db"] }],
+    });
+    if (!picked || typeof picked !== "string") return;
+    setAiBusy(true);
+    try {
+      const outcome = await analysisImportMemora(picked);
+      const skipped =
+        outcome.skippedVlm > 0 ? `，${outcome.skippedVlm} 张已有大模型结果未覆盖` : "";
+      setToast(
+        `已导入 ${outcome.imagesWritten.toLocaleString("zh-CN")} 张图片的描述（memora ${outcome.memoraRows.toLocaleString("zh-CN")} 条，匹配 ${outcome.matchedPhotos.toLocaleString("zh-CN")} 条${skipped}）`,
+      );
+    } catch (error) {
+      setToast(`导入 memora 描述失败：${String(error)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }, []);
+
   const handleSearchIndexRebuild = useCallback(async () => {
     setAiBusy(true);
     try {
@@ -1506,6 +1543,7 @@ export default function App() {
             onAiProcessPending={handleAiProcessPending}
             onAiRetagAll={handleAiRetagAll}
             onSearchIndexRebuild={handleSearchIndexRebuild}
+            onImportMemora={handleImportMemora}
             onAiDownloadModel={handleAiDownloadModel}
           />
         ) : activeView === "dedup" ? (
@@ -1686,6 +1724,7 @@ export default function App() {
             selectedCount={selectedCount}
             selectedRecords={selectedRecords}
             imageTags={imageTags}
+            analysis={imageAnalysis}
             aiBusy={aiBusy}
             onRename={handleRename}
             onReveal={handleReveal}
@@ -2702,6 +2741,7 @@ interface DetailPaneProps {
   selectedCount: number;
   selectedRecords: ImageRecord[];
   imageTags: ImageTag[];
+  analysis: ImageAnalysis | null;
   aiBusy: boolean;
   onRename: (filename: string) => Promise<void>;
   onReveal: () => Promise<void>;
@@ -2720,6 +2760,7 @@ const DetailPane = memo(function DetailPane({
   selectedCount,
   selectedRecords,
   imageTags,
+  analysis,
   aiBusy,
   onRename,
   onReveal,
@@ -2884,6 +2925,19 @@ const DetailPane = memo(function DetailPane({
           <p>{image.ocrText}</p>
         </div>
       )}
+      {analysis && analysis.imageId === image.id && (
+        <div
+          className="detail-ocr-text"
+          title={`${analysis.source === "vlm" ? "大模型打标" : "memora 导入"} · ${analysis.model} · ${analysis.promptVersion}`}
+        >
+          <span>
+            画面描述
+            {analysis.categories.length > 0 ? ` · ${analysis.categories.join(" / ")}` : ""}
+          </span>
+          <p>{analysis.description}</p>
+          {analysis.visibleText && <p className="muted">画面文字：{analysis.visibleText}</p>}
+        </div>
+      )}
 
       <div className="section-label section-label--spaced">标签</div>
       <div className="tag-row">
@@ -2941,6 +2995,7 @@ function SettingsView({
   onAiProcessPending,
   onAiRetagAll,
   onSearchIndexRebuild,
+  onImportMemora,
   onAiDownloadModel,
 }: {
   settings: AppSettings | null;
@@ -2955,6 +3010,7 @@ function SettingsView({
   onAiProcessPending: () => Promise<void>;
   onAiRetagAll: () => Promise<void>;
   onSearchIndexRebuild: () => Promise<void>;
+  onImportMemora: () => Promise<void>;
   onAiDownloadModel: (modelKey: string) => Promise<void>;
 }) {
   if (!settings) {
@@ -3195,6 +3251,16 @@ function SettingsView({
               >
                 <RefreshCw aria-hidden="true" />
                 重建检索索引
+              </button>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={aiBusy}
+                onClick={() => void onImportMemora()}
+                title="从 memora 的数据库导入已有的画面描述和类别（按图片路径匹配；不覆盖本应用大模型的结果）"
+              >
+                <Sparkles aria-hidden="true" />
+                导入 memora 描述
               </button>
             </div>
           </div>

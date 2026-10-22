@@ -351,7 +351,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 | A1 | 搜索正确性修复：SQL 预过滤、`#标签`单独搜索、兜底时保留过滤条件、兜底向量不入库、逻辑移到 `search_service` | — | ✅ |
 | A2 | 全文通道与融合框架：jieba-rs、`search_fts`、索引维护与重建、RRF、界面显示命中来源；先用 RAM 标签和 OCR 喂数据 | A1 | ✅ |
 | A2b | 同义词表与查询扩展（可选） | A2 | ⬜ |
-| A3 | 导入 memora 描述（`image_analysis` + `ai_jobs`）；跑 S2/S3，过 G1 | A2 | ⬜ |
+| A3 | 导入 memora 描述（`image_analysis` + `ai_jobs`）；跑 S2/S3，过 G1 | A2 | ✅ |
 | A4 | 文本向量通道：worker `/text/embed`、LanceDB `image_text_emb_<model>`；跑 S4/S5 | A3、G1 | ⬜ |
 | A5 | Chinese-CLIP：worker 图像模型可插拔、新表、全量重算、人脸维度解耦；跑 S1/S5，过 G2，写 ADR-008 | A1 | ✅ |
 | A6 | VLM 打标流水线：`llama-server` 监管、worker `/vlm/analyze`、`AnalysisPipeline`（受 docs/11 R2 调度）、进度界面；200 张样本过 G3 后再全量 | R2（docs/11）、G1 | ⬜ |
@@ -422,6 +422,14 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
   - 全量重建 < 30 秒。
 
 ### A3 导入 memora 描述
+- **实测 / 备注**（2026-10-22 完成）：
+  - migration `0009_image_analysis.sql`（`ai_jobs` 已在 0007 建好），`image_analysis` 上的触发器把描述、同义词、画面文字的变动记进检索索引积压表；`search_fts` 的 description / keywords / visible_text 列开始有数据。
+  - `memora_import_service`：只读打开 memora 库，取分析完成且描述非空的照片；本库这边按**忽略大小写**的绝对路径匹配（不是 §7 写的精确匹配）：`camera` / `Camera` 两个目录的同名文件在本库是两行，Windows 经 SMB 访问时两条路径指向同一个文件，精确匹配会让描述落到读不出缩略图的那一行。类别写成标签（`image_tags.source = 'memora'`，`tags.category = 'category'`）；已有 VLM 结果的图不覆盖；重复导入是幂等的。命令 `analysis_import_memora`（设置页"导入 memora 描述"）、`analysis_get`（详情面板显示画面描述）、`analysis_status`。
+  - 顺带修正 `tags_repo::upsert_tag`：同名标签不再覆盖 `tags.source`，以 `image_tags.source` 为准。
+  - **导入数**：正式库副本上，memora 有描述的 12,609 条里匹配 8,827 条（与只读统计一致），写入 12,452 行（含大小写重复行）；导入 5.6 秒，含描述的检索索引全量重建 5.8 秒（debug 构建）。
+  - **抽查**：随机 20 条，缩略图与描述逐一核对，20 条全部对应正确。
+  - **G1 通过**（线上复核，本轮补标 29 张拼图、约 114 格）：R3（只查描述列的全文）nDCG@20 0.690、Recall@20 0.305，与原型 S3（0.692 / 0.301）持平；比 S0 的 Recall@20 高 0.283。R5（标签 + 全文 + 图像向量，还没有描述向量）nDCG@20 0.858、P@10 0.897、Recall@20 0.382。
+  - 测试：新增 `analysis_tests`（4 个：导入计数与忽略大小写匹配、VLM 优先与幂等、拒绝非 memora 库、标签来源不被覆盖）。
 - **改动**：migration `0008_image_analysis.sql`（`image_analysis` + `ai_jobs`）；命令 `analysis_import_memora`；导入后重建 `search_fts`。
 - **验证**：
   - 导入数为 8,827（与只读统计一致）。

@@ -1,4 +1,5 @@
 pub mod ai;
+pub mod analysis;
 pub mod backup;
 pub mod dedup;
 pub mod face;

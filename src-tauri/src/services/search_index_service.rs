@@ -17,6 +17,7 @@ use rusqlite::{params_from_iter, Connection, TransactionBehavior};
 use serde::Serialize;
 
 use crate::error::AppResult;
+use crate::repo::analysis_repo;
 use crate::utils::text_tokens::{self, Tokens};
 
 /// 后台每批处理的图片数。
@@ -213,6 +214,13 @@ pub fn load_texts(conn: &Connection, image_ids: &[i64]) -> AppResult<HashMap<i64
                         }
                     }
                 }
+            }
+        }
+        for (id, analysis) in analysis_repo::texts_for(conn, chunk)? {
+            if let Some(texts) = out.get_mut(&id) {
+                texts.description = analysis.description;
+                texts.keywords = analysis.keywords;
+                texts.visible_text = analysis.visible_text;
             }
         }
     }

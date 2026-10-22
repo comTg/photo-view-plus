@@ -5,6 +5,7 @@ pub mod backup_service;
 pub mod dedup_service;
 pub mod face_service;
 pub mod hash_service;
+pub mod memora_import_service;
 pub mod ocr_service;
 pub mod phash_service;
 pub mod scan_service;

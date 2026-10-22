@@ -14,7 +14,9 @@
 //!   `<评测目录>\snapshot\app.sqlite`（`build_corpus.py` 做的正式库快照）复制一份，正式库本身不动；
 //! - `PVP_EVAL_THUMBS`：缩略图目录，默认正式版 profile 的 `thumbs`（只读）；
 //! - `PVP_EVAL_WORKER_PORT`：已在运行的 AI worker 端口；不设时由 `AiSupervisor` 拉起
-//!   `PVP_AI_WORKER_DIR`（默认仓库里的 `ai-worker`）。
+//!   `PVP_AI_WORKER_DIR`（默认仓库里的 `ai-worker`）；
+//! - `PVP_EVAL_MEMORA_DB`：memora 数据库（准备阶段导入描述），默认 memora 的本机位置；
+//! - `PVP_EVAL_SYSTEMS`：只跑这些方案（逗号分隔，如 `R3,R5`），默认全部。
 //!
 //! 输出：`<评测目录>\runs\R*.json`（查询 id → 语料 key 列表，key 是忽略大小写的完整路径），
 //! 以及每路查询耗时。之后运行 `make_sheets.py`（只为没标过的图出拼图）和 `score.py`。
@@ -33,6 +35,7 @@ use photo_view_plus_lib::repo::lancedb_repo::LanceDbRepo;
 use photo_view_plus_lib::services::ai_client::{AiHttpClient, ClipEmbedItem};
 use photo_view_plus_lib::services::ai_pipeline;
 use photo_view_plus_lib::services::ai_supervisor::AiSupervisor;
+use photo_view_plus_lib::services::memora_import_service;
 use photo_view_plus_lib::services::search_index_service;
 use photo_view_plus_lib::services::search_service::{
     self, AiSearchArgs, Channel, QueryEncoder, SearchOptions,
@@ -317,14 +320,19 @@ async fn run_system(
     std::fs::write(&path, serde_json::to_string(&scores).expect("json")).expect("write scores");
 }
 
-/// 准备评测库：迁移到最新 schema；建好检索全文索引；用 worker 把缩略图已就绪的图全部算好
-/// 当前图像向量模型的向量。
+/// 准备评测库：迁移到最新 schema；导入 memora 描述；建好检索全文索引；用 worker 把缩略图
+/// 已就绪的图全部算好当前图像向量模型的向量。
 #[tokio::test]
 #[ignore]
 async fn eval_prepare() {
     let env = eval_env();
     {
         let mut conn = env.pool.get().expect("conn");
+        let memora = std::env::var("PVP_EVAL_MEMORA_DB")
+            .unwrap_or_else(|_| memora_import_service::DEFAULT_MEMORA_DB.to_string());
+        let outcome = memora_import_service::import_memora(&mut conn, Path::new(&memora), 1)
+            .expect("import memora");
+        println!("memora import: {outcome:?}");
         let started = Instant::now();
         let outcome = search_index_service::rebuild_all(&mut conn).expect("search index");
         println!(
@@ -402,18 +410,56 @@ async fn eval_run() {
         worker: &worker,
         clip_model: DEFAULT_CLIP_MODEL.to_string(),
     };
-    let systems: Vec<(&str, SearchOptions)> = vec![
+    let wanted = std::env::var("PVP_EVAL_SYSTEMS").ok().map(|raw| {
+        raw.split(',')
+            .map(|name| name.trim().to_string())
+            .collect::<Vec<_>>()
+    });
+    for (name, options) in systems() {
+        if wanted
+            .as_ref()
+            .is_some_and(|names| !names.iter().any(|wanted| wanted == name))
+        {
+            continue;
+        }
+        run_system(&env, &encoder, &keys, &queries, name, &options).await;
+    }
+}
+
+/// 评测方案（名称与 scripts/search_eval/score.py 的 NAMES 对应）。
+fn systems() -> Vec<(&'static str, SearchOptions)> {
+    // 不含描述的全文列（与原型 S2 对比；单字列里仍有描述的字，这是唯一的偏差）。
+    let without_description = ["tags", "keywords", "visible_text", "ocr_text", "filename"]
+        .map(String::from)
+        .to_vec();
+    vec![
+        // 只跑图像向量通道（Chinese-CLIP）
         ("R1", SearchOptions::only(&[Channel::ImageVector])),
+        // 标签 + 全文，不用描述（RAM 标签、OCR、文件名）
         (
             "R2",
-            SearchOptions::only(&[Channel::Tag, Channel::FullText]),
+            SearchOptions {
+                fulltext_columns: Some(without_description.clone()),
+                ..SearchOptions::only(&[Channel::Tag, Channel::FullText])
+            },
         ),
+        // 只查描述列的全文（对应原型 S3）
+        (
+            "R3",
+            SearchOptions {
+                fulltext_columns: Some(vec!["description".to_string()]),
+                ..SearchOptions::only(&[Channel::FullText])
+            },
+        ),
+        // 图像向量 + 标签 + 全文，不用描述（对应原型 S5b）
         (
             "R5b",
-            SearchOptions::only(&[Channel::ImageVector, Channel::Tag, Channel::FullText]),
+            SearchOptions {
+                fulltext_columns: Some(without_description),
+                ..SearchOptions::only(&[Channel::ImageVector, Channel::Tag, Channel::FullText])
+            },
         ),
-    ];
-    for (name, options) in &systems {
-        run_system(&env, &encoder, &keys, &queries, name, options).await;
-    }
+        // 线上默认：全部通道
+        ("R5", SearchOptions::default()),
+    ]
 }

@@ -32,7 +32,7 @@ NAMES = {
     # R*：线上 Rust search_service 在正式库副本上的复核结果（src-tauri/tests/search_eval.rs）
     "R1": "线上·图像向量（Chinese-CLIP）",
     "R2": "线上·标签 + 全文（RAM 标签、OCR）",
-    "R3": "线上·全文（含 memora 描述）",
+    "R3": "线上·描述全文（memora 描述）",
     "R4": "线上·描述文本向量",
     "R5b": "线上·融合（图像向量 + 标签 + 全文，无描述）",
     "R5": "线上·融合（默认权重）",
