@@ -1,5 +1,6 @@
 //! docs/10 A4：描述文本向量通道。
-//! `text_hash()` SQL 函数与 Rust 实现一致；描述变了 / 换模型自动重算；兜底伪向量不入库；
+//! `text_hash()` / `embedding_hash()` SQL 函数与 Rust 实现一致；描述（或 VLM 关键词）变了 / 换模型
+//! 自动重算；兜底伪向量不入库；
 //! 搜索时第四路（描述语义）参与融合并标出命中来源；文本向量编码失败时降级。
 
 use std::collections::HashSet;
@@ -87,17 +88,21 @@ fn seed(pool: &Pool, descriptions: &[&str]) -> Vec<i64> {
 }
 
 fn set_description(pool: &Pool, image_id: i64, description: &str) {
+    set_analysis(pool, image_id, "memora", description, &[]);
+}
+
+fn set_analysis(pool: &Pool, image_id: i64, source: &str, description: &str, keywords: &[&str]) {
     let conn = pool.get().expect("conn");
     analysis_repo::upsert(
         &conn,
         &ImageAnalysis {
             image_id,
-            source: "memora".to_string(),
+            source: source.to_string(),
             model: "qwen3.5-9b".to_string(),
             prompt_version: "memora-m1".to_string(),
             description: description.to_string(),
             categories: Vec::new(),
-            keywords: Vec::new(),
+            keywords: keywords.iter().map(|keyword| keyword.to_string()).collect(),
             people_count: None,
             visible_text: None,
             sensitive: false,
@@ -139,7 +144,7 @@ fn items(pool: &Pool, ids: &[i64]) -> Vec<(i64, String)> {
     let conn = pool.get().expect("conn");
     let texts = analysis_repo::texts_for(&conn, ids).expect("texts");
     ids.iter()
-        .filter_map(|id| texts.get(id).map(|t| (*id, t.description.clone())))
+        .filter_map(|id| texts.get(id).map(|t| (*id, t.embedding_text())))
         .collect()
 }
 
@@ -156,6 +161,73 @@ fn sql_text_hash_matches_rust() {
         .query_row("SELECT text_hash(NULL)", [], |row| row.get(0))
         .expect("null");
     assert_eq!(null, None);
+    // embedding_hash：没有关键词（memora 导入的行）时与描述本身的指纹相同，升级后不用重算。
+    let hash = |description: Option<&str>, keywords: &str| -> Option<String> {
+        conn.query_row(
+            "SELECT embedding_hash(?1, ?2)",
+            rusqlite::params![description, keywords],
+            |row| row.get(0),
+        )
+        .expect("embedding_hash")
+    };
+    assert_eq!(
+        hash(Some("海边的小孩"), "[]"),
+        Some(db::text_hash("海边的小孩"))
+    );
+    let keywords = vec!["夕阳".to_string(), "湖景".to_string()];
+    assert_eq!(
+        hash(Some("海边的小孩"), r#"["夕阳","湖景"]"#),
+        Some(db::text_hash(&db::embedding_text("海边的小孩", &keywords)))
+    );
+    assert_eq!(
+        db::embedding_text("海边的小孩", &keywords),
+        "海边的小孩
+关键词：夕阳、湖景"
+    );
+    assert_eq!(hash(None, "[]"), None);
+}
+
+#[tokio::test]
+async fn vlm_keywords_join_the_embedding_text() {
+    let env = env();
+    let description = "风景照片。画面主体为日落时分的湖面与远山";
+    let ids = seed(&env.pool, &[description]);
+    let batch = items(&env.pool, &ids);
+    assert_eq!(batch[0].1, description, "没有关键词时就是描述本身");
+    ai_pipeline::apply_text_embed_response(
+        &env.pool,
+        &env.vectors,
+        &batch,
+        response(&batch, SMALL, 512, false),
+        1,
+    )
+    .await
+    .expect("apply");
+    assert!(pending(&env.pool, SMALL).is_empty());
+    // VLM 结果带关键词（"夕阳"只在关键词里）：编码的文本带上关键词，指纹随之变化、自动重算。
+    set_analysis(&env.pool, ids[0], "vlm", description, &["夕阳", "湖景"]);
+    assert_eq!(pending(&env.pool, SMALL), ids);
+    let batch = items(&env.pool, &ids);
+    assert_eq!(
+        batch[0].1,
+        format!(
+            "{description}
+关键词：夕阳、湖景"
+        )
+    );
+    ai_pipeline::apply_text_embed_response(
+        &env.pool,
+        &env.vectors,
+        &batch,
+        response(&batch, SMALL, 512, false),
+        2,
+    )
+    .await
+    .expect("apply");
+    assert!(
+        pending(&env.pool, SMALL).is_empty(),
+        "SQL 端的 embedding_hash 与 Rust 端记下的指纹一致"
+    );
 }
 
 #[tokio::test]

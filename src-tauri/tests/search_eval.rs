@@ -439,7 +439,7 @@ async fn eval_prepare() {
             analysis_repo::texts_for(&conn, &ids).expect("texts")
         }
         .into_iter()
-        .map(|(id, texts)| (id, texts.description))
+        .map(|(id, texts)| (id, texts.embedding_text()))
         .collect::<Vec<_>>();
         let response = worker
             .client

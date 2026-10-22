@@ -46,15 +46,43 @@ pub fn text_hash(text: &str) -> String {
     blake3::hash(text.as_bytes()).to_hex()[..16].to_string()
 }
 
+/// 描述文本向量的输入：描述，加上大模型给的关键词（docs/10 A6）。search-v1 的描述写得中性
+/// （"风景照片。画面主体为日落时分的湖面……"），"夕阳""汽车""二维码"这类查询词常常只出现在
+/// 关键词里。没有关键词（memora 导入的行）时就是描述本身，指纹不变、不用重算。
+pub fn embedding_text(description: &str, keywords: &[String]) -> String {
+    if keywords.is_empty() {
+        description.to_string()
+    } else {
+        format!("{description}\n关键词：{}", keywords.join("、"))
+    }
+}
+
 /// 给连接注册自定义 SQL 函数：
 /// - `text_hash(text)`：同 [`text_hash`]，NULL 进 NULL 出。待处理判断（"描述的指纹和上次算向量时
 ///   是否一致"）因此能直接在 SQL 里算，不必把全部描述读进内存比对。
+/// - `embedding_hash(description, keywords_json)`：[`embedding_text`] 的指纹，即描述文本向量
+///   记在 `ai_jobs.input_hash` 里的值。
 pub fn register_functions(conn: &Connection) -> rusqlite::Result<()> {
     conn.create_scalar_function(
         "text_hash",
         1,
         FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
         |ctx| Ok(ctx.get::<Option<String>>(0)?.map(|text| text_hash(&text))),
+    )?;
+    conn.create_scalar_function(
+        "embedding_hash",
+        2,
+        FunctionFlags::SQLITE_UTF8 | FunctionFlags::SQLITE_DETERMINISTIC,
+        |ctx| {
+            let Some(description) = ctx.get::<Option<String>>(0)? else {
+                return Ok(None);
+            };
+            let keywords = ctx
+                .get::<Option<String>>(1)?
+                .and_then(|raw| serde_json::from_str::<Vec<String>>(&raw).ok())
+                .unwrap_or_default();
+            Ok(Some(text_hash(&embedding_text(&description, &keywords))))
+        },
     )
 }
 

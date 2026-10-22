@@ -652,7 +652,7 @@ impl TextEmbedBatchTask {
         }
         .into_iter()
         .filter(|(_, texts)| !texts.description.trim().is_empty())
-        .map(|(image_id, texts)| (image_id, texts.description))
+        .map(|(image_id, texts)| (image_id, texts.embedding_text()))
         .collect::<Vec<_>>();
         if items.is_empty() {
             return Ok(());

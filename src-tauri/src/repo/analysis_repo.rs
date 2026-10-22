@@ -40,6 +40,13 @@ pub struct AnalysisTexts {
     pub visible_text: String,
 }
 
+impl AnalysisTexts {
+    /// 送去算描述文本向量的文本，见 [`crate::db::embedding_text`]。
+    pub fn embedding_text(&self) -> String {
+        crate::db::embedding_text(&self.description, &self.keywords)
+    }
+}
+
 /// 写入（或更新）一条分析结果，返回是否写入。
 ///
 /// - VLM 结果总是写入（覆盖 memora 导入的行，也覆盖旧的 VLM 结果）；

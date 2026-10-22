@@ -460,7 +460,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 ### A4 文本向量通道
 - **实测 / 备注**（2026-10-23 完成）：
   - worker：`models/text_loader.py` + `/text/embed`（批量；`query=true` 时按模型卡加检索指令前缀；CUDA 半精度；同一时间驻留一个模型，加载失败进兜底）。和评测时的向量逐条对比余弦 1.0。
-  - Rust：任务类型 `text_embedding`，`input_hash` = 描述文本的 BLAKE3 前 16 位。给 SQLite 注册了自定义函数 `text_hash()`（rusqlite `functions` feature），待处理判断直接在 SQL 里比对指纹：描述被改写（例如 VLM 覆盖 memora）或换模型时自动重算。`ai_jobs` 的重试计数在模型或输入指纹变化时从 1 重新计。批次 128 条，优先级与图像向量同为 P6。
+  - Rust：任务类型 `text_embedding`，`input_hash` = 描述文本的 BLAKE3 前 16 位（A6 起是"描述 + 大模型关键词"的指纹，见 A6）。给 SQLite 注册了自定义函数 `text_hash()`（rusqlite `functions` feature），待处理判断直接在 SQL 里比对指纹：描述被改写（例如 VLM 覆盖 memora）或换模型时自动重算。`ai_jobs` 的重试计数在模型或输入指纹变化时从 1 重新计。批次 128 条，优先级与图像向量同为 P6。
   - 搜索：第四路"描述语义"（`matchedBy = semantic`）；两路查询编码并行，两路向量检索也并行。描述向量的相似度下限 0.35：评测集里相关图的余弦 p5 是 0.359、不相关图的中位数 0.373；加下限前后 R5 指标不变。
   - **修了一个触发器的问题**（migration `0010`）：0008 / 0009 的积压触发器用 `INSERT OR IGNORE` 去重，但 SQLite 规定由带冲突子句的语句（`image_analysis` 的 UPSERT 走 DO UPDATE 分支）触发时，触发器里的 OR IGNORE 会被外层冲突策略覆盖成 ABORT，积压表里已有这张图时写入直接报 UNIQUE 错误（memora 重复导入、VLM 覆盖描述都会遇到）。改成 `WHERE NOT EXISTS` 写法，加了回归测试。
   - 设置：`aiTextModel`（bge-small-zh-v1.5 / bge-base-zh-v1.5），设置页可选，状态栏显示描述向量待处理数。
@@ -531,6 +531,8 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
     - 设置页"卸载模型"后 30 分钟内不自动加载（之前流水线下一秒就会重新加载）；因卸载而失败的在途请求不退避、不计入熔断。
     - 强制停止（进入全屏、手动卸载）会打断正在进行的模型加载，不用等它加载完（最长 300 秒）；被打断的那次不计入"1 分钟最多启动 3 次"。
   - **全量运行中发现**：一张 1080×8667 的长截图（HEIC）解码失败。手机把它按网格切块存，`ipco` 下的属性超过 libheif 默认安全上限（100 个），pillow-heif 报 "Security limit exceeded"。worker 关掉 pillow-heif 的安全上限后能正常解码（图片来自用户自己的图库，解码在独立进程里，像素上限仍由 `MAX_IMAGE_PIXELS` 把关）。同期另有 3 张文档类图片第一次输出的 JSON 不完整，第二次成功。
+  - **描述向量带上关键词**（全量运行期间评测发现）：search-v1 的描述写得中性（"风景照片。画面主体为日落时分的湖面……"），"夕阳""汽车""二维码"这类查询词常常只出现在标签和关键词里；memora 的描述则开门见山（"夕阳西下……""一张汽车仪表盘的特写照片"）。只用描述算向量时，在全量分析进行到约 70% 的快照上，描述向量通道 nDCG@20 0.792，比 memora 描述（0.840）低。改为把关键词接在描述后面一起编码（`db::embedding_text`：`描述
+关键词：甲、乙`；没有关键词的 memora 行不变、指纹相同、不用重算；待处理判断用 SQL 函数 `embedding_hash()`），同一快照上描述向量 nDCG@20 0.792 → 0.826、MRR 0.929 → 0.983，四路融合 0.915 → 0.923、P@10 0.940 → 0.945。夕阳、水果、樱花提升最多，最大的单项下降是 0.04。升级后已有的 VLM 结果自动重算一次描述向量（bge-small 约 250 条/秒）。
 - **改动**：
   - `services/vlm_supervisor.rs`：
     - 按设置拼启动参数（同 memora `llama.command`），隐藏窗口、低于正常优先级，放进作业对象（见 docs/11 R1-4）；

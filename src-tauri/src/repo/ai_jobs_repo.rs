@@ -120,7 +120,8 @@ pub fn count_pending_image_embedding(conn: &Connection, model: &str) -> AppResul
 
 /// 描述的文本向量：有非空描述、当前模型下还没有算过（或描述变了、失败可重试）的图，最多 `limit` 张。
 ///
-/// 描述变没变用 SQL 函数 `text_hash()`（见 `db::register_functions`）和 `ai_jobs.input_hash` 比对。
+/// 描述（含关键词）变没变用 SQL 函数 `embedding_hash()`（见 `db::register_functions`）和
+/// `ai_jobs.input_hash` 比对。
 pub fn pending_text_embedding(conn: &Connection, model: &str, limit: i64) -> AppResult<Vec<i64>> {
     let sql = format!(
         "SELECT a.image_id FROM image_analysis a
@@ -129,7 +130,7 @@ pub fn pending_text_embedding(conn: &Connection, model: &str, limit: i64) -> App
          WHERE i.deleted_at IS NULL AND TRIM(a.description) <> ''
            AND (j.image_id IS NULL
                 OR j.model <> ?1
-                OR j.input_hash IS NOT text_hash(a.description)
+                OR j.input_hash IS NOT embedding_hash(a.description, a.keywords)
                 OR (j.status = 'failed' AND j.attempts < ?2))
          ORDER BY a.image_id
          LIMIT ?3"
@@ -151,7 +152,7 @@ pub fn count_pending_text_embedding(conn: &Connection, model: &str) -> AppResult
          WHERE i.deleted_at IS NULL AND TRIM(a.description) <> ''
            AND (j.image_id IS NULL
                 OR j.model <> ?1
-                OR j.input_hash IS NOT text_hash(a.description)
+                OR j.input_hash IS NOT embedding_hash(a.description, a.keywords)
                 OR (j.status = 'failed' AND j.attempts < ?2))"
     );
     Ok(conn
