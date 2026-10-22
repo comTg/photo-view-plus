@@ -21,7 +21,9 @@ pub mod utils;
 
 pub use error::{AppError, AppResult};
 
+use services::ai_supervisor::AiSupervisor;
 use services::dedup_service::DedupCoordinator;
+use services::resource_governor::{Budget, BudgetApplier, ResourceGovernor};
 use services::startup_gate::StartupGate;
 use utils::bk_tree::DhashIndex;
 
@@ -93,6 +95,32 @@ pub fn run() {
                     .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?,
             );
             ai_supervisor.clone().spawn_monitor(app.handle().clone());
+
+            // docs/11 R2：资源治理器。按"用户是否正在用电脑"调缩略图 / 读闸门 / 哈希并发、
+            // AI 的 GPU 闸门和 worker 线程数；模式变化发 system:load_mode。
+            let settings = services::settings_service::read(&paths).unwrap_or_else(|error| {
+                tracing::warn!(%error, "failed to read settings; resource governor uses defaults");
+                config::AppSettings::default()
+            });
+            ai_supervisor.set_idle_stop(services::ai_supervisor::idle_stop_after(
+                settings.ai_idle_stop_minutes,
+            ));
+            let (budget_settings, thresholds) = services::resource_governor::settings_from(
+                &settings,
+                services::thumbnail_service::thumbnail_cpu_limit(),
+            );
+            let governor = ResourceGovernor::new(
+                Box::new(utils::win_activity::SystemActivity),
+                budget_settings,
+                thresholds,
+                ai_supervisor.gpu_gate(),
+                budget_applier(scheduler.clone(), ai_supervisor.clone()),
+            );
+            let governor_app = app.handle().clone();
+            governor.clone().spawn(move |status| {
+                let _ = governor_app.emit("system:load_mode", status);
+            });
+
             let ai_pipeline = Arc::new(services::ai_pipeline::AiPipeline::new(
                 pool.clone(),
                 scheduler.clone(),
@@ -144,6 +172,7 @@ pub fn run() {
             app.manage(dedup_coord);
             app.manage(ai_supervisor);
             app.manage(ai_pipeline);
+            app.manage(governor);
             app.manage(startup_gate);
             app.manage(watcher_service);
             Ok(())
@@ -153,6 +182,8 @@ pub fn run() {
             commands::system::db_status,
             commands::system::ui_perf,
             commands::system::frontend_ready,
+            commands::system::governor_status,
+            commands::system::governor_set_override,
             commands::roots::roots_add,
             commands::roots::roots_list,
             commands::roots::roots_remove,
@@ -226,6 +257,23 @@ pub fn run() {
         ])
         .run(tauri::generate_context!())
         .unwrap_or_else(|error| eprintln!("error while running tauri application: {error}"));
+}
+
+/// 把一个档位的预算下发到各个执行点（docs/11 §5.3）。只影响新任务，在途任务不打断。
+fn budget_applier(scheduler: queue::Scheduler, supervisor: Arc<AiSupervisor>) -> BudgetApplier {
+    Box::new(move |budget: &Budget| {
+        services::thumbnail_service::set_batch_limit(budget.batch_thumbnails);
+        scheduler.set_cap(queue::Priority::P0, budget.batch_thumbnails.max(1));
+        utils::read_gate::set_network_limit(budget.network_reads);
+        // P2 = BLAKE3，P3 = dHash；0 = 全屏 / 暂停时不派发。
+        scheduler.set_cap(queue::Priority::P2, budget.hash_tasks);
+        scheduler.set_cap(queue::Priority::P3, budget.hash_tasks);
+        let supervisor = supervisor.clone();
+        let threads = budget.worker_threads;
+        tauri::async_runtime::spawn(async move {
+            supervisor.set_worker_threads(threads).await;
+        });
+    })
 }
 
 /// BK-tree 全量加载：查全库，放后台线程，不能放在 setup 主线程里跑，否则窗口会白屏到它结束。

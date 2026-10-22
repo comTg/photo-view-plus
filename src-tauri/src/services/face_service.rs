@@ -95,6 +95,11 @@ impl Task for FaceBatchTask {
         if ctx.is_cancelled() {
             return Ok(());
         }
+        // 资源治理：GPU 任务统一经过闸门（docs/11 §5.2）。
+        let gate = self.supervisor.gpu_gate();
+        let Some(_gpu) = gate.acquire(&ctx.cancellation_token()).await else {
+            return Ok(());
+        };
         let items = self.load_items()?;
         if items.is_empty() {
             return Ok(());

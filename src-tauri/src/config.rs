@@ -128,6 +128,12 @@ pub struct AppSettings {
     pub face_enabled: bool,
     pub gps_enabled: bool,
     pub file_watcher_enabled: bool,
+    /// 多少分钟没有键盘鼠标输入算"空闲"，后台全速（docs/11 §5.1）。
+    pub idle_threshold_minutes: u16,
+    /// "使用电脑时也运行 AI"：使用中档的 GPU 任务按 30% 占空比跑，而不是暂停（默认关）。
+    pub ai_while_active: bool,
+    /// "大模型只在空闲时运行"（默认开，docs/10 A6）。
+    pub vlm_idle_only: bool,
 }
 
 impl Default for AppSettings {
@@ -148,6 +154,9 @@ impl Default for AppSettings {
             face_enabled: false,
             gps_enabled: true,
             file_watcher_enabled: true,
+            idle_threshold_minutes: 3,
+            ai_while_active: false,
+            vlm_idle_only: true,
         }
     }
 }
@@ -169,6 +178,9 @@ pub struct AppSettingsPatch {
     pub face_enabled: Option<bool>,
     pub gps_enabled: Option<bool>,
     pub file_watcher_enabled: Option<bool>,
+    pub idle_threshold_minutes: Option<u16>,
+    pub ai_while_active: Option<bool>,
+    pub vlm_idle_only: Option<bool>,
 }
 
 impl AppSettings {
@@ -238,6 +250,15 @@ impl AppSettings {
         }
         if let Some(file_watcher_enabled) = patch.file_watcher_enabled {
             self.file_watcher_enabled = file_watcher_enabled;
+        }
+        if let Some(minutes) = patch.idle_threshold_minutes {
+            self.idle_threshold_minutes = minutes.clamp(1, 60);
+        }
+        if let Some(ai_while_active) = patch.ai_while_active {
+            self.ai_while_active = ai_while_active;
+        }
+        if let Some(vlm_idle_only) = patch.vlm_idle_only {
+            self.vlm_idle_only = vlm_idle_only;
         }
     }
 }

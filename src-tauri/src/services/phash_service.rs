@@ -18,6 +18,7 @@ use crate::queue::{Priority, Task, TaskContext};
 use crate::repo::images_repo;
 use crate::services::thumbnail_service;
 use crate::utils::bk_tree::DhashIndex;
+use crate::utils::priority::BackgroundPriorityGuard;
 
 #[derive(Clone)]
 pub struct DhashTask {
@@ -67,7 +68,11 @@ impl Task for DhashTask {
 
 fn compute(task: DhashTask) -> AppResult<()> {
     let thumb_path = thumbnail_service::thumb_path(&task.thumbs_dir, &task.thumb_hash);
-    let dhash = match dhash_from_thumb(&thumb_path) {
+    let computed = {
+        let _bg = BackgroundPriorityGuard::enter();
+        dhash_from_thumb(&thumb_path)
+    };
+    let dhash = match computed {
         Ok(value) => value,
         Err(error) => {
             // 不写失败状态：下次去重会自动重试（多为缩略图暂时缺失/损坏）。不连累 blake3。

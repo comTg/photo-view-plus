@@ -207,14 +207,14 @@
 | ID | 内容 | 状态 |
 |----|------|------|
 | R0 | 测量工具 + S0–S4 基线 + 附录 A。工具已就绪，冒烟测试通过（`scripts/perf/`）；S0–S4 实测要约时间进行 | 🔄 |
-| R1-1 | AI 只在空闲时运行（先用 `GetLastInputInfo` ≥ 3 分钟做简单判断；设置"使用电脑时也运行 AI"默认关）+ 批次间 GPU 冷却 | ⬜ |
-| R1-2 | worker FP16 推理 | ⬜ |
-| R1-3 | `BackgroundPriorityGuard` 抽到 utils，覆盖哈希、dHash 和扫描读图头 | ⬜ |
-| R1-4 | 实现 `aiIdleStopMinutes`；worker 放进作业对象 | ⬜ |
+| R1-1 | AI 只在空闲时运行（先用 `GetLastInputInfo` ≥ 3 分钟做简单判断；设置"使用电脑时也运行 AI"默认关）+ 批次间 GPU 冷却 | ✅ 由 R2 覆盖 |
+| R1-2 | worker FP16 推理 | 🔄 Chinese-CLIP、bge 已是 FP16（docs/10 A5、A4）；RAM-plus 随 docs/10 A7 下线，不再单独改 |
+| R1-3 | `BackgroundPriorityGuard` 抽到 utils，覆盖哈希、dHash 和扫描读图头 | ✅ |
+| R1-4 | 实现 `aiIdleStopMinutes`；worker 放进作业对象 | ✅ |
 | R1-5 | 扫描期刷新减负（docs/09 P1-5） | ⬜ |
 | R1-6 | 扫描时检测只差大小写的同级目录并告警 | ⬜ |
 | R1-7 | （条件项）若 R0 显示 CPU 是主因，先把缩略图默认并发从 6 降到 4 | ⬜ |
-| R2 | 资源治理器：负载模式、可调许可、预算表、GPU 占空比、`system:load_mode` 事件、状态栏与手动覆盖 | ⬜ |
+| R2 | 资源治理器：负载模式、可调许可、预算表、GPU 占空比、`system:load_mode` 事件、状态栏与手动覆盖 | ✅ 前后对比待 R0 / R6 实测 |
 | R3 | 可见区域优先的缩略图 | ⬜ |
 | R4 | 缩略图改有损编码 + 迁移 + dHash 回归 | ⬜ |
 | R5 | 事件合批 + docs/09 P0-3 剩余部分 | ⬜ |
@@ -225,6 +225,29 @@
 - 改前端：`pnpm lint && pnpm typecheck && pnpm test`。
 - R1 和 R2 的每一项都要重跑对应的 R0 场景（S2/S3/S4），把前后对比写进附录 A。
 - R2 的单元测试：模式状态机用注入的假时钟和假输入源，覆盖降档立即生效、升档迟滞、全屏优先、手动覆盖；许可容量调整后，新任务遵守新上限。
+
+### 7.1 实施记录
+
+**R1-3**：`utils/priority.rs` 的 `BackgroundPriorityGuard`（`THREAD_MODE_BACKGROUND_BEGIN/END`）覆盖缩略图生成、BLAKE3、dHash 和扫描读图头（`probe_image`）。扫描写库的事务不在后台模式里（§5.3）。
+
+**R1-4**：
+- `aiIdleStopMinutes`（默认 10）：supervisor 记录最后一次使用 worker 的时间（任何 worker 请求都算，包括搜索编码），健康检查循环里发现空闲超时就停掉 worker；设置修改立即生效。下次搜索或有待处理任务时按需重启。
+- 作业对象：`utils/job_object.rs`，带 `JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE`，worker 启动后立即绑定；以后的 `llama-server` 也绑这个作业。
+
+**R2**：
+- `services/resource_governor.rs`：`classify`（一次采样 → 模式）、`ModeMachine`（降档立即、升档持续 10 秒）、`budget_for`（§5.2 预算表）、`effective_tier`（模式 + 手动覆盖）、`GpuGate`（暂停 / 一次一批 / 占空比冷却）、`ResourceGovernor`（每 500ms 采样，预算变化时调用下发回调，发 `system:load_mode`）。纯逻辑部分时间由调用方传入。
+- `utils/win_activity.rs`：`GetLastInputInfo` + `SHQueryUserNotificationState`（`QUNS_BUSY` / `QUNS_RUNNING_D3D_FULL_SCREEN` / `QUNS_PRESENTATION_MODE` → 全屏档，`QUNS_NOT_PRESENT` → 空闲）。非 Windows 用桩实现。
+- `utils/limiter.rs`：`AdjustableLimiter` 替换缩略图 CPU 闸门和读闸门；调度器的单优先级上限改成原子量，可运行时调整。
+- 下发点（`lib.rs` 的 `budget_applier`）：批量缩略图（CPU 闸门 + P0 上限）、网络盘读闸门（夹在 1–4，红线）、P2/P3（BLAKE3 / dHash）上限、worker 数学库线程数（新接口 `POST /runtime/throttle`，worker 运行时 `torch.set_num_threads`；启动时也会应用当前档位）。
+- AI 后台任务（图像向量、描述向量、RAM 标签、OCR、人脸）统一先过 supervisor 的 `GpuGate`；GPU 暂停时 AI 流水线不投递新批次、也不唤醒 worker。搜索编码不经过闸门。
+- 命令 `governor_status`、`governor_set_override`（`auto` / `fullSpeed` / `pause1h` / `pauseUntilRestart`）；底部状态栏组件 `LoadModeControl` 自己订阅 `system:load_mode`。
+- 设置项：`idleThresholdMinutes`（默认 3）、`aiWhileActive`（默认关）、`vlmIdleOnly`（默认开），修改后立即生效。
+- 测试：`tests/governor_tests.rs` 20 个，覆盖假时钟 / 假输入源下的降档、升档迟滞、全屏优先、手动覆盖与到期、预算表、GPU 闸门、许可和调度器上限调整、网络盘红线，以及真实系统上的输入探测和作业对象绑定。
+- **与方案的差异**：
+  - 全屏 / 暂停档的批量缩略图保留 1 个名额（方案是 0）：R3 的可见区域队列做完之前，降到 0 会让画廊完全不出新图。R3 完成后改回 0。
+  - worker 没有用 `PROCESS_MODE_BACKGROUND_BEGIN`：同一个 worker 也负责搜索时的查询编码，后台模式会把它的 I/O 和内存优先级压到很低，冷启动搜索会明显变慢；保留现有的 `BELOW_NORMAL_PRIORITY_CLASS`，再加上 GPU 闸门和线程数调节。
+  - 用户手动触发的批量任务（"处理待办"、OCR、人脸）同样受 GPU 闸门约束：使用中档会等到离开或空闲才跑。状态栏能看到当前档位，需要立刻处理时可以切"全速"。
+- **待做**：R0 的 S2–S4 场景前后对比（需要约时间实测），结果写进附录 A。
 
 ## 8. 验收指标（初值，R0 之后修订）
 

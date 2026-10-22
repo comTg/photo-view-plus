@@ -80,7 +80,8 @@ struct SchedulerInner {
     running_by_priority: [AtomicUsize; 8],
     /// 每个优先级的最大同时运行数。默认 `usize::MAX`（不限，仅受全局并发约束）。
     /// 用来防止高优先级任务（如缩略图 P0）占满全部并发槽、饿死低优先级任务（去重哈希 P2/P3）。
-    caps: [usize; 8],
+    /// 资源治理器按负载模式运行时调整（docs/11 R2），已在运行的任务不受影响。
+    caps: [AtomicUsize; 8],
     running: AtomicUsize,
     completed: AtomicUsize,
     failed: AtomicUsize,
@@ -128,7 +129,7 @@ impl Scheduler {
                 senders,
                 queued: std::array::from_fn(|_| AtomicUsize::new(0)),
                 running_by_priority: std::array::from_fn(|_| AtomicUsize::new(0)),
-                caps,
+                caps: caps.map(AtomicUsize::new),
                 running: AtomicUsize::new(0),
                 completed: AtomicUsize::new(0),
                 failed: AtomicUsize::new(0),
@@ -155,6 +156,15 @@ impl Scheduler {
         self.inner.senders[priority.index()]
             .send(task)
             .map_err(|_| AppError::Other("任务队列已停止".to_string()))
+    }
+
+    /// 调整某个优先级的最大同时运行数（0 = 暂停派发该优先级的新任务）。
+    pub fn set_cap(&self, priority: Priority, cap: usize) {
+        self.inner.caps[priority.index()].store(cap, Ordering::Relaxed);
+    }
+
+    pub fn cap(&self, priority: Priority) -> usize {
+        self.inner.caps[priority.index()].load(Ordering::Relaxed)
     }
 
     pub fn pause(&self) {
@@ -298,7 +308,9 @@ fn recv_dispatchable(
 ) -> Option<(Priority, BoxTask)> {
     for priority in Priority::all() {
         let idx = priority.index();
-        if inner.running_by_priority[idx].load(Ordering::Relaxed) >= inner.caps[idx] {
+        if inner.running_by_priority[idx].load(Ordering::Relaxed)
+            >= inner.caps[idx].load(Ordering::Relaxed)
+        {
             continue;
         }
         if let Ok(task) = receivers[idx].try_recv() {

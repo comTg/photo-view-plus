@@ -236,6 +236,18 @@ impl AiHttpClient {
             .await?)
     }
 
+    /// 调整 worker 的数学库线程数（docs/11 §5.3 `/runtime/throttle`）。
+    pub async fn throttle(&self, port: u16, threads: usize) -> AppResult<()> {
+        let url = endpoint(port, "/runtime/throttle");
+        self.client
+            .post(url)
+            .json(&serde_json::json!({ "threads": threads }))
+            .send()
+            .await?
+            .error_for_status()?;
+        Ok(())
+    }
+
     pub async fn diagnostics(&self, port: u16) -> AppResult<Value> {
         let url = endpoint(port, "/diagnostics");
         Ok(self

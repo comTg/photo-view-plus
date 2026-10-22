@@ -31,6 +31,18 @@ def runtime_summary() -> RuntimeSummary:
     return RuntimeSummary(device="cpu", compute_capability=None)
 
 
+def set_math_threads(threads: int) -> int:
+    """运行时调整 torch 的 intra-op 线程数，返回生效值。没装 torch 时原样返回。"""
+    torch = _import_torch()
+    if torch is None:
+        return threads
+    try:
+        torch.set_num_threads(max(1, int(threads)))
+        return int(torch.get_num_threads())
+    except Exception:
+        return threads
+
+
 def diagnostics() -> dict[str, Any]:
     torch = _import_torch()
     summary = runtime_summary()

@@ -1,6 +1,8 @@
 use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
+use std::sync::Arc;
 use std::time::Duration;
 
 use serde::Serialize;
@@ -15,6 +17,7 @@ use crate::services::ai_client::{
     AiHttpClient, ClipEmbedItem, ClipEmbedResponse, FaceDetectItem, FaceDetectResponse, OcrItem,
     OcrResponse, TaggerItem, TaggerResponse, TextEmbedResponse, TextEncodeResponse, WorkerHealth,
 };
+use crate::services::resource_governor::{GpuGate, GpuPolicy};
 
 const START_TIMEOUT: Duration = Duration::from_secs(20);
 const HEALTH_INTERVAL: Duration = Duration::from_secs(1);
@@ -49,6 +52,14 @@ pub struct AiSupervisor {
     worker_dir: PathBuf,
     models_dir: PathBuf,
     client: AiHttpClient,
+    /// 后台 GPU 任务（向量、标签、OCR、人脸）共用的闸门；搜索编码不经过它（docs/11 §5.2）。
+    gpu: Arc<GpuGate>,
+    /// 最后一次使用 worker 的时间，用于空闲自动停止（docs/11 R1-4，设置项 aiIdleStopMinutes）。
+    last_used: std::sync::Mutex<Instant>,
+    /// 空闲多少秒后停掉 worker；0 = 不自动停。
+    idle_stop_secs: AtomicU64,
+    /// 资源治理器下发的数学库线程数；worker 启动后和档位变化时应用。
+    worker_threads: AtomicUsize,
     inner: Mutex<AiSupervisorInner>,
     /// 串行化 worker 启动。`spawn_worker` 要加载模型、耗时数秒，期间不能持 `inner` 锁
     /// （否则阻塞 status/health 查询）；但若不加这把锁，并发的后台任务/重试会在
@@ -87,6 +98,10 @@ impl AiSupervisor {
             worker_dir,
             models_dir,
             client: AiHttpClient::new()?,
+            gpu: GpuGate::new(GpuPolicy::Unlimited),
+            last_used: std::sync::Mutex::new(Instant::now()),
+            idle_stop_secs: AtomicU64::new(10 * 60),
+            worker_threads: AtomicUsize::new(ai_worker_cpu_threads()),
             inner: Mutex::new(AiSupervisorInner {
                 child: None,
                 status,
@@ -99,6 +114,9 @@ impl AiSupervisor {
     }
 
     pub async fn start(&self) -> AppResult<AiWorkerStatus> {
+        // 任何经过 start 的调用（后台批次、搜索编码、手动启动）都算"在用"：刚拉起的 worker
+        // 不会在第一批任务到达前就被空闲检查停掉。
+        self.touch();
         // 快速路径：已就绪直接返回，不去争 start_lock。
         {
             let mut inner = self.inner.lock().await;
@@ -169,6 +187,66 @@ impl AiSupervisor {
 
     pub async fn stop(&self) -> AppResult<AiWorkerStatus> {
         self.stop_inner(true).await
+    }
+
+    pub fn gpu_gate(&self) -> Arc<GpuGate> {
+        self.gpu.clone()
+    }
+
+    /// 设置空闲自动停止（`None` = 不自动停）。
+    pub fn set_idle_stop(&self, after: Option<Duration>) {
+        self.idle_stop_secs
+            .store(after.map_or(0, |after| after.as_secs()), Ordering::Relaxed);
+    }
+
+    /// 调整 worker 的数学库线程数：记下来，worker 在运行就立即通知它（不为此启动 worker）。
+    pub async fn set_worker_threads(&self, threads: usize) {
+        let threads = threads.clamp(1, ai_worker_cpu_threads().max(1));
+        let previous = self.worker_threads.swap(threads, Ordering::Relaxed);
+        if previous == threads {
+            return;
+        }
+        if let Some(port) = self.running_port().await {
+            if let Err(error) = self.client.throttle(port, threads).await {
+                tracing::debug!(%error, threads, "AI worker throttle failed");
+            }
+        }
+    }
+
+    async fn running_port(&self) -> Option<u16> {
+        let inner = self.inner.lock().await;
+        if inner.child.is_some() && inner.status.status == "ready" {
+            inner.status.port
+        } else {
+            None
+        }
+    }
+
+    fn touch(&self) {
+        if let Ok(mut last_used) = self.last_used.lock() {
+            *last_used = Instant::now();
+        }
+    }
+
+    /// 空闲超过设定时间就停掉 worker，释放显存和内存。返回是否停了。
+    async fn stop_if_idle(&self) -> bool {
+        let limit = self.idle_stop_secs.load(Ordering::Relaxed);
+        if limit == 0 || self.running_port().await.is_none() {
+            return false;
+        }
+        let idle = self
+            .last_used
+            .lock()
+            .map(|last_used| last_used.elapsed())
+            .unwrap_or_default();
+        if idle < Duration::from_secs(limit) {
+            return false;
+        }
+        tracing::info!(
+            idle_secs = idle.as_secs(),
+            "AI worker idle, stopping to free VRAM"
+        );
+        self.stop().await.is_ok()
     }
 
     pub async fn status(&self) -> AppResult<AiWorkerStatus> {
@@ -249,6 +327,12 @@ impl AiSupervisor {
             let mut interval = tokio::time::interval(HEALTH_INTERVAL);
             loop {
                 interval.tick().await;
+                if self.stop_if_idle().await {
+                    if let Ok(status) = self.status().await {
+                        let _ = app.emit("ai:worker_status", status);
+                    }
+                    continue;
+                }
                 match self.health_tick().await {
                     Ok(Some(status)) => {
                         let _ = app.emit("ai:worker_status", status);
@@ -431,6 +515,10 @@ impl AiSupervisor {
         }
 
         let mut child = command.spawn()?;
+        // 主进程崩溃 / 被结束时连带结束 worker，免得残留进程继续占显存（docs/11 R1-4）。
+        if !crate::utils::job_object::bind_child(&child) {
+            tracing::debug!("AI worker not bound to job object");
+        }
         let pid = child.id();
         let stdout = child
             .stdout
@@ -463,6 +551,10 @@ impl AiSupervisor {
         spawn_drain_lines(lines, "stdout");
 
         let health = self.client.health(port).await?;
+        let threads = self.worker_threads.load(Ordering::Relaxed);
+        if let Err(error) = self.client.throttle(port, threads).await {
+            tracing::debug!(%error, threads, "AI worker throttle failed");
+        }
         Ok(StartedWorker {
             child,
             port,
@@ -542,6 +634,11 @@ fn python_candidate(program: PathBuf, label: &str) -> StartCandidate {
         ],
         label: label.to_string(),
     }
+}
+
+/// 设置项 `aiIdleStopMinutes` → 空闲停止时长（0 = 不自动停）。
+pub fn idle_stop_after(minutes: u16) -> Option<Duration> {
+    (minutes > 0).then(|| Duration::from_secs(u64::from(minutes) * 60))
 }
 
 /// AI worker 的 CPU 数学库线程数上限：逻辑核数的一半，夹在 [1, 4]。

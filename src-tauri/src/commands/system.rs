@@ -1,10 +1,12 @@
 use std::sync::Arc;
+use std::time::Instant;
 
-use tauri::State;
+use tauri::{AppHandle, Emitter, State};
 
 use crate::config::Profile;
 use crate::db::Pool;
 use crate::migrations;
+use crate::services::resource_governor::{self, GovernorStatus, ResourceGovernor};
 use crate::services::startup_gate::StartupGate;
 
 #[tauri::command]
@@ -25,6 +27,26 @@ pub fn ui_perf(label: String, t_ms: f64) {
 #[tauri::command]
 pub fn frontend_ready(gate: State<'_, Arc<StartupGate>>) {
     gate.release();
+}
+
+/// 后台处理的负载模式、生效档位和预算（docs/11 §5.5 状态栏）。之后的变化走 `system:load_mode` 事件。
+#[tauri::command]
+pub fn governor_status(governor: State<'_, Arc<ResourceGovernor>>) -> GovernorStatus {
+    governor.status()
+}
+
+/// 手动覆盖：`auto` | `fullSpeed` | `pause1h` | `pauseUntilRestart`。
+#[tauri::command]
+pub fn governor_set_override(
+    app: AppHandle,
+    governor: State<'_, Arc<ResourceGovernor>>,
+    mode: String,
+) -> Result<GovernorStatus, String> {
+    let (override_mode, pause_for) = resource_governor::parse_override(&mode)
+        .ok_or_else(|| format!("未知的后台处理模式：{mode}"))?;
+    let status = governor.set_override(override_mode, pause_for, Instant::now());
+    let _ = app.emit("system:load_mode", status.clone());
+    Ok(status)
 }
 
 /// 返回数据库基本状态：路径不可达时报错，可达则返回 schema 版本与连接池容量。

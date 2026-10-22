@@ -245,7 +245,7 @@ button {
 .app-footer {
   grid-column: 1 / -1;
   display: grid;
-  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr) minmax(260px, 1fr);
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.2fr) minmax(260px, 1fr) auto;
   gap: 12px;
   align-items: center;
   min-width: 0;
@@ -1175,7 +1175,7 @@ body {
 }
 
 .app-footer {
-  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.35fr) minmax(260px, 1fr);
+  grid-template-columns: minmax(160px, 0.8fr) minmax(220px, 1.35fr) minmax(260px, 1fr) auto;
   border-top-color: var(--border-soft);
   background: rgba(251, 252, 255, 0.86);
   color: var(--text-muted);
@@ -1819,6 +1819,97 @@ body {
   text-overflow: ellipsis;
   white-space: nowrap;
   font-size: 12px;
+}
+
+.settings-hint {
+  margin: 0 0 4px;
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+/* 底部状态栏：后台处理档位与手动覆盖（docs/11 §5.5） */
+.load-mode {
+  position: relative;
+  min-width: 0;
+}
+
+.load-mode__button {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 320px;
+  height: 22px;
+  padding: 0 8px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: transparent;
+  color: var(--text-muted);
+  font-size: 12px;
+  white-space: nowrap;
+  text-overflow: ellipsis;
+  cursor: pointer;
+}
+
+.load-mode__button:hover {
+  color: var(--text);
+  background: var(--panel-soft);
+}
+
+.load-mode__dot {
+  flex: 0 0 auto;
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: #d99a20;
+}
+
+.load-mode__button--full .load-mode__dot {
+  background: #12b76a;
+}
+
+.load-mode__button--paused .load-mode__dot {
+  background: #98a2b3;
+}
+
+.load-mode__menu {
+  position: absolute;
+  right: 0;
+  bottom: calc(100% + 6px);
+  z-index: 1000;
+  display: flex;
+  min-width: 240px;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--panel-raised);
+  box-shadow: var(--shadow);
+}
+
+.load-mode__menu button {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 2px;
+  padding: 6px 10px;
+  border: 0;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--text);
+  text-align: left;
+  cursor: pointer;
+}
+
+.load-mode__menu button span {
+  color: var(--text-muted);
+  font-size: 11px;
+}
+
+.load-mode__menu button:hover,
+.load-mode__menu button.is-selected {
+  background: var(--panel-soft);
 }
 
 .settings-error,

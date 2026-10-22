@@ -631,6 +631,8 @@ fn emit_scan_error(task: &ScanRootTask, error: String, file: Option<String>) {
 }
 
 fn probe_image(path: &Path) -> ImageProbe {
+    // 读图头 / EXIF 进后台模式（docs/11 R1-3）；写库的事务不在这里，仍是普通优先级。
+    let _bg = crate::utils::priority::BackgroundPriorityGuard::enter();
     let mut probe = ImageProbe::default();
     // 只打开一次文件：尺寸与 EXIF 复用同一句柄（网络盘上省一次往返，见 docs/09 P2-5）。
     let file = match File::open(path) {

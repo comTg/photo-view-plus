@@ -436,6 +436,13 @@ impl AiPipeline {
         if !settings.ai_enabled {
             return Ok(());
         }
+        // GPU 任务暂停（使用中 / 全屏 / 手动暂停）时不投递，也不唤醒 worker；已投递的在闸门前等。
+        if matches!(
+            self.supervisor.gpu_gate().policy(),
+            crate::services::resource_governor::GpuPolicy::Paused
+        ) {
+            return Ok(());
+        }
         let clip_model = settings.ai_clip_model;
         let text_model = settings.ai_text_model;
         // 先看有没有待处理的图：没有就别去唤醒（启动）Python worker。
@@ -619,6 +626,10 @@ impl TextEmbedBatchTask {
         if ctx.is_cancelled() {
             return Ok(());
         }
+        let gate = self.supervisor.gpu_gate();
+        let Some(_gpu) = gate.acquire(&ctx.cancellation_token()).await else {
+            return Ok(());
+        };
         // 运行时再读描述：投递之后描述可能又被更新，记录的指纹要对应真正编码的文本。
         let items = {
             let conn = self.pool.get()?;
@@ -694,6 +705,11 @@ impl EmbedBatchTask {
         if ctx.is_cancelled() {
             return Ok(());
         }
+        // 资源治理：使用中 / 全屏时暂停，短暂离开时按占空比冷却（docs/11 §5.2）。
+        let gate = self.supervisor.gpu_gate();
+        let Some(_gpu) = gate.acquire(&ctx.cancellation_token()).await else {
+            return Ok(());
+        };
         let request_items = {
             let conn = self.pool.get()?;
             images_repo::ready_thumb_hashes(&conn, &self.image_ids)?
@@ -759,6 +775,10 @@ impl TagBatchTask {
         if ctx.is_cancelled() {
             return Ok(());
         }
+        let gate = self.supervisor.gpu_gate();
+        let Some(_gpu) = gate.acquire(&ctx.cancellation_token()).await else {
+            return Ok(());
+        };
         let items = self.load_items()?;
         if items.is_empty() {
             return Ok(());

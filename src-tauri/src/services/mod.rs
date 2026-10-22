@@ -8,6 +8,7 @@ pub mod hash_service;
 pub mod memora_import_service;
 pub mod ocr_service;
 pub mod phash_service;
+pub mod resource_governor;
 pub mod scan_service;
 pub mod search_index_service;
 pub mod search_service;

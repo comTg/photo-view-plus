@@ -17,6 +17,7 @@ use crate::db::Pool;
 use crate::error::AppResult;
 use crate::queue::{Priority, Task, TaskContext};
 use crate::repo::images_repo;
+use crate::utils::priority::BackgroundPriorityGuard;
 use crate::utils::read_gate;
 
 const READ_BUFFER: usize = 4 * 1024 * 1024;
@@ -71,7 +72,12 @@ fn compute(task: BlakeHashTask, ctx: TaskContext) -> AppResult<()> {
         return Ok(());
     }
     let token = ctx.cancellation_token();
-    let hash = match hash_file(&task.full_path, &token) {
+    // 读整个文件 + 哈希：后台模式（压低 CPU 与 I/O 优先级）。写库在守卫之外。
+    let hashed = {
+        let _bg = BackgroundPriorityGuard::enter();
+        hash_file(&task.full_path, &token)
+    };
+    let hash = match hashed {
         Ok(Some(hash)) => hash,
         Ok(None) => return Ok(()), // 被取消
         Err(error) => {

@@ -186,6 +186,12 @@ export interface AppSettings {
   faceEnabled: boolean;
   gpsEnabled: boolean;
   fileWatcherEnabled: boolean;
+  /** 多少分钟没有键盘鼠标输入算"空闲"，后台全速（docs/11 §5.1）。 */
+  idleThresholdMinutes: number;
+  /** 使用电脑时也运行 AI（默认关：使用中暂停 GPU 任务）。 */
+  aiWhileActive: boolean;
+  /** 大模型只在空闲时运行（默认开）。 */
+  vlmIdleOnly: boolean;
 }
 
 export interface AppSettingsPatch {
@@ -203,6 +209,40 @@ export interface AppSettingsPatch {
   faceEnabled?: boolean;
   gpsEnabled?: boolean;
   fileWatcherEnabled?: boolean;
+  idleThresholdMinutes?: number;
+  aiWhileActive?: boolean;
+  vlmIdleOnly?: boolean;
+}
+
+// ===== 后台资源治理（docs/11 R2） =====
+
+/** 观测到的负载模式。 */
+export type LoadMode = "active" | "away" | "idle" | "busy";
+/** 叠加手动覆盖之后实际生效的档位。 */
+export type LoadTier = LoadMode | "paused";
+export type LoadOverrideMode = "auto" | "fullSpeed" | "paused";
+/** 状态栏菜单的选项（`governor_set_override` 的参数）。 */
+export type LoadOverrideChoice = "auto" | "fullSpeed" | "pause1h" | "pauseUntilRestart";
+
+export interface LoadBudget {
+  batchThumbnails: number;
+  networkReads: number;
+  /** null = 不限。 */
+  hashTasks: number | null;
+  gpu: "paused" | "duty" | "unlimited";
+  gpuDutyCycle: number | null;
+  vlm: boolean;
+  workerThreads: number;
+}
+
+export interface GovernorStatus {
+  mode: LoadMode;
+  tier: LoadTier;
+  overrideMode: LoadOverrideMode;
+  /** 暂停截止时间（Unix 秒）；暂停且为 null = 暂停到重启。 */
+  pausedUntil: number | null;
+  idleSecs: number;
+  budget: LoadBudget;
 }
 
 // ===== MVP4 高级管理 =====

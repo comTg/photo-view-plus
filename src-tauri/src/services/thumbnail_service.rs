@@ -8,49 +8,20 @@ use image::codecs::webp::WebPEncoder;
 use image::{DynamicImage, ImageEncoder};
 use sha1::{Digest, Sha1};
 use tauri::{AppHandle, Emitter};
-use tokio::sync::{mpsc, Semaphore};
+use tokio::sync::mpsc;
 
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Scheduler, Task, TaskContext};
 use crate::repo::images_repo;
+use crate::utils::limiter::AdjustableLimiter;
+use crate::utils::priority::BackgroundPriorityGuard;
 use crate::utils::read_gate;
 
 const THUMB_SIZE: u32 = 256;
 const MAX_THUMBNAIL_CPU_WORKERS: usize = 6;
 
-static THUMBNAIL_CPU_SEMAPHORE: OnceLock<Arc<Semaphore>> = OnceLock::new();
-
-/// 把当前线程切到 Windows「后台模式」：同时压低 CPU 与磁盘 I/O 优先级，让缩略图
-/// 解码/读原图不和前台 UI 抢资源（即使 CPU 跑满，前台也不卡）。Drop 时恢复。
-/// 非 Windows 上是空操作。必须在执行重活的那个线程上调用（spawn_blocking 线程）。
-struct BackgroundPriorityGuard;
-
-impl BackgroundPriorityGuard {
-    fn enter() -> Self {
-        #[cfg(windows)]
-        unsafe {
-            use windows_sys::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_BEGIN,
-            };
-            // 失败极少见（如线程已在后台模式），失败就按普通优先级跑，不影响正确性。
-            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_BEGIN);
-        }
-        Self
-    }
-}
-
-impl Drop for BackgroundPriorityGuard {
-    fn drop(&mut self) {
-        #[cfg(windows)]
-        unsafe {
-            use windows_sys::Win32::System::Threading::{
-                GetCurrentThread, SetThreadPriority, THREAD_MODE_BACKGROUND_END,
-            };
-            let _ = SetThreadPriority(GetCurrentThread(), THREAD_MODE_BACKGROUND_END);
-        }
-    }
-}
+static THUMBNAIL_CPU_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
 
 #[derive(Clone)]
 pub struct ThumbnailTask {
@@ -151,12 +122,10 @@ impl ThumbnailTask {
     }
 
     async fn run_inner(&self, ctx: TaskContext) -> AppResult<()> {
-        let semaphore = thumbnail_cpu_semaphore();
+        let limiter = thumbnail_cpu_limiter();
         let cancellation = ctx.cancellation_token();
         let permit = tokio::select! {
-            permit = semaphore.acquire_owned() => {
-                permit.map_err(|_| AppError::Other("缩略图 CPU 限流器已关闭".to_string()))?
-            }
+            permit = limiter.acquire() => permit,
             _ = cancellation.cancelled() => return Ok(()),
         };
         // 读原图前再过一道原图读取闸门：网络盘并发读过高会拖死 NAS（红线 6）。
@@ -229,14 +198,19 @@ fn thumbnail_cpu_limit_for(logical_cpus: usize) -> usize {
     }
 }
 
-fn thumbnail_cpu_semaphore() -> Arc<Semaphore> {
-    THUMBNAIL_CPU_SEMAPHORE
+fn thumbnail_cpu_limiter() -> Arc<AdjustableLimiter> {
+    THUMBNAIL_CPU_LIMITER
         .get_or_init(|| {
             let limit = thumbnail_cpu_limit();
             tracing::info!(limit, "thumbnail CPU worker limit configured");
-            Arc::new(Semaphore::new(limit))
+            AdjustableLimiter::new(limit)
         })
         .clone()
+}
+
+/// 资源治理器按负载模式调整批量缩略图并发（docs/11 §5.2），不超过机器的 CPU 上限。
+pub fn set_batch_limit(limit: usize) {
+    thumbnail_cpu_limiter().set_limit(limit.clamp(1, thumbnail_cpu_limit()));
 }
 
 /// 启动时把仍处于 pending 的缩略图重新入队（P0）。覆盖"扫描被中断后缩略图卡在生成中"

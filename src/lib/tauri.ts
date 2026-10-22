@@ -29,11 +29,13 @@ import type {
   Face,
   FaceCluster,
   FaceStatus,
+  GovernorStatus,
   ImageAnalysis,
   ImagePage,
   ImageQueryParams,
   ImageRecord,
   ImageTag,
+  LoadOverrideChoice,
   MapImagePoint,
   MemoraImportOutcome,
   OcrStatus,
@@ -58,6 +60,14 @@ import type {
 // 系统
 export async function ping(): Promise<string> {
   return invoke<string>("ping");
+}
+
+export async function governorStatus(): Promise<GovernorStatus> {
+  return invoke<GovernorStatus>("governor_status");
+}
+
+export async function governorSetOverride(mode: LoadOverrideChoice): Promise<GovernorStatus> {
+  return invoke<GovernorStatus>("governor_set_override", { mode });
 }
 
 export async function dbStatus(): Promise<DbStatus> {

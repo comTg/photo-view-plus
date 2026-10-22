@@ -5,8 +5,9 @@ import os
 from typing import Any
 
 from fastapi import APIRouter, Request
+from pydantic import BaseModel, Field
 
-from ..runtime import diagnostics, runtime_summary
+from ..runtime import diagnostics, runtime_summary, set_math_threads
 
 router = APIRouter()
 
@@ -30,6 +31,16 @@ def ready() -> dict[str, str]:
 @router.get("/diagnostics")
 def diagnostics_route() -> dict[str, Any]:
     return diagnostics()
+
+
+class ThrottleRequest(BaseModel):
+    threads: int = Field(ge=1, le=64)
+
+
+@router.post("/runtime/throttle")
+def throttle(request: ThrottleRequest) -> dict[str, Any]:
+    """资源治理器按负载档位调整数学库线程数（docs/11 §5.3）：使用中 1、短暂离开 2、空闲 4。"""
+    return {"threads": set_math_threads(request.threads)}
 
 
 @router.post("/shutdown")

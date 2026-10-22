@@ -1,4 +1,5 @@
 import { RootList } from "@/components/sidebar/RootList";
+import { LoadModeControl } from "@/components/system/LoadModeControl";
 import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useRoots } from "@/hooks/useRoots";
 import { useTauriEvent } from "@/lib/events";
@@ -1760,6 +1761,7 @@ export default function App() {
           aiStatus={aiStatus}
           aiPipeline={aiPipeline}
         />
+        <LoadModeControl onError={setToast} />
       </footer>
       {toast && (
         <button type="button" className="toast" onClick={() => setToast(null)}>
@@ -3164,6 +3166,45 @@ function SettingsView({
               </select>
             </label>
           </div>
+        </section>
+
+        <section className="settings-panel">
+          <div className="settings-panel__title">
+            <h2>后台处理</h2>
+          </div>
+          <p className="settings-hint muted">
+            用电脑时后台自动降速，离开后全速补回进度；全屏看视频或玩游戏时让出全部资源。底部状态栏可以临时切换"全速"或"暂停"。
+          </p>
+          <div className="settings-field-grid">
+            <label className="settings-field">
+              <span>空闲判定（分钟无操作）</span>
+              <input
+                type="number"
+                min={1}
+                max={60}
+                value={settings.idleThresholdMinutes}
+                onChange={(event) =>
+                  void onPatch({ idleThresholdMinutes: Number(event.target.value) })
+                }
+              />
+            </label>
+          </div>
+          <label className="settings-toggle">
+            <span>使用电脑时也运行 AI（按 30% 占空比）</span>
+            <input
+              type="checkbox"
+              checked={settings.aiWhileActive}
+              onChange={(event) => void onPatch({ aiWhileActive: event.target.checked })}
+            />
+          </label>
+          <label className="settings-toggle">
+            <span>大模型只在空闲时运行</span>
+            <input
+              type="checkbox"
+              checked={settings.vlmIdleOnly}
+              onChange={(event) => void onPatch({ vlmIdleOnly: event.target.checked })}
+            />
+          </label>
         </section>
 
         <section className="settings-panel">
