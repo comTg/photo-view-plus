@@ -1,7 +1,7 @@
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use async_trait::async_trait;
 use tauri::Emitter;
@@ -13,7 +13,7 @@ use crate::queue::{Priority, Scheduler, Task, TaskContext};
 use crate::repo::images_repo::{self, ImageRecord};
 use crate::repo::lancedb_repo::{EmbeddingRecord, LanceDbRepo};
 use crate::repo::tags_repo::{self, NewTagScore};
-use crate::services::ai_client::{ClipEmbedItem, TaggerItem};
+use crate::services::ai_client::{ClipEmbedItem, ClipEmbedResponse, TaggerItem, TaggerResponse};
 use crate::services::ai_supervisor::AiSupervisor;
 use crate::services::settings_service;
 use crate::services::startup_gate::StartupGate;
@@ -21,6 +21,10 @@ use crate::services::thumbnail_service;
 
 const EMBED_BATCH: i64 = 32;
 const TAG_BATCH: i64 = 16;
+/// worker 返回兜底结果（缺 torch / open_clip / RAM 权重时的哈希伪向量、占位标签）后，
+/// 多久内不再投递同类批次。兜底结果一律不入库，投了也是白算；worker 换进程时提前解除，
+/// 见 [`FallbackBackoff`]。
+pub const FALLBACK_BACKOFF: Duration = Duration::from_secs(10 * 60);
 /// 前端迟迟不发「首屏就绪」信号时，后台 AI 最多等多久才自行放行。
 ///
 /// 正常路径必须等 `frontend_ready`：worker 首启会 import torch/CUDA、加载模型，是开机
@@ -43,6 +47,151 @@ pub struct AiPipeline {
 struct AiPipelineState {
     embed_inflight: HashSet<i64>,
     tag_inflight: HashSet<i64>,
+    embed_fallback: FallbackBackoff,
+    tag_fallback: FallbackBackoff,
+}
+
+/// 某类 AI 批次（embedding / 打标签）的兜底退避状态。
+///
+/// worker 在缺依赖或缺权重时不会报错，而是返回 `fallback: true` 的伪结果；这些结果不入库、
+/// 图片保持 pending，等真模型可用后再算。为了不每 2 秒投一批必然白算的任务，收到兜底响应后
+/// 暂停投递 [`FALLBACK_BACKOFF`]。是否兜底取决于 worker 进程（模型在进程内只加载一次），
+/// 所以 worker 换了进程（重启、用户修好环境后手动重启）就立即解除，不必等满窗口。
+#[derive(Debug, Default)]
+pub struct FallbackBackoff {
+    until: Option<Instant>,
+    worker_pid: Option<u32>,
+    warned: bool,
+}
+
+impl FallbackBackoff {
+    /// 记录一次兜底响应并开启退避窗口。返回 `true` 表示这是该 worker 进程第一次兜底，
+    /// 调用方据此只 warn 一次，而不是每次探测都刷日志。
+    pub fn record_fallback(&mut self, now: Instant, worker_pid: Option<u32>) -> bool {
+        let first_for_worker = !self.warned || self.worker_pid != worker_pid;
+        self.until = Some(now + FALLBACK_BACKOFF);
+        self.worker_pid = worker_pid;
+        self.warned = true;
+        first_for_worker
+    }
+
+    /// 收到真模型结果：清除退避；之后若再兜底会重新 warn。
+    pub fn record_real(&mut self) {
+        *self = Self::default();
+    }
+
+    /// 是否仍处于退避中：窗口未过期，且 worker 还是记录兜底时的那个进程。
+    pub fn is_active(&self, now: Instant, worker_pid: Option<u32>) -> bool {
+        self.until
+            .is_some_and(|until| now < until && self.worker_pid == worker_pid)
+    }
+}
+
+/// 一批 `/clip/embed` 响应的落库结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EmbedApplyOutcome {
+    /// 写入 LanceDB 并标记 ready 的条数。
+    pub stored: usize,
+    /// worker 报单条错误、标记 failed 的条数。
+    pub failed: usize,
+    /// worker 处于兜底模式：整批一条都没写（图片保持 pending）。
+    pub fallback: bool,
+}
+
+/// 一批 `/tagger/run` 响应的落库结果。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct TagApplyOutcome {
+    /// 写入标签并标记 ready 的图片数。
+    pub tagged: usize,
+    /// worker 报单条错误、标记 failed 的图片数。
+    pub failed: usize,
+    /// worker 处于兜底模式（占位标签）：整批一条都没写（图片保持 pending）。
+    pub fallback: bool,
+}
+
+/// 把 embedding 响应落库。兜底伪向量（`response.fallback == true`）**一律不写**：
+/// 不进 LanceDB、不改 `embedding_status`，图片保持 pending，真模型可用后会被重新拾取。
+/// 否则它们会被标成 ready，换成真模型后也永远不会重算。
+pub async fn apply_embed_response(
+    pool: &Pool,
+    vectors: &LanceDbRepo,
+    response: ClipEmbedResponse,
+    now: i64,
+) -> AppResult<EmbedApplyOutcome> {
+    if response.fallback {
+        return Ok(EmbedApplyOutcome {
+            fallback: true,
+            ..EmbedApplyOutcome::default()
+        });
+    }
+    let mut embeddings = Vec::new();
+    let mut failed = 0;
+    {
+        let conn = pool.get()?;
+        for item in response.items {
+            if let Some(vector) = item.embedding {
+                embeddings.push(EmbeddingRecord {
+                    image_id: item.id,
+                    model: response.model.clone(),
+                    embedding: vector,
+                    created_at: now,
+                });
+            } else {
+                images_repo::set_embedding_status(&conn, item.id, "failed")?;
+                failed += 1;
+            }
+        }
+    }
+    if !embeddings.is_empty() {
+        vectors.upsert_embeddings(&embeddings).await?;
+        let conn = pool.get()?;
+        for record in &embeddings {
+            images_repo::set_embedding_status(&conn, record.image_id, "ready")?;
+        }
+    }
+    Ok(EmbedApplyOutcome {
+        stored: embeddings.len(),
+        failed,
+        fallback: false,
+    })
+}
+
+/// 把打标签响应落库。兜底的占位标签（颜色启发式等，`response.fallback == true`）**一律不写**：
+/// 不动 `image_tags`、不改 `tag_status`，图片保持 pending，等真 tagger 可用后重打。
+pub fn apply_tag_response(
+    pool: &Pool,
+    response: TaggerResponse,
+    now: i64,
+) -> AppResult<TagApplyOutcome> {
+    if response.fallback {
+        return Ok(TagApplyOutcome {
+            fallback: true,
+            ..TagApplyOutcome::default()
+        });
+    }
+    let mut outcome = TagApplyOutcome::default();
+    let mut conn = pool.get()?;
+    for item in response.items {
+        if item.error.is_some() {
+            images_repo::set_tag_status(&conn, item.id, "failed")?;
+            outcome.failed += 1;
+            continue;
+        }
+        let tags = item
+            .tags
+            .into_iter()
+            .map(|tag| NewTagScore {
+                name: tag.name,
+                score: tag.score,
+                source: "ai".to_string(),
+                category: tag.category,
+            })
+            .collect::<Vec<_>>();
+        tags_repo::replace_image_tags(&mut conn, item.id, &tags, now)?;
+        images_repo::set_tag_status(&conn, item.id, "ready")?;
+        outcome.tagged += 1;
+    }
+    Ok(outcome)
 }
 
 impl AiPipeline {
@@ -131,15 +280,33 @@ impl AiPipeline {
         if embed_pending == 0 && tag_pending == 0 {
             return Ok(());
         }
+        // 兜底退避：worker 上次对这类任务返回的是伪结果（不入库），同一 worker 进程在窗口内
+        // 不再投递；两类都在退避中时也不去唤醒 worker。
+        let pid = worker_pid(&self.supervisor).await;
+        let (embed_backoff, tag_backoff) = {
+            let now = Instant::now();
+            match self.state.lock() {
+                Ok(state) => (
+                    state.embed_fallback.is_active(now, pid),
+                    state.tag_fallback.is_active(now, pid),
+                ),
+                Err(_) => (false, false),
+            }
+        };
+        let want_embed = embed_pending > 0 && !embed_backoff;
+        let want_tag = tag_pending > 0 && !tag_backoff;
+        if !want_embed && !want_tag {
+            return Ok(());
+        }
         // worker 未就绪（或正处于启动失败退避窗口内）就跳过本轮：
         // 否则会反复向队列投递必然失败的任务，刷满 "queue task failed"。
         if !self.supervisor.ensure_ready().await {
             return Ok(());
         }
-        if embed_pending > 0 {
+        if want_embed {
             self.enqueue_embedding_batch()?;
         }
-        if tag_pending > 0 {
+        if want_tag {
             self.enqueue_tag_batch()?;
         }
         Ok(())
@@ -253,29 +420,17 @@ impl EmbedBatchTask {
             })
             .collect();
         let response = self.supervisor.embed_images(request_items).await?;
-        let now = now_unix();
-        let mut embeddings = Vec::new();
-        let conn = self.pool.get()?;
-        for item in response.items {
-            if let Some(vector) = item.embedding {
-                embeddings.push(EmbeddingRecord {
-                    image_id: item.id,
-                    model: response.model.clone(),
-                    embedding: vector,
-                    created_at: now,
-                });
-            } else {
-                images_repo::set_embedding_status(&conn, item.id, "failed")?;
-            }
-        }
-        drop(conn);
-        if !embeddings.is_empty() {
-            self.vectors.upsert_embeddings(&embeddings).await?;
-            let conn = self.pool.get()?;
-            for record in &embeddings {
-                images_repo::set_embedding_status(&conn, record.image_id, "ready")?;
-            }
-        }
+        let model = response.model.clone();
+        let outcome = apply_embed_response(&self.pool, &self.vectors, response, now_unix()).await?;
+        track_fallback(
+            &self.supervisor,
+            &self.state,
+            |state| &mut state.embed_fallback,
+            outcome.fallback,
+            "embedding",
+            &model,
+        )
+        .await;
         Ok(())
     }
 
@@ -322,26 +477,17 @@ impl TagBatchTask {
             })
             .collect();
         let response = self.supervisor.tag_images(request_items).await?;
-        let now = now_unix();
-        let mut conn = self.pool.get()?;
-        for item in response.items {
-            if item.error.is_some() {
-                images_repo::set_tag_status(&conn, item.id, "failed")?;
-                continue;
-            }
-            let tags = item
-                .tags
-                .into_iter()
-                .map(|tag| NewTagScore {
-                    name: tag.name,
-                    score: tag.score,
-                    source: "ai".to_string(),
-                    category: tag.category,
-                })
-                .collect::<Vec<_>>();
-            tags_repo::replace_image_tags(&mut conn, item.id, &tags, now)?;
-            images_repo::set_tag_status(&conn, item.id, "ready")?;
-        }
+        let model = response.model.clone();
+        let outcome = apply_tag_response(&self.pool, response, now_unix())?;
+        track_fallback(
+            &self.supervisor,
+            &self.state,
+            |state| &mut state.tag_fallback,
+            outcome.fallback,
+            "tagging",
+            &model,
+        )
+        .await;
         Ok(())
     }
 
@@ -395,6 +541,43 @@ fn take_not_inflight(
         }
     }
     selected
+}
+
+/// 按本批响应是否兜底更新退避状态；同一 worker 进程只 warn 一次。
+async fn track_fallback(
+    supervisor: &AiSupervisor,
+    state: &Arc<Mutex<AiPipelineState>>,
+    backoff: impl Fn(&mut AiPipelineState) -> &mut FallbackBackoff,
+    fallback: bool,
+    kind: &'static str,
+    model: &str,
+) {
+    if !fallback {
+        if let Ok(mut state) = state.lock() {
+            backoff(&mut state).record_real();
+        }
+        return;
+    }
+    let pid = worker_pid(supervisor).await;
+    let first = state
+        .lock()
+        .map(|mut state| backoff(&mut state).record_fallback(Instant::now(), pid))
+        .unwrap_or(false);
+    if first {
+        tracing::warn!(
+            kind,
+            model,
+            backoff_secs = FALLBACK_BACKOFF.as_secs(),
+            "AI worker 处于兜底模式（缺 torch/open_clip 或模型权重），本批结果不入库、图片保持 pending；\
+             暂停投递该类任务，worker 重启或退避到期后再试"
+        );
+    } else {
+        tracing::debug!(kind, model, "AI worker 仍处于兜底模式，继续退避");
+    }
+}
+
+async fn worker_pid(supervisor: &AiSupervisor) -> Option<u32> {
+    supervisor.status().await.ok().and_then(|status| status.pid)
 }
 
 fn clear_inflight(

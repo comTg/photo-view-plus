@@ -53,6 +53,7 @@ fn upsert_and_query_roundtrip() {
             offset: Some(0),
             limit: Some(10),
             include_deleted: Some(false),
+            tag_names_all: None,
         },
     )
     .expect("query");
@@ -121,4 +122,99 @@ fn timeline_buckets_groups_by_month_with_samples() {
     // 桶内按时间倒序：较新的 06-20 应排在前。
     assert_eq!(buckets[1].samples[0].id, june_newer);
     assert_eq!(buckets[1].samples[1].id, june_older);
+}
+
+#[test]
+fn query_filters_by_all_tags_in_sql_with_matching_total() {
+    use photo_view_plus_lib::repo::tags_repo::{self, NewTagScore};
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = photo_view_plus_lib::db::open(&dir.path().join("app.sqlite")).expect("db");
+    let mut conn = pool.get().expect("conn");
+    let root = roots_repo::insert(
+        &conn,
+        &NewRoot {
+            path: dir.path().to_string_lossy().to_string(),
+            label: None,
+            root_type: "local".to_string(),
+        },
+        1,
+    )
+    .expect("root");
+
+    // 300 张，mtime 递减；带"猫"的是最后 20 张（默认排序的第 280 行以后），其中 5 张还带"沙发"。
+    let mut ids = Vec::new();
+    for i in 0..300_i64 {
+        let image = NewImageMetadata {
+            root_id: root.id,
+            rel_path: format!("IMG_{i:04}.jpg"),
+            filename: format!("IMG_{i:04}.jpg"),
+            extension: "jpg".to_string(),
+            size_bytes: 10,
+            mtime: 10_000 - i,
+            width: None,
+            height: None,
+            orientation: None,
+            taken_at: None,
+            gps_lat: None,
+            gps_lng: None,
+            camera_make: None,
+            camera_model: None,
+        };
+        ids.push(
+            images_repo::upsert_scanned_image(&conn, &image, 1)
+                .expect("insert")
+                .image_id(),
+        );
+    }
+    let score = |name: &str| NewTagScore {
+        name: name.to_string(),
+        score: 0.9,
+        source: "ai".to_string(),
+        category: None,
+    };
+    for (index, id) in ids.iter().enumerate().skip(280) {
+        let tags = if index >= 295 {
+            vec![score("猫"), score("沙发")]
+        } else {
+            vec![score("猫")]
+        };
+        tags_repo::replace_image_tags(&mut conn, *id, &tags, 1).expect("tags");
+    }
+
+    let params = |tags: &[&str], limit: i64| ImageQueryParams {
+        tag_names_all: Some(tags.iter().map(|tag| tag.to_string()).collect()),
+        limit: Some(limit),
+        ..ImageQueryParams::default()
+    };
+
+    let page = images_repo::query(&conn, &params(&["猫"], 5)).expect("query");
+    assert_eq!(page.total, 20, "total 与分页用同一个标签过滤");
+    assert_eq!(
+        page.items.iter().map(|image| image.id).collect::<Vec<_>>(),
+        ids[280..285].to_vec()
+    );
+
+    let both = images_repo::query(&conn, &params(&["猫", "沙发", " 沙发 "], 50)).expect("query");
+    assert_eq!(both.total, 5, "AND 语义；名字去空白、去重");
+    assert_eq!(
+        both.items.iter().map(|image| image.id).collect::<Vec<_>>(),
+        ids[295..300].to_vec()
+    );
+
+    // 空标签列表 = 不过滤。
+    let unfiltered = images_repo::query(&conn, &params(&[], 1)).expect("query");
+    assert_eq!(unfiltered.total, 300);
+
+    // 搜索预过滤用的候选集：与 query 同一套 WHERE，返回全部 id。
+    let candidates = images_repo::filtered_ids(&conn, &params(&["沙发"], 1)).expect("filtered ids");
+    assert_eq!(candidates, ids[295..300].to_vec());
+
+    // JSON 里不带 tagNamesAll 的旧请求照常反序列化。
+    let legacy: ImageQueryParams =
+        serde_json::from_str(r#"{"rootIds":[1],"limit":10}"#).expect("legacy json");
+    assert!(legacy.tag_names_all.is_none());
+    let with_tags: ImageQueryParams =
+        serde_json::from_str(r#"{"tagNamesAll":["猫"]}"#).expect("json");
+    assert_eq!(with_tags.tag_names_all, Some(vec!["猫".to_string()]));
 }

@@ -10,6 +10,7 @@ use arrow_array::{
 };
 use arrow_schema::{DataType, Field, Schema, SchemaRef};
 use futures::TryStreamExt;
+use lancedb::expr::{col, lit};
 use lancedb::query::{ExecutableQuery, QueryBase};
 use serde::Serialize;
 
@@ -111,6 +112,23 @@ impl LanceDbRepo {
     }
 
     pub async fn top_k(&self, query: &[f32], limit: usize) -> AppResult<Vec<VectorSearchHit>> {
+        self.top_k_filtered(query, limit, None).await
+    }
+
+    /// 近邻检索，按距离从近到远返回。
+    ///
+    /// `candidate_ids` 为 `Some` 时只在这些 image_id 里检索：条件经 `only_if_expr` 交给
+    /// LanceDB，而 lancedb 的查询默认是 **prefilter**（`QueryRequest::prefilter = true`，
+    /// 除非显式调用 `postfilter()`）——先按条件筛行，再只在筛出的行里算距离取 top-k。
+    /// 所以候选集之外的向量再近也挤不掉候选集里的结果。候选集为空时直接返回空，不访问 LanceDB。
+    ///
+    /// 条件用 DataFusion 表达式（`image_id IN (...)`）而非 SQL 字符串，候选集上万时也不用拼接、解析大段 SQL。
+    pub async fn top_k_filtered(
+        &self,
+        query: &[f32],
+        limit: usize,
+        candidate_ids: Option<&[i64]>,
+    ) -> AppResult<Vec<VectorSearchHit>> {
         if query.len() != CLIP_DIMS as usize {
             return Err(AppError::Other(format!(
                 "CLIP embedding 维度错误：expected {}, got {}",
@@ -118,18 +136,23 @@ impl LanceDbRepo {
                 query.len()
             )));
         }
+        if limit == 0 || candidate_ids.is_some_and(|ids| ids.is_empty()) {
+            return Ok(Vec::new());
+        }
         let table = match self.open_table().await {
             Ok(table) => table,
             Err(_) => return Ok(Vec::new()),
         };
-        let stream = table
+        let mut vector_query = table
             .query()
             .nearest_to(query)
             .map_err(lance_error)?
-            .limit(limit)
-            .execute()
-            .await
-            .map_err(lance_error)?;
+            .limit(limit);
+        if let Some(ids) = candidate_ids {
+            let list = ids.iter().map(|id| lit(*id)).collect::<Vec<_>>();
+            vector_query = vector_query.only_if_expr(col("image_id").in_list(list, false));
+        }
+        let stream = vector_query.execute().await.map_err(lance_error)?;
         let batches = stream.try_collect::<Vec<_>>().await.map_err(lance_error)?;
         let mut out = Vec::new();
         for batch in &batches {

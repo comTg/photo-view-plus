@@ -1,7 +1,6 @@
 use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use tauri::{AppHandle, Emitter, State};
 
@@ -9,9 +8,10 @@ use crate::config::AppPaths;
 use crate::db::Pool;
 use crate::repo::images_repo::{self, ImageRecord};
 use crate::repo::tags_repo::{self, ImageTag, NewTagScore, Tag};
-use crate::services::ai_client::{ClipEmbedItem, TaggerItem};
+use crate::services::ai_client::TaggerItem;
 use crate::services::ai_pipeline::{AiPipeline, AiPipelineStatus};
 use crate::services::ai_supervisor::{AiSupervisor, AiWorkerStatus};
+use crate::services::search_service::{self, AiSearchArgs, AiSearchResult, WorkerQueryEncoder};
 use crate::services::thumbnail_service;
 
 #[tauri::command]
@@ -64,22 +64,6 @@ pub async fn ai_model_download(
         .map_err(|e| e.to_string())
 }
 
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiSearchArgs {
-    pub text: String,
-    pub root_ids: Option<Vec<i64>>,
-    pub limit: Option<usize>,
-}
-
-#[derive(Debug, Serialize)]
-#[serde(rename_all = "camelCase")]
-pub struct AiSearchResult {
-    pub image: ImageRecord,
-    pub score: f32,
-    pub source: String,
-}
-
 #[tauri::command]
 pub async fn ai_search(
     pool: State<'_, Pool>,
@@ -87,275 +71,10 @@ pub async fn ai_search(
     supervisor: State<'_, Arc<AiSupervisor>>,
     args: AiSearchArgs,
 ) -> Result<Vec<AiSearchResult>, String> {
-    let limit = args.limit.unwrap_or(40).clamp(1, 200);
-    let filter = parse_search_filter(&args.text);
-    if filter.text.is_empty() && filter.tags.is_empty() && !filter.has_sql_filter() {
-        return Ok(Vec::new());
-    }
-    let root_filter = args
-        .root_ids
-        .as_ref()
-        .filter(|ids| !ids.is_empty())
-        .map(|ids| {
-            ids.iter()
-                .copied()
-                .collect::<std::collections::HashSet<_>>()
-        });
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    let tag_filter_ids = tagged_image_ids(&conn, &filter.tags).map_err(|e| e.to_string())?;
-    drop(conn);
-
-    if filter.text.is_empty() {
-        let conn = pool.get().map_err(|e| e.to_string())?;
-        let page = images_repo::query(
-            &conn,
-            &images_repo::ImageQueryParams {
-                root_ids: args.root_ids.clone(),
-                formats: filter.formats.clone(),
-                q: None,
-                size_min: filter.size_min,
-                size_max: filter.size_max,
-                taken_from: None,
-                taken_to: None,
-                has_gps: None,
-                sort: None,
-                offset: Some(0),
-                limit: Some((limit * 5) as i64),
-                include_deleted: Some(false),
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        return Ok(page
-            .items
-            .into_iter()
-            .filter(|image| {
-                tag_filter_ids
-                    .as_ref()
-                    .map(|ids| ids.contains(&image.id))
-                    .unwrap_or(true)
-                    && image_matches_filter(image, &filter)
-            })
-            .take(limit)
-            .map(|image| AiSearchResult {
-                image,
-                score: 1.0,
-                source: "dsl".to_string(),
-            })
-            .collect());
-    }
-
-    let encoded = supervisor
-        .encode_text(filter.text.clone())
+    let encoder = WorkerQueryEncoder::new(supervisor.inner().clone());
+    search_service::search(&pool, &pipeline.vectors(), &encoder, &args)
         .await
-        .map_err(|e| e.to_string())?;
-    let hits = pipeline
-        .vectors()
-        .top_k(&encoded.embedding, limit * 5)
-        .await
-        .map_err(|e| e.to_string())?;
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    let ids = hits.iter().map(|hit| hit.image_id).collect::<Vec<_>>();
-    let details = images_repo::get_details_by_ids(&conn, &ids).map_err(|e| e.to_string())?;
-    let score_by_id = hits
-        .iter()
-        .map(|hit| (hit.image_id, hit.score))
-        .collect::<std::collections::HashMap<_, _>>();
-    let mut results = details
-        .into_iter()
-        .filter(|image| {
-            root_filter
-                .as_ref()
-                .map(|filter| filter.contains(&image.root_id))
-                .unwrap_or(true)
-                && tag_filter_ids
-                    .as_ref()
-                    .map(|ids| ids.contains(&image.id))
-                    .unwrap_or(true)
-                && image_matches_filter(image, &filter)
-        })
-        .map(|image| AiSearchResult {
-            score: *score_by_id.get(&image.id).unwrap_or(&0.0),
-            image,
-            source: "semantic".to_string(),
-        })
-        .take(limit)
-        .collect::<Vec<_>>();
-
-    if results.is_empty() {
-        let page = images_repo::query(
-            &conn,
-            &images_repo::ImageQueryParams {
-                root_ids: args.root_ids,
-                formats: filter.formats,
-                q: Some(filter.text),
-                size_min: filter.size_min,
-                size_max: filter.size_max,
-                taken_from: None,
-                taken_to: None,
-                has_gps: None,
-                sort: None,
-                offset: Some(0),
-                limit: Some(limit as i64),
-                include_deleted: Some(false),
-            },
-        )
-        .map_err(|e| e.to_string())?;
-        results = page
-            .items
-            .into_iter()
-            .map(|image| AiSearchResult {
-                image,
-                score: 0.5,
-                source: "filename".to_string(),
-            })
-            .collect();
-    }
-
-    Ok(results)
-}
-
-#[derive(Debug, Default)]
-struct SearchFilter {
-    text: String,
-    tags: Vec<String>,
-    formats: Option<Vec<String>>,
-    size_min: Option<i64>,
-    size_max: Option<i64>,
-}
-
-impl SearchFilter {
-    fn has_sql_filter(&self) -> bool {
-        self.formats.as_ref().is_some_and(|items| !items.is_empty())
-            || self.size_min.is_some()
-            || self.size_max.is_some()
-    }
-}
-
-fn parse_search_filter(input: &str) -> SearchFilter {
-    let mut filter = SearchFilter::default();
-    let mut text = Vec::new();
-    let mut formats = Vec::new();
-
-    for token in input.split_whitespace() {
-        if let Some(tag) = token.strip_prefix('#').filter(|tag| !tag.is_empty()) {
-            filter.tags.push(tag.to_string());
-            continue;
-        }
-        if let Some(format) = token
-            .strip_prefix("format:")
-            .filter(|value| !value.is_empty())
-        {
-            formats.push(format.trim_start_matches('.').to_ascii_lowercase());
-            continue;
-        }
-        if let Some(size) = token.strip_prefix("size:") {
-            apply_size_filter(&mut filter, size);
-            continue;
-        }
-        text.push(token.to_string());
-    }
-
-    if !formats.is_empty() {
-        filter.formats = Some(formats);
-    }
-    filter.text = text.join(" ").trim().to_string();
-    filter
-}
-
-fn apply_size_filter(filter: &mut SearchFilter, token: &str) {
-    let (op, raw) = if let Some(rest) = token.strip_prefix(">=") {
-        (">=", rest)
-    } else if let Some(rest) = token.strip_prefix("<=") {
-        ("<=", rest)
-    } else if let Some(rest) = token.strip_prefix('>') {
-        (">", rest)
-    } else if let Some(rest) = token.strip_prefix('<') {
-        ("<", rest)
-    } else {
-        return;
-    };
-    let Some(bytes) = parse_size_bytes(raw) else {
-        return;
-    };
-    match op {
-        ">" | ">=" => filter.size_min = Some(bytes),
-        "<" | "<=" => filter.size_max = Some(bytes),
-        _ => {}
-    }
-}
-
-fn parse_size_bytes(raw: &str) -> Option<i64> {
-    let upper = raw.trim().to_ascii_uppercase();
-    let (number, multiplier) = if let Some(value) = upper.strip_suffix("GB") {
-        (value, 1024.0 * 1024.0 * 1024.0)
-    } else if let Some(value) = upper.strip_suffix("MB") {
-        (value, 1024.0 * 1024.0)
-    } else if let Some(value) = upper.strip_suffix("KB") {
-        (value, 1024.0)
-    } else {
-        (upper.as_str(), 1.0)
-    };
-    number
-        .parse::<f64>()
-        .ok()
-        .filter(|value| value.is_finite() && *value >= 0.0)
-        .map(|value| (value * multiplier).round() as i64)
-}
-
-fn image_matches_filter(image: &ImageRecord, filter: &SearchFilter) -> bool {
-    if let Some(formats) = filter.formats.as_ref() {
-        if !formats
-            .iter()
-            .any(|format| format.eq_ignore_ascii_case(&image.extension))
-        {
-            return false;
-        }
-    }
-    if let Some(size_min) = filter.size_min {
-        if image.size_bytes < size_min {
-            return false;
-        }
-    }
-    if let Some(size_max) = filter.size_max {
-        if image.size_bytes > size_max {
-            return false;
-        }
-    }
-    true
-}
-
-fn tagged_image_ids(
-    conn: &rusqlite::Connection,
-    tag_names: &[String],
-) -> crate::AppResult<Option<std::collections::HashSet<i64>>> {
-    if tag_names.is_empty() {
-        return Ok(None);
-    }
-    let placeholders = std::iter::repeat("?")
-        .take(tag_names.len())
-        .collect::<Vec<_>>()
-        .join(",");
-    let sql = format!(
-        "SELECT it.image_id
-         FROM image_tags it
-         JOIN tags t ON t.id = it.tag_id
-         WHERE t.name IN ({placeholders})
-         GROUP BY it.image_id
-         HAVING COUNT(DISTINCT t.name) = ?"
-    );
-    let mut values = tag_names
-        .iter()
-        .cloned()
-        .map(rusqlite::types::Value::Text)
-        .collect::<Vec<_>>();
-    values.push(rusqlite::types::Value::Integer(tag_names.len() as i64));
-    let mut stmt = conn.prepare(&sql)?;
-    let rows = stmt.query_map(rusqlite::params_from_iter(values.iter()), |row| row.get(0))?;
-    let mut ids = std::collections::HashSet::new();
-    for row in rows {
-        ids.insert(row?);
-    }
-    Ok(Some(ids))
+        .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -367,42 +86,17 @@ pub async fn ai_search_by_image(
     image_id: i64,
     limit: Option<usize>,
 ) -> Result<Vec<AiSearchResult>, String> {
-    let limit = limit.unwrap_or(40).clamp(1, 200);
-    let vectors = pipeline.vectors();
-    let embedding = match vectors
-        .embedding_for_image(image_id)
-        .await
-        .map_err(|e| e.to_string())?
-    {
-        Some(vector) if !vector.is_empty() => vector,
-        _ => embed_single_image(&pool, &paths, &supervisor, image_id)
-            .await
-            .map_err(|e| e.to_string())?,
-    };
-    let hits = vectors
-        .top_k(&embedding, limit + 1)
-        .await
-        .map_err(|e| e.to_string())?;
-    let ids = hits
-        .iter()
-        .map(|hit| hit.image_id)
-        .filter(|id| *id != image_id)
-        .take(limit)
-        .collect::<Vec<_>>();
-    let conn = pool.get().map_err(|e| e.to_string())?;
-    let details = images_repo::get_details_by_ids(&conn, &ids).map_err(|e| e.to_string())?;
-    let score_by_id = hits
-        .iter()
-        .map(|hit| (hit.image_id, hit.score))
-        .collect::<std::collections::HashMap<_, _>>();
-    Ok(details
-        .into_iter()
-        .map(|image| AiSearchResult {
-            score: *score_by_id.get(&image.id).unwrap_or(&0.0),
-            image,
-            source: "image".to_string(),
-        })
-        .collect())
+    let encoder = WorkerQueryEncoder::new(supervisor.inner().clone());
+    search_service::search_by_image(
+        &pool,
+        &pipeline.vectors(),
+        &encoder,
+        &paths.thumbs_dir,
+        image_id,
+        limit,
+    )
+    .await
+    .map_err(|e| e.to_string())
 }
 
 #[tauri::command]
@@ -426,6 +120,10 @@ pub async fn ai_tag_image(
         }])
         .await
         .map_err(|e| e.to_string())?;
+    // 兜底占位标签（颜色启发式）不入库：写进去并标 ready 后，装好真 tagger 也不会再重打。
+    if response.fallback {
+        return Err("AI 标签模型未加载（worker 处于兜底模式），未写入占位标签".to_string());
+    }
     let item = response
         .items
         .into_iter()
@@ -517,39 +215,6 @@ pub fn ai_images_by_tag(
         offset,
         limit,
     })
-}
-
-async fn embed_single_image(
-    pool: &Pool,
-    paths: &AppPaths,
-    supervisor: &AiSupervisor,
-    image_id: i64,
-) -> crate::AppResult<Vec<f32>> {
-    let detail = {
-        let conn = pool.get()?;
-        images_repo::get_detail(&conn, image_id)?
-            .ok_or_else(|| crate::AppError::Other(format!("image not found: {image_id}")))?
-    };
-    let thumb_path = thumb_path_for(paths, &detail).map_err(crate::AppError::Other)?;
-    let response = supervisor
-        .embed_images(vec![ClipEmbedItem {
-            id: image_id,
-            thumb_path,
-        }])
-        .await?;
-    let result = response
-        .items
-        .into_iter()
-        .next()
-        .ok_or_else(|| crate::AppError::Other("AI worker returned no embedding".to_string()))?;
-    let vector = result.embedding.ok_or_else(|| {
-        crate::AppError::Other(
-            result
-                .error
-                .unwrap_or_else(|| "AI worker embedding failed".to_string()),
-        )
-    })?;
-    Ok(vector)
 }
 
 fn thumb_path_for(paths: &AppPaths, image: &ImageRecord) -> Result<String, String> {

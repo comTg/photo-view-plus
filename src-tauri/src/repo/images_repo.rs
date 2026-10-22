@@ -97,7 +97,7 @@ pub struct MapImagePoint {
     pub lng: f64,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Default, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct ImageQueryParams {
     pub root_ids: Option<Vec<i64>>,
@@ -112,6 +112,10 @@ pub struct ImageQueryParams {
     pub offset: Option<i64>,
     pub limit: Option<i64>,
     pub include_deleted: Option<bool>,
+    /// 标签过滤（AND）：图片必须**同时**带有列出的全部标签（按 `tags.name` 精确匹配）。
+    /// 在 SQL 里过滤，排序 / 分页 / `total` 都基于过滤后的结果；`None` 或空列表表示不过滤。
+    #[serde(default)]
+    pub tag_names_all: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -196,6 +200,22 @@ pub fn query(conn: &Connection, params: &ImageQueryParams) -> AppResult<ImagePag
         offset,
         limit,
     })
+}
+
+/// 满足 `params` 过滤条件的全部图片 id（忽略 `sort` / `offset` / `limit`，按 id 升序）。
+///
+/// 供搜索预过滤用：先在 SQL 里算出候选集（目录 / 格式 / 大小 / 标签 / 删除状态），
+/// 再交给向量库只在候选集内检索，避免"先取全局 top-k 再在内存里筛"漏结果。
+pub fn filtered_ids(conn: &Connection, params: &ImageQueryParams) -> AppResult<Vec<i64>> {
+    let (where_sql, values) = build_where(params);
+    let sql = format!("SELECT i.id FROM images i {where_sql} ORDER BY i.id");
+    let mut stmt = conn.prepare(&sql)?;
+    let rows = stmt.query_map(params_from_iter(values.iter()), |row| row.get(0))?;
+    let mut ids = Vec::new();
+    for row in rows {
+        ids.push(row?);
+    }
+    Ok(ids)
 }
 
 pub fn get_detail(conn: &Connection, id: i64) -> AppResult<Option<ImageRecord>> {
@@ -1151,6 +1171,29 @@ fn build_where(params: &ImageQueryParams) -> (String, Vec<Value>) {
         }
     }
 
+    let tag_names = distinct_tag_names(params.tag_names_all.as_deref());
+    if !tag_names.is_empty() {
+        // AND 语义：命中全部标签。名字先去重，否则 `#猫 #猫` 会要求 COUNT = 2 而永远不命中。
+        // 子查询走 tags(name) 唯一索引 + idx_image_tags_tag(tag_id, ...)。
+        clauses.push(format!(
+            "i.id IN (
+                 SELECT it.image_id
+                 FROM image_tags it
+                 JOIN tags t ON t.id = it.tag_id
+                 WHERE t.name IN ({})
+                 GROUP BY it.image_id
+                 HAVING COUNT(DISTINCT t.name) = ?
+             )",
+            placeholders(tag_names.len())
+        ));
+        values.extend(
+            tag_names
+                .iter()
+                .map(|name| Value::Text((*name).to_string())),
+        );
+        values.push(Value::Integer(tag_names.len() as i64));
+    }
+
     if clauses.is_empty() {
         (String::new(), values)
     } else {
@@ -1243,6 +1286,18 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
     })
 }
 
+/// 去掉空白、去重后的标签名（保持首次出现的顺序）。
+fn distinct_tag_names(names: Option<&[String]>) -> Vec<&str> {
+    let mut out: Vec<&str> = Vec::new();
+    for name in names.unwrap_or_default() {
+        let name = name.trim();
+        if !name.is_empty() && !out.contains(&name) {
+            out.push(name);
+        }
+    }
+    out
+}
+
 fn placeholders(count: usize) -> String {
     std::iter::repeat("?")
         .take(count)
@@ -1323,6 +1378,7 @@ mod tests {
                 offset: Some(0),
                 limit: Some(10),
                 include_deleted: Some(false),
+                tag_names_all: None,
             },
         )
         .expect("query");

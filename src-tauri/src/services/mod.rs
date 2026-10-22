@@ -8,6 +8,7 @@ pub mod hash_service;
 pub mod ocr_service;
 pub mod phash_service;
 pub mod scan_service;
+pub mod search_service;
 pub mod settings_service;
 pub mod startup_gate;
 pub mod thumbnail_service;
