@@ -22,7 +22,8 @@ from ..vlm.prompts import PROMPT_VERSION, SCHEMA, SYSTEM_PROMPT, user_text
 router = APIRouter(prefix="/vlm", tags=["vlm"])
 
 TEMPERATURE = 0.2
-MAX_TOKENS = 600
+# 输出平均约 250 token；文档类图片内容多、模型又会缩进排版 JSON，600 偶尔截断（全量运行里遇到过）。
+MAX_TOKENS = 1024
 REQUEST_TIMEOUT = 240.0
 
 
