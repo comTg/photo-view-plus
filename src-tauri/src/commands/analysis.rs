@@ -14,7 +14,9 @@ use crate::repo::analysis_repo::{self, ImageAnalysis};
 use crate::repo::tags_repo;
 use crate::services::analysis_pipeline::{self, AnalysisPipeline, AnalysisProgress};
 use crate::services::memora_import_service::{self, MemoraImportOutcome};
+use crate::services::night_service::{self, NightTaskStatus};
 use crate::services::search_index_service;
+use crate::services::settings_service;
 use crate::services::vlm_supervisor::VlmPaths;
 
 #[derive(Debug, Clone, Serialize)]
@@ -146,6 +148,69 @@ pub fn tags_cleanup_ram(pool: State<'_, Pool>) -> Result<RamTagStatus, String> {
         "RAM-plus tags cleaned up"
     );
     ram_tag_status(&conn).map_err(|e| e.to_string())
+}
+
+fn night_status(app: &tauri::AppHandle, settings: &crate::config::AppSettings) -> NightTaskStatus {
+    let task_name = night_service::task_name(&app.config().identifier);
+    NightTaskStatus {
+        enabled: settings.night_analyze_enabled,
+        registered: night_service::task_registered(&task_name),
+        task_name,
+        start_hour: settings.night_start_hour,
+        end_hour: settings.night_end_hour,
+        exe: std::env::current_exe()
+            .map(|exe| exe.display().to_string())
+            .unwrap_or_default(),
+    }
+}
+
+/// 夜间自动分析（docs/10 A6b）：设置与计划任务的注册状态。
+#[tauri::command]
+pub async fn night_task_status(
+    app: tauri::AppHandle,
+    paths: State<'_, AppPaths>,
+) -> Result<NightTaskStatus, String> {
+    let settings = settings_service::read(&paths).map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || night_status(&app, &settings))
+        .await
+        .map_err(|e| e.to_string())
+}
+
+/// 打开 / 关闭夜间自动分析，同时注册 / 删除计划任务（只在用户操作时调用）。
+#[tauri::command]
+pub async fn night_task_set(
+    app: tauri::AppHandle,
+    paths: State<'_, AppPaths>,
+    enabled: bool,
+    start_hour: u8,
+    end_hour: u8,
+) -> Result<NightTaskStatus, String> {
+    if start_hour % 24 == end_hour % 24 {
+        return Err("开始和结束时间不能相同".to_string());
+    }
+    let settings = settings_service::update(
+        &paths,
+        crate::config::AppSettingsPatch {
+            night_analyze_enabled: Some(enabled),
+            night_start_hour: Some(start_hour),
+            night_end_hour: Some(end_hour),
+            ..crate::config::AppSettingsPatch::default()
+        },
+    )
+    .map_err(|e| e.to_string())?;
+    tokio::task::spawn_blocking(move || {
+        let task = night_service::task_name(&app.config().identifier);
+        if enabled {
+            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+            night_service::register_task(&task, &exe, settings.night_start_hour)
+                .map_err(|e| e.to_string())?;
+        } else {
+            night_service::unregister_task(&task).map_err(|e| e.to_string())?;
+        }
+        Ok(night_status(&app, &settings))
+    })
+    .await
+    .map_err(|e| e.to_string())?
 }
 
 /// 立即卸载本应用启动的 llama-server（复用的外部服务不受影响）。返回是否卸载了。

@@ -148,6 +148,11 @@ pub struct AppSettings {
     pub vlm_parallel: u8,
     /// 送模型的图片长边（1024 同 memora；768 更快）。
     pub vlm_long_edge: u16,
+    /// 夜间自动分析（docs/10 A6b）：打开时注册 Windows 计划任务，每天在窗口开始时运行后台分析。
+    pub night_analyze_enabled: bool,
+    /// 夜间窗口 `[开始, 结束)`，本地时间的整点；默认 3–7 点，避开 memora 02:00 的任务。
+    pub night_start_hour: u8,
+    pub night_end_hour: u8,
 }
 
 impl Default for AppSettings {
@@ -177,6 +182,9 @@ impl Default for AppSettings {
             vlm_mmproj_path: String::new(),
             vlm_parallel: 4,
             vlm_long_edge: 1024,
+            night_analyze_enabled: false,
+            night_start_hour: 3,
+            night_end_hour: 7,
         }
     }
 }
@@ -207,6 +215,9 @@ pub struct AppSettingsPatch {
     pub vlm_mmproj_path: Option<String>,
     pub vlm_parallel: Option<u8>,
     pub vlm_long_edge: Option<u16>,
+    pub night_analyze_enabled: Option<bool>,
+    pub night_start_hour: Option<u8>,
+    pub night_end_hour: Option<u8>,
 }
 
 impl AppSettings {
@@ -306,6 +317,15 @@ impl AppSettings {
         }
         if let Some(long_edge) = patch.vlm_long_edge {
             self.vlm_long_edge = long_edge.clamp(512, 1536);
+        }
+        if let Some(enabled) = patch.night_analyze_enabled {
+            self.night_analyze_enabled = enabled;
+        }
+        if let Some(hour) = patch.night_start_hour {
+            self.night_start_hour = hour.min(23);
+        }
+        if let Some(hour) = patch.night_end_hour {
+            self.night_end_hour = hour.min(23);
         }
     }
 }

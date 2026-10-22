@@ -355,7 +355,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 | A4 | 文本向量通道：worker `/text/embed`、LanceDB `image_text_emb_<model>`；跑 S4/S5 | A3、G1 | ✅ |
 | A5 | Chinese-CLIP：worker 图像模型可插拔、新表、全量重算、人脸维度解耦；跑 S1/S5，过 G2，写 ADR-008 | A1 | ✅ |
 | A6 | VLM 打标流水线：`llama-server` 监管、worker `/vlm/analyze`、`AnalysisPipeline`（受 docs/11 R2 调度）、进度界面；200 张样本过 G3 后再全量 | R2（docs/11）、G1 | ✅ G3 通过 |
-| A6b | 夜间定时：Windows 计划任务在 03:00 运行 `photo-view-plus.exe --background-analyze`（无窗口、单实例）；应用已经开着时交给正在运行的实例；07:00 前处理完或到点退出；与 memora 共用 8081 服务（§12） | A6 | ⬜ |
+| A6b | 夜间定时：Windows 计划任务在 03:00 运行 `photo-view-plus.exe --background-analyze`（无窗口、单实例）；应用已经开着时交给正在运行的实例；07:00 前处理完或到点退出；与 memora 共用 8081 服务（§12） | A6 | ✅ |
 | A7 | RAM-plus 下线：tagger 设置增加 `vlm`；VLM 覆盖率 ≥ 95% 后，经用户确认再清理旧的 `'ai'` 标签；标签云按类别分组 | A6 | ✅ |
 | A8 | 收尾：更新 docs/05、docs/08（ADR-008 / ADR-010）、设置页、测试 | 全部 | ⬜ |
 
@@ -541,6 +541,14 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
   - 跑 200 张样本：人工抽查标签与描述，测吞吐和显存峰值，同时跑 docs/11 的探针。
   - 长边 1024 和 768 各跑 30 张做对比。
 - **通过标准**：过 G3 后，在空闲时段全量运行。
+
+### A6b 夜间定时
+- **实测 / 备注**（2026-10-23 完成）：
+  - `run()` 先看命令行：带 `--background-analyze` 时不建窗口（release 版本身就是 windows 子系统，没有控制台），走 `services/night_service.rs` 的后台流程后退出；其余照常启动界面。数据目录按编译期的 identifier 算（`%LOCALAPPDATA%\<identifier>`），和界面版一致。
+  - 单实例：界面版启动时占一个会话内的命名互斥量；后台分析看到它就直接退出（"交给主程序"——主程序在电脑空闲时自己会跑大模型分析），运行中发现主程序打开了也会停止投递、等在途的完成后退出。后台分析自己也占一个，避免重复启动。进程退出时系统自动释放，不会残留。
+  - 后台流程：开启了大模型打标、且在夜间窗口内（设置 `nightStartHour` / `nightEndHour`，默认 3–7 点，支持跨午夜；`--force` 忽略窗口，排查用）才开始；用的是和界面版同一套治理器、llama-server 监管和分析流水线，所以半夜有人用电脑或全屏照样让路，8081 上 memora 的服务照样复用。顺带补算新描述的向量、刷新检索索引。处理完或到结束时间：停止投递、等在途完成（最多 60 秒）、卸载自己启动的模型、退出，日志写进主日志目录。
+  - 计划任务：设置页"大模型打标"一节的开关调用 `night_task_set`，用 `schtasks /Create /SC DAILY /ST <开始时间> /RL LIMITED` 注册（任务名正式版 `PhotoViewPlus\BackgroundAnalyze`，dev / test 带后缀互不覆盖；只在用户已登录时运行，能读到键盘鼠标状态），关掉时删除；`night_task_status` 显示是否已注册。不会自动注册，本机也没有替你打开。
+  - 测试：`tests/night_tests.rs` 5 个（时间窗口含跨午夜、任务名、schtasks 参数与带空格路径的引号、单实例互斥量）；另有一个 `#[ignore]` 用例真的注册一个指向不存在路径的临时任务、读回 XML 核对命令行再删掉，已手动跑过一次通过。用临时的 `LOCALAPPDATA` 冒烟运行 `--background-analyze --force`：建库、迁移、无待处理时 1.6 秒退出，没有窗口。
 
 ### A7 RAM-plus 下线
 - **实测 / 备注**（2026-10-23 完成）：

@@ -38,6 +38,18 @@ const STARTUP_DEFERRED_WORK_FALLBACK: Duration = Duration::from_secs(180);
 pub fn run() {
     let profile = config::Profile::from_env();
     init_tracing(profile);
+    let context = tauri::generate_context!();
+
+    // docs/10 A6b：计划任务在夜间以 --background-analyze 启动——不开窗口，只跑大模型打标。
+    if std::env::args().any(|arg| arg == services::night_service::BACKGROUND_ANALYZE_ARG) {
+        tracing::info!(?profile, "PhotoView+ background analyze");
+        services::night_service::run_background_analyze(
+            profile,
+            &context.config().identifier,
+            resolve_ai_worker_dir(),
+        );
+        return;
+    }
     tracing::info!(?profile, "PhotoView+ starting");
 
     tauri::Builder::default()
@@ -49,6 +61,10 @@ pub fn run() {
         .manage(profile)
         .setup(move |app| {
             set_profile_window_title(app.handle(), profile);
+            // 让夜间后台分析看得到主程序开着（它会把分析交给主程序）。进程退出时系统自动释放。
+            let gui_lock = utils::instance::InstanceLock::acquire(
+                &services::night_service::gui_mutex_name(&app.config().identifier),
+            );
 
             let data_dir = app.path().app_local_data_dir()?;
             let paths = config::AppPaths::from_data_dir(data_dir);
@@ -194,6 +210,7 @@ pub fn run() {
             app.manage(ai_pipeline);
             app.manage(governor);
             app.manage(analysis_pipeline);
+            app.manage(GuiInstance(gui_lock));
             app.manage(startup_gate);
             app.manage(watcher_service);
             Ok(())
@@ -264,6 +281,8 @@ pub fn run() {
             commands::analysis::vlm_server_stop,
             commands::analysis::tags_ram_status,
             commands::analysis::tags_cleanup_ram,
+            commands::analysis::night_task_status,
+            commands::analysis::night_task_set,
             commands::ocr::ocr_run,
             commands::ocr::ocr_status,
             commands::face::face_run,
@@ -284,9 +303,12 @@ pub fn run() {
             commands::backup::library_backup_export,
             commands::backup::library_backup_import,
         ])
-        .run(tauri::generate_context!())
+        .run(context)
         .unwrap_or_else(|error| eprintln!("error while running tauri application: {error}"));
 }
+
+/// 持有主程序的单实例标记，直到进程退出。
+struct GuiInstance(#[allow(dead_code)] Option<utils::instance::InstanceLock>);
 
 /// 把一个档位的预算下发到各个执行点（docs/11 §5.3）。只影响新任务，在途任务不打断。
 fn budget_applier(scheduler: queue::Scheduler, supervisor: Arc<AiSupervisor>) -> BudgetApplier {
@@ -387,7 +409,7 @@ fn spawn_deferred_thumbnail_requeue(
 /// 定位 ai-worker 目录。优先 `PVP_AI_WORKER_DIR`，否则在若干候选位置里取第一个真实存在的。
 /// 注意：`tauri dev` 下进程工作目录是 `src-tauri/`，所以必须向上找一级，
 /// 不能直接 `current_dir()/ai-worker`（那会落到不存在的 `src-tauri/ai-worker`）。
-fn resolve_ai_worker_dir() -> PathBuf {
+pub(crate) fn resolve_ai_worker_dir() -> PathBuf {
     if let Ok(dir) = std::env::var("PVP_AI_WORKER_DIR") {
         return PathBuf::from(dir);
     }
@@ -620,7 +642,7 @@ fn init_tracing(profile: config::Profile) {
         .try_init();
 }
 
-fn log_dir_for(profile: config::Profile) -> Option<PathBuf> {
+pub(crate) fn log_dir_for(profile: config::Profile) -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
     let identifier = match profile {
         config::Profile::Dev => "com.vetoer.photoviewplus.dev",

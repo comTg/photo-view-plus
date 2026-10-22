@@ -39,6 +39,7 @@ import type {
   LoadOverrideChoice,
   MapImagePoint,
   MemoraImportOutcome,
+  NightTaskStatus,
   OcrStatus,
   QueueStatus,
   RamTagStatus,
@@ -257,6 +258,18 @@ export async function tagsRamStatus(): Promise<RamTagStatus> {
 
 export async function tagsCleanupRam(): Promise<RamTagStatus> {
   return invoke<RamTagStatus>("tags_cleanup_ram");
+}
+
+export async function nightTaskStatus(): Promise<NightTaskStatus> {
+  return invoke<NightTaskStatus>("night_task_status");
+}
+
+export async function nightTaskSet(
+  enabled: boolean,
+  startHour: number,
+  endHour: number,
+): Promise<NightTaskStatus> {
+  return invoke<NightTaskStatus>("night_task_set", { enabled, startHour, endHour });
 }
 
 export async function vlmServerStop(): Promise<boolean> {

@@ -1,4 +1,5 @@
 pub mod bk_tree;
+pub mod instance;
 pub mod job_object;
 pub mod limiter;
 pub mod path_normalize;

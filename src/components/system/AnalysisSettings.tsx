@@ -3,6 +3,8 @@ import {
   analysisProgress,
   analysisRequeueOutdated,
   analysisRetryFailed,
+  nightTaskSet,
+  nightTaskStatus,
   tagsCleanupRam,
   tagsRamStatus,
   vlmDetectPaths,
@@ -12,11 +14,14 @@ import type {
   AnalysisProgress,
   AppSettings,
   AppSettingsPatch,
+  NightTaskStatus,
   RamTagStatus,
 } from "@/lib/tauri-types";
 import { ask } from "@tauri-apps/plugin-dialog";
 import { Eraser, RotateCcw, Search, Square } from "lucide-react";
 import { memo, useCallback, useEffect, useState } from "react";
+
+const HOURS = Array.from({ length: 24 }, (_, hour) => hour);
 
 const SERVER_TEXT: Record<string, string> = {
   stopped: "未加载",
@@ -135,6 +140,12 @@ export const AnalysisSettings = memo(function AnalysisSettings({
   const progress = useAnalysisProgress();
   const [busy, setBusy] = useState(false);
   const [ram, setRam] = useState<RamTagStatus | null>(null);
+  const [night, setNight] = useState<NightTaskStatus | null>(null);
+  useEffect(() => {
+    nightTaskStatus()
+      .then(setNight)
+      .catch((error) => console.warn("读取夜间分析状态失败", error));
+  }, []);
   // 覆盖率每分析 100 张刷新一次就够了。
   const analyzedBucket = Math.floor((progress?.analyzed ?? 0) / 100);
   // biome-ignore lint/correctness/useExhaustiveDependencies: analyzedBucket 只是刷新信号
@@ -171,6 +182,19 @@ export const AnalysisSettings = memo(function AnalysisSettings({
     });
 
   const total = progress ? progress.analyzed + progress.pending : 0;
+
+  const updateNight = (enabled: boolean, startHour: number, endHour: number) =>
+    run(async () => {
+      const next = await nightTaskSet(enabled, startHour, endHour);
+      setNight(next);
+      await onPatch({
+        nightAnalyzeEnabled: next.enabled,
+        nightStartHour: next.startHour,
+        nightEndHour: next.endHour,
+      });
+      if (!enabled) return "已关闭夜间自动分析，计划任务已删除";
+      return `已注册计划任务"${next.taskName}"：每天 ${next.startHour}:00 开始，${next.endHour}:00 前结束`;
+    });
 
   const cleanupRam = () =>
     run(async () => {
@@ -326,6 +350,65 @@ export const AnalysisSettings = memo(function AnalysisSettings({
       {progress?.lastError && progress.state !== "running" && (
         <p className="settings-warning">最近的错误：{progress.lastError}</p>
       )}
+      <div className="settings-inline-row">
+        <label className="settings-toggle settings-toggle--inline">
+          <span>夜间自动分析（Windows 计划任务）</span>
+          <input
+            type="checkbox"
+            checked={settings.nightAnalyzeEnabled}
+            disabled={busy || (!settings.vlmEnabled && !settings.nightAnalyzeEnabled)}
+            onChange={(event) =>
+              void updateNight(event.target.checked, settings.nightStartHour, settings.nightEndHour)
+            }
+          />
+        </label>
+        <span>
+          <select
+            value={settings.nightStartHour}
+            disabled={busy}
+            aria-label="开始时间"
+            onChange={(event) =>
+              void updateNight(
+                settings.nightAnalyzeEnabled,
+                Number(event.target.value),
+                settings.nightEndHour,
+              )
+            }
+          >
+            {HOURS.map((hour) => (
+              <option key={hour} value={hour}>
+                {hour}:00
+              </option>
+            ))}
+          </select>
+          {" 至 "}
+          <select
+            value={settings.nightEndHour}
+            disabled={busy}
+            aria-label="结束时间"
+            onChange={(event) =>
+              void updateNight(
+                settings.nightAnalyzeEnabled,
+                settings.nightStartHour,
+                Number(event.target.value),
+              )
+            }
+          >
+            {HOURS.map((hour) => (
+              <option key={hour} value={hour}>
+                {hour}:00
+              </option>
+            ))}
+          </select>
+        </span>
+      </div>
+      <p className="settings-hint muted">
+        {night?.registered
+          ? `已注册计划任务"${night.taskName}"。到点后在后台（无窗口）分析，处理完或到结束时间就退出；主程序开着时交给主程序。`
+          : settings.vlmEnabled
+            ? "打开后注册一个计划任务，每天在开始时间运行一次后台分析（只在电脑开机、已登录时运行）。默认 3:00–7:00，避开 memora 2:00 的任务。"
+            : "需要先启用大模型打标。"}
+      </p>
       {ram && ram.ramImages > 0 && (
         <div className="settings-inline-row">
           <span>

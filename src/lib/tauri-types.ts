@@ -202,6 +202,10 @@ export interface AppSettings {
   vlmParallel: number;
   /** 送模型的图片长边。 */
   vlmLongEdge: number;
+  /** 夜间自动分析（Windows 计划任务）。 */
+  nightAnalyzeEnabled: boolean;
+  nightStartHour: number;
+  nightEndHour: number;
 }
 
 export interface AppSettingsPatch {
@@ -228,6 +232,19 @@ export interface AppSettingsPatch {
   vlmMmprojPath?: string;
   vlmParallel?: number;
   vlmLongEdge?: number;
+  nightAnalyzeEnabled?: boolean;
+  nightStartHour?: number;
+  nightEndHour?: number;
+}
+
+/** 夜间自动分析：设置与计划任务注册状态（docs/10 A6b）。 */
+export interface NightTaskStatus {
+  enabled: boolean;
+  registered: boolean;
+  taskName: string;
+  startHour: number;
+  endHour: number;
+  exe: string;
 }
 
 // ===== 大模型打标（docs/10 A6） =====
