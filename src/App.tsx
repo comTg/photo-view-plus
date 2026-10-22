@@ -43,6 +43,7 @@ import {
   scanPause,
   scanResume,
   scanStart,
+  searchIndexRebuild,
   settingsGet,
   settingsUpdate,
   smartAlbumDelete,
@@ -148,6 +149,8 @@ export default function App() {
   const [aiSearchDraft, setAiSearchDraft] = useState("");
   const [aiResults, setAiResults] = useState<AiSearchResult[]>([]);
   const [aiResultsTitle, setAiResultsTitle] = useState("语义搜索");
+  /** 上一次搜索降级的原因（worker 启动中 / 兜底）；null 表示语义通道正常。 */
+  const [aiSearchDegraded, setAiSearchDegraded] = useState<string | null>(null);
   const [aiBusy, setAiBusy] = useState(false);
   const [ocrState, setOcrState] = useState<OcrStatus | null>(null);
   const [faceState, setFaceState] = useState<FaceStatus | null>(null);
@@ -216,6 +219,11 @@ export default function App() {
   const imageLoadingRef = useRef(false);
   const lastQueryKeyRef = useRef("");
   const requestSeqRef = useRef(0);
+  /** 降级返回的那次查询：worker 就绪（ai:worker_status → ready）后自动重跑一次。 */
+  const degradedSearchRef = useRef<{ text: string; rootIds?: number[] } | null>(null);
+  const runAiSearchRef = useRef<(text: string, rootIds?: number[]) => Promise<void>>(
+    async () => {},
+  );
   const rootsReloadRef = useRef(roots.reload);
 
   useEffect(() => {
@@ -397,7 +405,14 @@ export default function App() {
   }, []);
 
   const handleQueueStatus = useCallback((payload: QueueStatus) => setQueue(payload), []);
-  const handleAiStatus = useCallback((payload: AiWorkerStatus) => setAiStatus(payload), []);
+  const handleAiStatus = useCallback((payload: AiWorkerStatus) => {
+    setAiStatus(payload);
+    const pending = degradedSearchRef.current;
+    if (payload.status === "ready" && pending) {
+      degradedSearchRef.current = null;
+      void runAiSearchRef.current(pending.text, pending.rootIds);
+    }
+  }, []);
   const handleAiProgress = useCallback((payload: AiPipelineStatus) => setAiPipeline(payload), []);
 
   // 批量替换多张图片记录：仅在数组确有命中项时才产生新引用，空/无关数组返回 prev 让 React bail out，
@@ -1057,28 +1072,31 @@ export default function App() {
     }
   }, []);
 
-  const handleAiSearch = useCallback(async () => {
-    const text = aiSearchDraft.trim();
-    if (!text) {
-      setToast("请输入要搜索的自然语言");
-      return;
-    }
+  const runAiSearch = useCallback(async (text: string, rootIds?: number[]) => {
     setAiBusy(true);
     try {
-      const results = await aiSearch({
-        text,
-        rootIds: typeof selection === "number" ? [selection] : undefined,
-        limit: 80,
-      });
-      setAiResults(results);
-      setAiResultsTitle(`语义搜索：${text}`);
+      const response = await aiSearch({ text, rootIds, limit: 80 });
+      setAiResults(response.results);
+      setAiResultsTitle(`搜索：${text}`);
+      setAiSearchDegraded(response.degraded ? (response.degradedReason ?? "语义检索启动中") : null);
+      degradedSearchRef.current = response.degraded ? { text, rootIds } : null;
       setActiveView("ai");
     } catch (error) {
       setToast(`AI 搜索失败：${String(error)}`);
     } finally {
       setAiBusy(false);
     }
-  }, [aiSearchDraft, selection]);
+  }, []);
+  runAiSearchRef.current = runAiSearch;
+
+  const handleAiSearch = useCallback(async () => {
+    const text = aiSearchDraft.trim();
+    if (!text) {
+      setToast("请输入要搜索的自然语言");
+      return;
+    }
+    await runAiSearch(text, typeof selection === "number" ? [selection] : undefined);
+  }, [aiSearchDraft, runAiSearch, selection]);
 
   const handleAiSimilar = useCallback(
     async (imageId?: number) => {
@@ -1092,6 +1110,8 @@ export default function App() {
         const results = await aiSearchByImage(id, 80);
         setAiResults(results);
         setAiResultsTitle(`以图搜图：#${id}`);
+        setAiSearchDegraded(null);
+        degradedSearchRef.current = null;
         setActiveView("ai");
       } catch (error) {
         setToast(`以图搜图失败：${String(error)}`);
@@ -1147,6 +1167,20 @@ export default function App() {
     }
   }, [refreshAiState]);
 
+  const handleSearchIndexRebuild = useCallback(async () => {
+    setAiBusy(true);
+    try {
+      const outcome = await searchIndexRebuild();
+      setToast(
+        `检索索引已重建：${outcome.indexed.toLocaleString("zh-CN")} 张，用时 ${(outcome.elapsedMs / 1000).toFixed(1)} 秒`,
+      );
+    } catch (error) {
+      setToast(`重建检索索引失败：${String(error)}`);
+    } finally {
+      setAiBusy(false);
+    }
+  }, []);
+
   const handleAiDownloadModel = useCallback(
     async (modelKey: string) => {
       setAiBusy(true);
@@ -1172,9 +1206,12 @@ export default function App() {
           image,
           score: 1,
           source: "tag",
+          matchedBy: ["tag"],
         })),
       );
       setAiResultsTitle(`#${tag.name}`);
+      setAiSearchDegraded(null);
+      degradedSearchRef.current = null;
       setActiveView("ai");
     } catch (error) {
       setToast(`读取标签图片失败：${String(error)}`);
@@ -1468,6 +1505,7 @@ export default function App() {
             onAiDiagnostics={handleAiDiagnostics}
             onAiProcessPending={handleAiProcessPending}
             onAiRetagAll={handleAiRetagAll}
+            onSearchIndexRebuild={handleSearchIndexRebuild}
             onAiDownloadModel={handleAiDownloadModel}
           />
         ) : activeView === "dedup" ? (
@@ -1491,6 +1529,7 @@ export default function App() {
             tags={aiTags}
             results={aiResults}
             title={aiResultsTitle}
+            degradedReason={aiSearchDegraded}
             pipeline={aiPipeline}
             workerStatus={aiStatus}
             busy={aiBusy}
@@ -1759,6 +1798,7 @@ interface AiSearchViewProps {
   tags: AiTag[];
   results: AiSearchResult[];
   title: string;
+  degradedReason: string | null;
   pipeline: AiPipelineStatus | null;
   workerStatus: AiWorkerStatus | null;
   busy: boolean;
@@ -1836,6 +1876,7 @@ function AiSearchView({
   tags,
   results,
   title,
+  degradedReason,
   pipeline,
   workerStatus,
   busy,
@@ -1854,7 +1895,7 @@ function AiSearchView({
                 void onSearch();
               }
             }}
-            placeholder="输入自然语言，例如：海边日落、红色跑车、报错截图"
+            placeholder="输入中文描述，例如：海边的小孩、生日蛋糕、聊天记录截图"
           />
         </label>
         <button
@@ -1920,6 +1961,11 @@ function AiSearchView({
           <h1>{title}</h1>
           <span>{results.length.toLocaleString("zh-CN")} 张</span>
         </div>
+        {degradedReason && (
+          <p className="ai-search-degraded" title={degradedReason}>
+            语义检索启动中：先显示标签和文字的结果，就绪后自动刷新
+          </p>
+        )}
         {results.length === 0 ? (
           <EmptyState
             title="等待 AI 搜索"
@@ -1937,15 +1983,53 @@ function AiSearchView({
                   onPreviewImage={onPreviewImage}
                   onOpenContextMenu={onOpenContextMenu}
                 />
-                <span className="ai-result-score">
-                  {result.source} · {(result.score * 100).toFixed(0)}
-                </span>
+                <SearchResultMeta result={result} />
               </div>
             ))}
           </div>
         )}
       </div>
     </section>
+  );
+}
+
+const MATCH_LABELS: Record<string, string> = {
+  description: "描述",
+  text: "文字",
+  tag: "标签",
+  filename: "文件名",
+  semantic: "语义",
+  image: "画面",
+};
+
+function SearchResultMeta({ result }: { result: AiSearchResult }) {
+  const matched = result.matchedBy ?? [];
+  // 片段每段的 key 用它在整段文字里的起始位置。
+  let offset = 0;
+  const parts = (result.snippet ?? []).map((part) => {
+    const key = offset;
+    offset += part.text.length;
+    return { ...part, key };
+  });
+  return (
+    <>
+      <span className="ai-result-score">
+        {matched.length > 0
+          ? `命中：${matched.map((key) => MATCH_LABELS[key] ?? key).join(" / ")}`
+          : result.source}
+      </span>
+      {parts.length > 0 && (
+        <p className="ai-result-snippet">
+          {parts.map((part) =>
+            part.hit ? (
+              <mark key={part.key}>{part.text}</mark>
+            ) : (
+              <span key={part.key}>{part.text}</span>
+            ),
+          )}
+        </p>
+      )}
+    </>
   );
 }
 
@@ -2856,6 +2940,7 @@ function SettingsView({
   onAiDiagnostics,
   onAiProcessPending,
   onAiRetagAll,
+  onSearchIndexRebuild,
   onAiDownloadModel,
 }: {
   settings: AppSettings | null;
@@ -2869,6 +2954,7 @@ function SettingsView({
   onAiDiagnostics: () => Promise<void>;
   onAiProcessPending: () => Promise<void>;
   onAiRetagAll: () => Promise<void>;
+  onSearchIndexRebuild: () => Promise<void>;
   onAiDownloadModel: (modelKey: string) => Promise<void>;
 }) {
   if (!settings) {
@@ -3099,6 +3185,16 @@ function SettingsView({
               >
                 <Tags aria-hidden="true" />
                 清空并重打标签
+              </button>
+              <button
+                type="button"
+                className="toolbar-button"
+                disabled={aiBusy}
+                onClick={() => void onSearchIndexRebuild()}
+                title="按当前分词规则重建标签、描述、OCR 的全文检索索引（平时自动维护，无需手动）"
+              >
+                <RefreshCw aria-hidden="true" />
+                重建检索索引
               </button>
             </div>
           </div>

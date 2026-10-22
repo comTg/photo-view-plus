@@ -61,6 +61,8 @@ trash = { version = "5", default-features = false, features = ["coinit_multithre
 lancedb = "0.30"
 arrow-array = "58"
 arrow-schema = "58"
+# docs/10 A2：检索分词前做 NFKC 规范化（全角转半角等），与评测原型的 unicodedata.normalize 一致
+unicode-normalization = "0.1"
 
 # MVP4: advanced library management
 notify = "8"

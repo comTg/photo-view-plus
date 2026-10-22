@@ -5,6 +5,7 @@ use photo_view_plus_lib::config::{
     AppSettings, AppSettingsPatch, DEFAULT_CLIP_MODEL, LEGACY_CLIP_MODEL, SETTINGS_VERSION,
 };
 use photo_view_plus_lib::db::{self, Pool};
+use photo_view_plus_lib::migrations;
 use photo_view_plus_lib::repo::ai_jobs_repo::{
     self, JobResult, KIND_IMAGE_EMBEDDING, KIND_TEXT_EMBEDDING, MAX_ATTEMPTS, STATUS_FAILED,
     STATUS_READY,
@@ -218,21 +219,43 @@ fn recording_a_job_for_a_removed_image_is_ignored() {
 #[test]
 fn migration_0007_inherits_ready_legacy_clip_embeddings() {
     let dir = tempfile::tempdir().expect("tempdir");
-    let pool = open(&dir);
-    let (_, ids) = seed(&pool, 3);
-    {
-        // 模拟升级前的库：旧流水线把 embedding_status 标成 ready，还没有 ai_jobs 表。
-        let conn = pool.get().expect("conn");
+    let ids = {
+        // 模拟升级前（v6）的库：旧流水线把 embedding_status 标成 ready，还没有 ai_jobs 表。
+        let mut conn = rusqlite::Connection::open(dir.path().join("app.sqlite")).expect("open");
+        migrations::run_to(&mut conn, 6).expect("migrate to v6");
+        let root = roots_repo::insert(
+            &conn,
+            &NewRoot {
+                path: "D:/photos".to_string(),
+                label: None,
+                root_type: "local".to_string(),
+            },
+            1,
+        )
+        .expect("root")
+        .id;
+        let ids = (0..3)
+            .map(|i| {
+                let id = images_repo::upsert_scanned_image(
+                    &conn,
+                    &image(root, &format!("{i}.jpg"), 1),
+                    1,
+                )
+                .expect("insert")
+                .image_id();
+                images_repo::update_thumbnail_ready(&conn, id, &format!("hash{i}"), None, None)
+                    .expect("thumb");
+                id
+            })
+            .collect::<Vec<_>>();
         conn.execute(
             "UPDATE images SET embedding_status = 'ready' WHERE id IN (?1, ?2)",
             [ids[0], ids[1]],
         )
         .expect("status");
         images_repo::mark_deleted_by_id(&conn, ids[1], 5).expect("delete");
-        conn.execute_batch("DROP TABLE ai_jobs; DELETE FROM schema_version WHERE version >= 7;")
-            .expect("downgrade");
-    }
-    drop(pool);
+        ids
+    };
     let pool = open(&dir);
     assert_eq!(
         pending(&pool, OLD),

@@ -353,10 +353,51 @@ export interface AiSearchArgs {
   limit?: number;
 }
 
+/** 高亮片段的一段：hit 为 true 的是命中的查询词。 */
+export interface SnippetPart {
+  text: string;
+  hit: boolean;
+}
+
+/**
+ * 命中来源：description（描述）、text（画面文字 / OCR）、tag（标签）、filename（文件名）、
+ * semantic（描述语义，文本向量）、image（画面，图像向量）。
+ */
+export type SearchMatch = "description" | "text" | "tag" | "filename" | "semantic" | "image";
+
 export interface AiSearchResult {
   image: ImageRecord;
   score: number;
   source: string;
+  matchedBy?: SearchMatch[];
+  snippet?: SnippetPart[] | null;
+}
+
+export type SearchChannel = "tag" | "fullText" | "imageVector" | "textVector";
+
+export interface SearchChannelStat {
+  channel: SearchChannel;
+  hits: number;
+  elapsedMs: number;
+}
+
+export interface AiSearchResponse {
+  results: AiSearchResult[];
+  /** 语义通道没跑（worker 启动中 / 兜底），只返回了文字通道的结果。 */
+  degraded: boolean;
+  degradedReason: string | null;
+  channels: SearchChannelStat[];
+  elapsedMs: number;
+}
+
+export interface SearchIndexStatus {
+  indexed: number;
+  pending: number;
+}
+
+export interface SearchIndexRebuildOutcome {
+  indexed: number;
+  elapsedMs: number;
 }
 
 export interface AiTag {

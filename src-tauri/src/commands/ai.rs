@@ -11,7 +11,10 @@ use crate::repo::tags_repo::{self, ImageTag, NewTagScore, Tag};
 use crate::services::ai_client::TaggerItem;
 use crate::services::ai_pipeline::{AiPipeline, AiPipelineStatus};
 use crate::services::ai_supervisor::{AiSupervisor, AiWorkerStatus};
-use crate::services::search_service::{self, AiSearchArgs, AiSearchResult, WorkerQueryEncoder};
+use crate::services::search_index_service::{self, RebuildOutcome, SearchIndexStatus};
+use crate::services::search_service::{
+    self, AiSearchArgs, AiSearchResponse, AiSearchResult, WorkerQueryEncoder,
+};
 use crate::services::settings_service;
 use crate::services::thumbnail_service;
 
@@ -72,7 +75,7 @@ pub async fn ai_search(
     supervisor: State<'_, Arc<AiSupervisor>>,
     paths: State<'_, AppPaths>,
     args: AiSearchArgs,
-) -> Result<Vec<AiSearchResult>, String> {
+) -> Result<AiSearchResponse, String> {
     let encoder = query_encoder(&paths, &supervisor)?;
     search_service::search(&pool, &pipeline.vectors(), &encoder, &args)
         .await
@@ -175,6 +178,24 @@ pub async fn ai_retag_all(
     // 清理已成功；尽量立刻起一轮重打（worker 未就绪时后台流水线稍后也会处理）。
     let _ = pipeline.enqueue_pending().await;
     Ok(reset)
+}
+
+/// 全量重建检索全文索引（改了分词规则时用）。在 blocking 线程里跑，不占 async runtime。
+#[tauri::command]
+pub async fn search_index_rebuild(pool: State<'_, Pool>) -> Result<RebuildOutcome, String> {
+    let pool = pool.inner().clone();
+    tokio::task::spawn_blocking(move || {
+        let mut conn = pool.get().map_err(|e| e.to_string())?;
+        search_index_service::rebuild_all(&mut conn).map_err(|e| e.to_string())
+    })
+    .await
+    .map_err(|e| e.to_string())?
+}
+
+#[tauri::command]
+pub fn search_index_status(pool: State<'_, Pool>) -> Result<SearchIndexStatus, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    search_index_service::status(&conn).map_err(|e| e.to_string())
 }
 
 #[tauri::command]

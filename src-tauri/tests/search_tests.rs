@@ -22,8 +22,8 @@ use photo_view_plus_lib::services::ai_client::{
 };
 use photo_view_plus_lib::services::ai_pipeline::{self, FallbackBackoff, FALLBACK_BACKOFF};
 use photo_view_plus_lib::services::search_service::{
-    self, AiSearchArgs, AiSearchResult, QueryEncoder, SOURCE_DSL, SOURCE_FILENAME, SOURCE_IMAGE,
-    SOURCE_SEMANTIC,
+    self, AiSearchArgs, AiSearchResult, QueryEncoder, SOURCE_DSL, SOURCE_FILENAME, SOURCE_FUSION,
+    SOURCE_IMAGE,
 };
 use photo_view_plus_lib::{AppError, AppResult};
 use tempfile::TempDir;
@@ -271,7 +271,8 @@ async fn tag_only_query_finds_images_beyond_first_400_rows() {
     // 前端默认 limit=80：旧实现只取默认排序前 400 行再筛标签，这里会是 0 条。
     let results = search_service::search(&env.pool, &env.vectors, &encoder, &args("#猫", None, 80))
         .await
-        .expect("search");
+        .expect("search")
+        .results;
     assert_eq!(results.len(), 30, "570..600 全部 30 张都要找到");
     assert_eq!(
         ids_of(&results),
@@ -284,7 +285,8 @@ async fn tag_only_query_finds_images_beyond_first_400_rows() {
     // LIMIT 在 SQL 里、过滤之后生效：取到的是带标签图里最新的 10 张。
     let top10 = search_service::search(&env.pool, &env.vectors, &encoder, &args("#猫", None, 10))
         .await
-        .expect("search");
+        .expect("search")
+        .results;
     assert_eq!(ids_of(&top10), ids[570..580].to_vec());
 
     // 多标签是 AND；重复标签不影响结果。
@@ -295,7 +297,8 @@ async fn tag_only_query_finds_images_beyond_first_400_rows() {
         &args("#猫 #沙发", None, 80),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(ids_of(&both), ids[580..590].to_vec());
     let dup = search_service::search(
         &env.pool,
@@ -304,7 +307,8 @@ async fn tag_only_query_finds_images_beyond_first_400_rows() {
         &args("#猫 #猫", None, 80),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(dup.len(), 30);
 
     // 标签 + 元数据条件一起在 SQL 里过滤。
@@ -315,7 +319,8 @@ async fn tag_only_query_finds_images_beyond_first_400_rows() {
         &args("#猫 format:png", None, 80),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(ids_of(&png), ids[595..600].to_vec());
 
     // 目录过滤：另一个目录里同标签的图不出现。
@@ -329,7 +334,8 @@ async fn tag_only_query_finds_images_beyond_first_400_rows() {
         &args("#猫", Some(vec![root]), 200),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(scoped.len(), 30);
     assert!(!id_set(&scoped).contains(&other_ids[0]));
 
@@ -341,7 +347,8 @@ async fn tag_only_query_finds_images_beyond_first_400_rows() {
         &args("#不存在", None, 80),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert!(none.is_empty());
 }
 
@@ -387,10 +394,11 @@ async fn semantic_search_with_filters_is_not_crowded_out_by_global_top_k() {
     let global =
         search_service::search(&env.pool, &env.vectors, &encoder, &args("sunset", None, 40))
             .await
-            .expect("search");
+            .expect("search")
+            .results;
     assert_eq!(global.len(), 40);
     assert!(global.iter().all(|result| result.image.root_id == noise));
-    assert_sources(&global, SOURCE_SEMANTIC);
+    assert_sources(&global, SOURCE_FUSION);
 
     // 选中目标目录：旧实现先取全局前 200 再按目录筛，会是 0 条。
     let scoped = search_service::search(
@@ -400,10 +408,11 @@ async fn semantic_search_with_filters_is_not_crowded_out_by_global_top_k() {
         &args("sunset", Some(vec![target]), 40),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     let expected = target_ids.iter().rev().copied().collect::<Vec<_>>();
     assert_eq!(ids_of(&scoped), expected, "候选集内按距离由近到远");
-    assert_sources(&scoped, SOURCE_SEMANTIC);
+    assert_sources(&scoped, SOURCE_FUSION);
     assert!(scoped.windows(2).all(|pair| pair[0].score >= pair[1].score));
 
     // 带 #标签（不选目录）同样只在候选集里检索。
@@ -416,9 +425,10 @@ async fn semantic_search_with_filters_is_not_crowded_out_by_global_top_k() {
         &args("sunset #日落", None, 40),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(ids_of(&tagged), vec![target_ids[3], target_ids[1]]);
-    assert_sources(&tagged, SOURCE_SEMANTIC);
+    assert_sources(&tagged, SOURCE_FUSION);
 
     // format: 条件。
     let heic = search_service::search(
@@ -428,7 +438,8 @@ async fn semantic_search_with_filters_is_not_crowded_out_by_global_top_k() {
         &args("sunset format:heic", None, 40),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(ids_of(&heic), vec![target_ids[0]]);
 
     // 已删除的图不在候选集里。
@@ -443,7 +454,8 @@ async fn semantic_search_with_filters_is_not_crowded_out_by_global_top_k() {
         &args("sunset", Some(vec![target]), 40),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(
         ids_of(&after_delete),
         vec![target_ids[3], target_ids[2], target_ids[1], target_ids[0]]
@@ -457,7 +469,8 @@ async fn semantic_search_with_filters_is_not_crowded_out_by_global_top_k() {
         &args("sunset", Some(vec![noise]), 40),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(big.len(), 40);
     assert!(big.iter().all(|result| result.image.root_id == noise));
 
@@ -470,7 +483,8 @@ async fn semantic_search_with_filters_is_not_crowded_out_by_global_top_k() {
         &args("sunset #不存在", None, 40),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert!(empty.is_empty());
     assert_eq!(encoder.text_calls.load(Ordering::SeqCst), calls_before);
 }
@@ -537,11 +551,11 @@ async fn lancedb_top_k_filtered_prefilters_candidates() {
 }
 
 // ---------------------------------------------------------------------------
-// (c) 文件名兜底保留全部过滤条件（含 #标签）
+// (c) 文件名（全文通道 / LIKE 兜底）保留全部过滤条件（含 #标签）
 // ---------------------------------------------------------------------------
 
 #[tokio::test]
-async fn filename_fallback_keeps_tag_and_root_filters() {
+async fn filename_matches_keep_tag_and_root_filters() {
     let env = env();
     let root = add_root(&env.pool, "phone");
     let other = add_root(&env.pool, "nas");
@@ -558,7 +572,7 @@ async fn filename_fallback_keeps_tag_and_root_filters() {
     tag(&env.pool, ids[0], &["海边"]);
     tag(&env.pool, ids[2], &["海边"]);
     tag(&env.pool, other_ids[0], &["海边"]);
-    // 向量库是空的 → 语义通道无结果 → 退回文件名匹配。
+    // 向量库是空的 → 图像向量通道无结果；文件名里的词由全文通道命中。
     let encoder = FakeEncoder::with_text(query_vector());
 
     let tagged = search_service::search(
@@ -568,10 +582,13 @@ async fn filename_fallback_keeps_tag_and_root_filters() {
         &args("beach #海边", None, 40),
     )
     .await
-    .expect("search");
-    assert_eq!(ids_of(&tagged), vec![other_ids[0], ids[0]]);
-    assert_sources(&tagged, SOURCE_FILENAME);
-    assert!(tagged.iter().all(|result| result.score == 0.5));
+    .expect("search")
+    .results;
+    assert_eq!(id_set(&tagged), HashSet::from([other_ids[0], ids[0]]));
+    assert_sources(&tagged, SOURCE_FUSION);
+    assert!(tagged
+        .iter()
+        .all(|result| result.matched_by == vec!["filename".to_string()]));
 
     let scoped = search_service::search(
         &env.pool,
@@ -580,7 +597,8 @@ async fn filename_fallback_keeps_tag_and_root_filters() {
         &args("beach #海边", Some(vec![root]), 40),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert_eq!(ids_of(&scoped), vec![ids[0]]);
 
     let untagged = search_service::search(
@@ -590,9 +608,24 @@ async fn filename_fallback_keeps_tag_and_root_filters() {
         &args("beach", Some(vec![root]), 40),
     )
     .await
-    .expect("search");
-    assert_eq!(ids_of(&untagged), vec![ids[0], ids[1]]);
+    .expect("search")
+    .results;
+    assert_eq!(id_set(&untagged), HashSet::from([ids[0], ids[1]]));
     assert_eq!(encoder.text_calls.load(Ordering::SeqCst), 3);
+
+    // 文件名的一部分（不是完整的词）各通道都不命中 → 退回 LIKE 匹配，过滤条件一个不丢。
+    let partial = search_service::search(
+        &env.pool,
+        &env.vectors,
+        &encoder,
+        &args("each #海边", Some(vec![root]), 40),
+    )
+    .await
+    .expect("search")
+    .results;
+    assert_eq!(ids_of(&partial), vec![ids[0]]);
+    assert_sources(&partial, SOURCE_FILENAME);
+    assert!(partial.iter().all(|result| result.score == 0.5));
 }
 
 // ---------------------------------------------------------------------------
@@ -625,18 +658,24 @@ async fn fallback_encoder_skips_semantic_channel() {
     .await;
     let encoder = FakeEncoder::fallback();
 
-    let results =
+    // 兜底：图像向量通道跳过（响应标 degraded），只剩文字通道。
+    let response =
         search_service::search(&env.pool, &env.vectors, &encoder, &args("beach", None, 40))
             .await
             .expect("search");
-    assert_eq!(ids_of(&results), vec![ids[0], ids[1]]);
-    assert_sources(&results, SOURCE_FILENAME);
+    assert!(response.degraded);
+    assert!(response.degraded_reason.is_some());
+    let results = response.results;
+    assert_eq!(id_set(&results), HashSet::from([ids[0], ids[1]]));
+    assert!(!id_set(&results).contains(&ids[2]), "不能用伪向量检索");
+    assert_sources(&results, SOURCE_FUSION);
 
     let nothing =
         search_service::search(&env.pool, &env.vectors, &encoder, &args("sunset", None, 40))
             .await
             .expect("search");
-    assert!(nothing.is_empty());
+    assert!(nothing.degraded);
+    assert!(nothing.results.is_empty());
 
     // 以图搜图：库里没有该图向量、临时编码又是兜底 → 空结果，不报错。
     {
@@ -890,6 +929,7 @@ async fn empty_query_returns_nothing_without_calling_worker() {
         &args("   ", Some(vec![root]), 40),
     )
     .await
-    .expect("search");
+    .expect("search")
+    .results;
     assert!(results.is_empty());
 }

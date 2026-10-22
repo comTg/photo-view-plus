@@ -1137,6 +1137,17 @@ fn update_exif_fields(
 }
 
 fn build_where(params: &ImageQueryParams) -> (String, Vec<Value>) {
+    let (clauses, values) = filter_clauses(params);
+    if clauses.is_empty() {
+        (String::new(), values)
+    } else {
+        (format!("WHERE {}", clauses.join(" AND ")), values)
+    }
+}
+
+/// 过滤条件拆成 SQL 子句（引用别名 `i` 的 images 列，彼此 AND）和参数。
+/// 搜索的各个召回通道把它们拼进自己的查询，过滤语义和画廊列表完全一致。
+pub fn filter_clauses(params: &ImageQueryParams) -> (Vec<String>, Vec<Value>) {
     let mut clauses = Vec::new();
     let mut values = Vec::new();
 
@@ -1223,11 +1234,7 @@ fn build_where(params: &ImageQueryParams) -> (String, Vec<Value>) {
         values.push(Value::Integer(tag_names.len() as i64));
     }
 
-    if clauses.is_empty() {
-        (String::new(), values)
-    } else {
-        (format!("WHERE {}", clauses.join(" AND ")), values)
-    }
+    (clauses, values)
 }
 
 fn order_by(sort: Option<&ImageSort>) -> &'static str {

@@ -123,6 +123,9 @@ pub fn run() {
             // BK-tree 全量加载：一次性查全库，放后台线程，让 setup 尽快返回。
             spawn_bktree_init(pool.clone(), dhash_index.clone());
 
+            // 检索全文索引：触发器记下的积压由后台批量重写（升级后首次启动会整库建一遍）。
+            spawn_search_index_loop(pool.clone(), startup_gate.clone());
+
             // 重排上次未完成的缩略图会瞬间灌入数千个解码任务，和 dev 下 WebView/Vite
             // 的首屏模块加载抢 CPU/磁盘（实测把白屏拖到近两分钟）。推迟到前端首屏绘制
             // 之后（frontend_ready）或兜底超时再做。
@@ -196,6 +199,8 @@ pub fn run() {
             commands::ai::ai_image_tags,
             commands::ai::ai_images_by_tag,
             commands::ai::ai_retag_all,
+            commands::ai::search_index_rebuild,
+            commands::ai::search_index_status,
             commands::ocr::ocr_run,
             commands::ocr::ocr_status,
             commands::face::face_run,
@@ -232,6 +237,38 @@ fn spawn_bktree_init(pool: db::Pool, dhash_index: Arc<DhashIndex>) {
             Err(error) => tracing::warn!(%error, "failed to load dhash BK-tree on startup"),
         },
         Err(error) => tracing::warn!(%error, "failed to get conn for BK-tree init"),
+    });
+}
+
+/// 检索全文索引的后台维护：等首屏完成后开始，每 2 秒把触发器记下的积压批量写进 `search_fts`
+/// （每批一个短事务，批与批之间释放写锁）。搜索前也会顺手处理少量积压，这里负责大批量的情况。
+fn spawn_search_index_loop(pool: db::Pool, gate: Arc<StartupGate>) {
+    tauri::async_runtime::spawn(async move {
+        gate.wait(STARTUP_DEFERRED_WORK_FALLBACK).await;
+        let mut interval = tokio::time::interval(Duration::from_secs(2));
+        loop {
+            interval.tick().await;
+            let pool = pool.clone();
+            let flushed = tokio::task::spawn_blocking(move || -> AppResult<usize> {
+                let mut conn = pool.get()?;
+                let started = std::time::Instant::now();
+                let count = services::search_index_service::flush_all(&mut conn)?;
+                if count > 0 {
+                    tracing::info!(
+                        count,
+                        elapsed_ms = started.elapsed().as_millis() as u64,
+                        "search index updated"
+                    );
+                }
+                Ok(count)
+            })
+            .await;
+            match flushed {
+                Ok(Ok(_)) => {}
+                Ok(Err(error)) => tracing::warn!(%error, "search index flush failed"),
+                Err(error) => tracing::warn!(%error, "search index task join failed"),
+            }
+        }
     });
 }
 

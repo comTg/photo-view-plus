@@ -46,6 +46,11 @@ const MIGRATIONS: &[Migration] = &[
         name: "ai_jobs",
         sql: include_str!("../../migrations/0007_ai_jobs.sql"),
     },
+    Migration {
+        version: 8,
+        name: "search_fts",
+        sql: include_str!("../../migrations/0008_search_fts.sql"),
+    },
 ];
 
 struct Migration {
@@ -55,11 +60,17 @@ struct Migration {
 }
 
 pub fn run(conn: &mut Connection) -> AppResult<()> {
+    run_to(conn, u32::MAX)
+}
+
+/// 只迁移到 `target` 版本（含）为止。测试用：先建出旧版本的库、按旧 schema 写入数据，
+/// 再迁移到最新，验证 migration 里的数据迁移逻辑。
+pub fn run_to(conn: &mut Connection, target: u32) -> AppResult<()> {
     ensure_schema_version_table(conn)?;
     let current = current_version(conn)?;
 
     for m in MIGRATIONS {
-        if m.version <= current {
+        if m.version <= current || m.version > target {
             continue;
         }
         tracing::info!(version = m.version, name = m.name, "applying migration");

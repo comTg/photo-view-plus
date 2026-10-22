@@ -349,7 +349,7 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 |----|------|------|------|
 | A0 | 评测基线：查询集、拼图标注、计分脚本；跑出 S0。顺带用原型跑了 S1–S5，结果见 §9.1 | — | ✅ |
 | A1 | 搜索正确性修复：SQL 预过滤、`#标签`单独搜索、兜底时保留过滤条件、兜底向量不入库、逻辑移到 `search_service` | — | ✅ |
-| A2 | 全文通道与融合框架：jieba-rs、`search_fts`、索引维护与重建、RRF、界面显示命中来源；先用 RAM 标签和 OCR 喂数据 | A1 | ⬜ |
+| A2 | 全文通道与融合框架：jieba-rs、`search_fts`、索引维护与重建、RRF、界面显示命中来源；先用 RAM 标签和 OCR 喂数据 | A1 | ✅ |
 | A2b | 同义词表与查询扩展（可选） | A2 | ⬜ |
 | A3 | 导入 memora 描述（`image_analysis` + `ai_jobs`）；跑 S2/S3，过 G1 | A2 | ⬜ |
 | A4 | 文本向量通道：worker `/text/embed`、LanceDB `image_text_emb_<model>`；跑 S4/S5 | A3、G1 | ⬜ |
@@ -399,6 +399,15 @@ CREATE INDEX idx_ai_jobs_kind_status ON ai_jobs(kind, status);
 - **通过标准**：上述用例通过；S0 的指标不下降。
 
 ### A2 全文通道与融合框架
+- **实测 / 备注**（2026-10-22 完成）：
+  - **分词**：按 §9.1 的结论没有引入 jieba-rs，用与原型相同的"CJK 双字 + 单字"（`utils/text_tokens.rs`，NFKC + 小写，停用字规则同原型）。比原型多一条：只有一个汉字的片段（单字标签"猫"、被标点隔开的字）本身也算一个词。
+  - **索引维护**：migration `0008_search_fts.sql` 建 `search_fts` 和积压表 `search_fts_dirty`；`images`（插入、改文件名、改 OCR、删除 / 恢复）和 `image_tags`（增删改）上的触发器把受影响的图记进积压表，所以标签、OCR、重命名、扫描删除、回收站 / 撤销等写入路径都不用逐个挂 reindex。`search_index_service` 在一个 IMMEDIATE 事务里批量重写；后台循环每 2 秒处理积压，搜索前积压不超过 500 条时顺手补上。命令 `search_index_rebuild` 全量重建（设置页有按钮），`search_index_status` 查积压。
+  - **搜索管线**：`search_service` 改为多路召回 + RRF。标签通道 = 名字出现在查询里的标签（"海边的小孩"命中"海边""小孩"；单字标签只在查询本身就是这个字时算；RAM 带斜杠的译名拆开），按覆盖的查询字数排序；全文通道 = FTS5 列过滤 + `bm25()` 列权重（4/3/2/1.5/1/1/0.3），先 AND、命中少于 20 再放宽为 OR（带单字列）；图像向量通道 = Chinese-CLIP。过滤条件拼进每一路的 SQL（`images_repo::filter_clauses`）。默认权重：图像向量 1.0、全文 0.6、标签 0.3。图像向量的相似度下限定为 0.37：Chinese-CLIP 的图文余弦挤在 0.35–0.50，评测集前 20 名里相关图的 p5 是 0.397，只能保守地切长尾。
+  - **返回结构**：`ai_search` 改为返回 `{ results, degraded, degradedReason, channels, elapsedMs }`；每条结果带 `matchedBy`（描述 / 文字 / 标签 / 文件名 / 语义 / 画面）和高亮片段。片段在 Rust 里按原文生成（FTS 列里存的是分好的词，`snippet()` 拿不到原文）。
+  - **降级**：worker 没就绪时 `WorkerQueryEncoder` 在后台拉起 worker、最多等 1.5 秒，等不到就只返回文字通道的结果并标 `degraded`；前端提示"语义检索启动中"，收到 `ai:worker_status` = ready 后自动重跑上一次查询。
+  - **性能**（debug 构建，release 更快）：1.5 万张合成库全量重建 1.53 秒；正式库副本（13,960 张）全量重建 2.23 秒；正式库副本上全文通道 p95 9.6ms、标签通道 p95 21ms，三路融合整次搜索 p95 172ms（不含 worker 冷启动）。
+  - **评测**（正式库副本，同一套查询和判定，本轮补标 33 张拼图、约 140 格）：R2（标签 + 全文，内容只有 RAM 标签、OCR、文件名）nDCG@20 0.506、P@10 0.542，高于原型 S2 的 0.492 / 0.530；Recall@20 0.193，高于 S0 的 0.023（通过标准）。R5b（图像向量 + 标签 + 全文，加权）nDCG@20 0.827，高于原型等权的 S5b（0.759）和单用图像向量的 R1（0.818）。
+  - 测试：新增 `search_fulltext_tests`（10 个：分词、AND→OR、列权重、单字兜底、触发器与重建、标签通道、RRF 与相似度下限、片段、降级、1.5 万张性能）；`search_tests` 按新语义更新；migration runner 加 `run_to`，迁移测试改为先建 v6 库再升级。
 - **改动**：
   - Cargo 依赖 `jieba-rs`；migration `0007_search_fts.sql`；`search_index_service`（单条 reindex + 全量重建）。
   - 在标签、OCR、重命名、删除这些写入路径上挂 reindex。

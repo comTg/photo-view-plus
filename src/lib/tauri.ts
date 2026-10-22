@@ -4,6 +4,7 @@ import type {
   AiDiagnostics,
   AiPipelineStatus,
   AiSearchArgs,
+  AiSearchResponse,
   AiSearchResult,
   AiTag,
   AiWorkerStatus,
@@ -39,6 +40,8 @@ import type {
   Root,
   ScanStartResult,
   ScanTaskStatus,
+  SearchIndexRebuildOutcome,
+  SearchIndexStatus,
   SmartAlbum,
   SmartAlbumInput,
   TimelineBucket,
@@ -190,8 +193,16 @@ export async function aiModelDownload(modelKey: string): Promise<unknown> {
   return invoke<unknown>("ai_model_download", { modelKey });
 }
 
-export async function aiSearch(args: AiSearchArgs): Promise<AiSearchResult[]> {
-  return invoke<AiSearchResult[]>("ai_search", { args });
+export async function aiSearch(args: AiSearchArgs): Promise<AiSearchResponse> {
+  return invoke<AiSearchResponse>("ai_search", { args });
+}
+
+export async function searchIndexRebuild(): Promise<SearchIndexRebuildOutcome> {
+  return invoke<SearchIndexRebuildOutcome>("search_index_rebuild");
+}
+
+export async function searchIndexStatus(): Promise<SearchIndexStatus> {
+  return invoke<SearchIndexStatus>("search_index_status");
 }
 
 export async function aiSearchByImage(imageId: number, limit?: number): Promise<AiSearchResult[]> {

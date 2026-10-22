@@ -15,7 +15,7 @@ from datetime import date
 
 from common import REPO_ROOT, eval_dir, load_queries, metrics_for
 
-ORDER = ["S0", "S1", "S2", "S3", "S4", "S5", "S5a", "S5b", "S5c", "S5d", "S5w", "S6", "R1", "R2", "R3", "R4", "R5", "R6"]
+ORDER = ["S0", "S1", "S2", "S3", "S4", "S5", "S5a", "S5b", "S5c", "S5d", "S5w", "S6", "R1", "R2", "R3", "R4", "R5b", "R5", "R6"]
 NAMES = {
     "S0": "OpenAI CLIP（现状）",
     "S1": "Chinese-CLIP",
@@ -34,6 +34,7 @@ NAMES = {
     "R2": "线上·标签 + 全文（RAM 标签、OCR）",
     "R3": "线上·全文（含 memora 描述）",
     "R4": "线上·描述文本向量",
+    "R5b": "线上·融合（图像向量 + 标签 + 全文，无描述）",
     "R5": "线上·融合（默认权重）",
     "R6": "线上·融合（VLM 描述）",
 }

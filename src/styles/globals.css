@@ -2217,6 +2217,36 @@ body {
   font-size: 11px;
 }
 
+.ai-result-snippet {
+  margin: 0;
+  padding: 0 2px;
+  color: var(--text-muted);
+  font-size: 12px;
+  line-height: 1.45;
+  display: -webkit-box;
+  -webkit-line-clamp: 3;
+  -webkit-box-orient: vertical;
+  overflow: hidden;
+}
+
+.ai-result-snippet mark {
+  padding: 0 1px;
+  border-radius: 3px;
+  color: var(--text);
+  background: color-mix(in srgb, var(--accent) 28%, transparent);
+}
+
+.ai-search-degraded {
+  flex: 0 0 auto;
+  margin: 0;
+  padding: 6px 10px;
+  border: 1px solid var(--border-soft);
+  border-radius: 7px;
+  color: var(--text-muted);
+  background: var(--panel-raised);
+  font-size: 12px;
+}
+
 /* ===== MVP4 高级管理 ===== */
 
 .advanced-view,

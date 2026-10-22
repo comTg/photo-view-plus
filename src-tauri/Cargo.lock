@@ -5515,6 +5515,7 @@ dependencies = [
  "tracing-appender",
  "tracing-subscriber",
  "trash",
+ "unicode-normalization",
  "walkdir",
  "windows-sys 0.59.0",
  "zip",

@@ -33,7 +33,10 @@ use photo_view_plus_lib::repo::lancedb_repo::LanceDbRepo;
 use photo_view_plus_lib::services::ai_client::{AiHttpClient, ClipEmbedItem};
 use photo_view_plus_lib::services::ai_pipeline;
 use photo_view_plus_lib::services::ai_supervisor::AiSupervisor;
-use photo_view_plus_lib::services::search_service::{self, AiSearchArgs, QueryEncoder};
+use photo_view_plus_lib::services::search_index_service;
+use photo_view_plus_lib::services::search_service::{
+    self, AiSearchArgs, Channel, QueryEncoder, SearchOptions,
+};
 use photo_view_plus_lib::services::thumbnail_service;
 use photo_view_plus_lib::{AppError, AppResult};
 
@@ -233,20 +236,22 @@ fn write_run(eval_dir: &Path, name: &str, runs: &HashMap<String, Vec<String>>) {
     println!("wrote {}", path.display());
 }
 
-/// 一个方案：每个查询跑一次 `search_service::search`，结果映射成语料 key（按 key 去重）。
+/// 一个方案：每个查询跑一次 `search_service::search_with`，结果映射成语料 key（按 key 去重）。
 async fn run_system(
     env: &EvalEnv,
     encoder: &dyn QueryEncoder,
     keys: &HashMap<i64, String>,
     queries: &[EvalQuery],
     name: &str,
+    options: &SearchOptions,
 ) {
     let mut runs = HashMap::new();
     let mut scores: HashMap<String, Vec<(String, f32)>> = HashMap::new();
     let mut latencies = Vec::new();
+    let mut channel_latencies: HashMap<String, Vec<f64>> = HashMap::new();
     for query in queries {
         let started = Instant::now();
-        let results = search_service::search(
+        let response = search_service::search_with(
             &env.pool,
             &env.vectors,
             encoder,
@@ -255,10 +260,23 @@ async fn run_system(
                 root_ids: None,
                 limit: Some(RUN_DEPTH),
             },
+            options,
         )
         .await
         .expect("search");
         latencies.push(started.elapsed().as_secs_f64() * 1000.0);
+        assert!(
+            !response.degraded,
+            "评测时语义通道必须可用：{:?}",
+            response.degraded_reason
+        );
+        for stat in &response.channels {
+            channel_latencies
+                .entry(format!("{:?}", stat.channel))
+                .or_default()
+                .push(stat.elapsed_ms);
+        }
+        let results = response.results;
         let mut seen = HashSet::new();
         let ranked = results
             .iter()
@@ -280,6 +298,16 @@ async fn run_system(
         percentile(&latencies, 0.95),
         latencies.last().copied().unwrap_or(0.0)
     );
+    let mut channels = channel_latencies.into_iter().collect::<Vec<_>>();
+    channels.sort_by(|a, b| a.0.cmp(&b.0));
+    for (channel, mut values) in channels {
+        values.sort_by(f64::total_cmp);
+        println!(
+            "  {channel}: p50 {:.1}ms p95 {:.1}ms",
+            percentile(&values, 0.5),
+            percentile(&values, 0.95)
+        );
+    }
     write_run(&env.eval_dir, name, &runs);
     // 带分数的版本放在 rust/ 下（score.py 只读 runs/），用来分析相似度下限、融合权重。
     let path = env
@@ -289,11 +317,22 @@ async fn run_system(
     std::fs::write(&path, serde_json::to_string(&scores).expect("json")).expect("write scores");
 }
 
-/// 准备评测库：迁移到最新 schema，用 worker 把缩略图已就绪的图全部算好当前图像向量模型的向量。
+/// 准备评测库：迁移到最新 schema；建好检索全文索引；用 worker 把缩略图已就绪的图全部算好
+/// 当前图像向量模型的向量。
 #[tokio::test]
 #[ignore]
 async fn eval_prepare() {
     let env = eval_env();
+    {
+        let mut conn = env.pool.get().expect("conn");
+        let started = Instant::now();
+        let outcome = search_index_service::rebuild_all(&mut conn).expect("search index");
+        println!(
+            "search index rebuilt: {} docs in {:.2}s",
+            outcome.indexed,
+            started.elapsed().as_secs_f64()
+        );
+    }
     let worker = worker().await;
     let model = DEFAULT_CLIP_MODEL;
     let started = Instant::now();
@@ -344,11 +383,18 @@ async fn eval_prepare() {
     );
 }
 
-/// 各方案的排名：R1 = 线上图像向量通道（Chinese-CLIP）。
+/// 各方案的排名（方案定义见 scripts/search_eval/score.py 的 NAMES）：
+/// - R1：只跑图像向量通道（Chinese-CLIP）；
+/// - R2：标签 + 全文（RAM 标签、OCR、文件名）；
+/// - R5b：图像向量 + 标签 + 全文（不用大模型描述，对应原型 S5b）。
 #[tokio::test]
 #[ignore]
 async fn eval_run() {
     let env = eval_env();
+    {
+        let mut conn = env.pool.get().expect("conn");
+        search_index_service::flush_all(&mut conn).expect("search index");
+    }
     let worker = worker().await;
     let queries = load_queries();
     let keys = corpus_keys(&env.pool);
@@ -356,5 +402,18 @@ async fn eval_run() {
         worker: &worker,
         clip_model: DEFAULT_CLIP_MODEL.to_string(),
     };
-    run_system(&env, &encoder, &keys, &queries, "R1").await;
+    let systems: Vec<(&str, SearchOptions)> = vec![
+        ("R1", SearchOptions::only(&[Channel::ImageVector])),
+        (
+            "R2",
+            SearchOptions::only(&[Channel::Tag, Channel::FullText]),
+        ),
+        (
+            "R5b",
+            SearchOptions::only(&[Channel::ImageVector, Channel::Tag, Channel::FullText]),
+        ),
+    ];
+    for (name, options) in &systems {
+        run_system(&env, &encoder, &keys, &queries, name, options).await;
+    }
 }
