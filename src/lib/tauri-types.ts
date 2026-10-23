@@ -145,6 +145,15 @@ export interface ScanDone {
   added: number;
   updated: number;
   removed: number;
+  /** 只差大小写的同级目录（docs/11 R1-6）。 */
+  caseConflicts: CaseConflict[];
+}
+
+/** 同一父目录下只差大小写的几个子目录：Windows 经 SMB 访问区分大小写的 NAS 时分不清它们。 */
+export interface CaseConflict {
+  /** 父目录，相对根目录；就在根目录下时为空串。 */
+  parent: string;
+  names: string[];
 }
 
 export interface ScanErrorEvent {

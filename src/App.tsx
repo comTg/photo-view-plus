@@ -71,6 +71,7 @@ import type {
   AiWorkerStatus,
   AppSettings,
   BackupExportResult,
+  CaseConflict,
   FaceCluster,
   FaceStatus,
   ImageAnalysis,
@@ -466,7 +467,10 @@ export default function App() {
 
   const handleScanDone = useCallback(
     (payload: ScanDone) => {
-      setToast(`扫描完成：新增 ${payload.added}，更新 ${payload.updated}，移除 ${payload.removed}`);
+      const warning = caseConflictWarning(payload.caseConflicts ?? []);
+      setToast(
+        `扫描完成：新增 ${payload.added}，更新 ${payload.updated}，移除 ${payload.removed}${warning}`,
+      );
       void rootsReloadRef.current();
       if (allSelected || payload.rootId === selection) {
         void refreshDuringScanRef.current();
@@ -3655,6 +3659,15 @@ const TaskStatus = memo(function TaskStatus({
     </span>
   );
 });
+
+/** 扫描完成提示里的大小写冲突告警（docs/11 §6.1、R1-6）；没有冲突时为空串。 */
+function caseConflictWarning(conflicts: CaseConflict[]): string {
+  const [first] = conflicts;
+  if (!first) return "";
+  const sample = `${first.parent ? `${first.parent}\\` : ""}${first.names.join(" / ")}`;
+  const more = conflicts.length > 1 ? ` 等 ${conflicts.length} 处` : "";
+  return `。注意：发现只差大小写的同级目录（${sample}${more}），Windows 访问 NAS 时分不清它们，部分照片会重复入库或打不开，请在 NAS 上合并后重新扫描`;
+}
 
 function mergeImages(prev: ImageRecord[], next: ImageRecord[]) {
   const seen = new Set(prev.map((image) => image.id));

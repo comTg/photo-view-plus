@@ -112,6 +112,59 @@ pub struct ScanDone {
     pub added: i64,
     pub updated: i64,
     pub removed: i64,
+    /// 只差大小写的同级目录（docs/11 §6.1、R1-6），前端在扫描完成提示里告警。
+    pub case_conflicts: Vec<CaseConflict>,
+}
+
+/// 同一父目录下只差大小写的几个子目录。NAS 的文件系统区分大小写，Windows 经 SMB 访问时不区分，
+/// 这些目录下的同名路径只能落到其中一个目录：同一批照片会重复入库，一部分读的时候报"找不到文件"。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct CaseConflict {
+    /// 父目录，相对根目录；就在根目录下时为空串。
+    pub parent: String,
+    /// 只差大小写的目录名，按扫描时遇到的顺序。
+    pub names: Vec<String>,
+}
+
+/// 扫描时逐个记下目录名，找出同一父目录下只差大小写的子目录。
+#[derive(Debug, Default)]
+pub struct CaseConflictDetector {
+    /// 父目录 → 小写目录名 → 第一次遇到的原名，以及已登记的冲突在 `conflicts` 里的下标。
+    seen: HashMap<String, HashMap<String, (String, Option<usize>)>>,
+    conflicts: Vec<CaseConflict>,
+}
+
+impl CaseConflictDetector {
+    pub fn observe(&mut self, parent: &str, name: &str) {
+        let dirs = self.seen.entry(parent.to_string()).or_default();
+        let Some((first, conflict)) = dirs.get_mut(&name.to_lowercase()) else {
+            dirs.insert(name.to_lowercase(), (name.to_string(), None));
+            return;
+        };
+        if first == name {
+            return;
+        }
+        match conflict {
+            Some(index) => {
+                let names = &mut self.conflicts[*index].names;
+                if !names.iter().any(|existing| existing == name) {
+                    names.push(name.to_string());
+                }
+            }
+            None => {
+                *conflict = Some(self.conflicts.len());
+                self.conflicts.push(CaseConflict {
+                    parent: parent.to_string(),
+                    names: vec![first.clone(), name.to_string()],
+                });
+            }
+        }
+    }
+
+    pub fn into_conflicts(self) -> Vec<CaseConflict> {
+        self.conflicts
+    }
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -259,6 +312,7 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
     let is_network = crate::utils::path_normalize::is_network_path(&root_path);
     // 探测（磁盘 I/O）在事务外累积，攒够一批再统一写库，缩短 WAL 写锁持有时间。
     let mut batch: Vec<PreparedUpsert> = Vec::with_capacity(SCAN_BATCH_SIZE);
+    let mut case_conflicts = CaseConflictDetector::default();
 
     for entry in WalkDir::new(&root_path).follow_links(false).into_iter() {
         let entry = match entry {
@@ -270,6 +324,12 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
             }
         };
 
+        if entry.file_type().is_dir() {
+            if entry.depth() > 0 {
+                observe_dir(&mut case_conflicts, &root_path, entry.path());
+            }
+            continue;
+        }
         if !entry.file_type().is_file() {
             continue;
         }
@@ -350,6 +410,14 @@ fn run_scan_blocking(task: ScanRootTask, cancellation: CancellationToken) -> App
     flush_scan_batch(&mut conn, &mut batch, &task, &root, is_network, &mut done)?;
 
     done.removed = mark_missing_deleted(&mut conn, task.root_id, &states, &visited)?;
+    done.case_conflicts = case_conflicts.into_conflicts();
+    if !done.case_conflicts.is_empty() {
+        tracing::warn!(
+            root_id = task.root_id,
+            conflicts = ?done.case_conflicts,
+            "sibling directories differ only by case"
+        );
+    }
     let finished = now_unix();
     let total = i64::try_from(processed).unwrap_or(i64::MAX);
     tracing::info!(
@@ -520,6 +588,19 @@ fn is_supported_image(path: &Path) -> bool {
                 .to_ascii_lowercase()
         })
         .is_some_and(|ext| IMAGE_EXTENSIONS.contains(&ext.as_str()))
+}
+
+/// 把一个子目录登记进大小写冲突检测（R1-6）。
+fn observe_dir(detector: &mut CaseConflictDetector, root_path: &Path, dir: &Path) {
+    let Some(name) = dir.file_name() else {
+        return;
+    };
+    // 直接在根目录下的子目录，父目录记为空串。
+    let parent = dir
+        .parent()
+        .and_then(|parent| rel_path_string(root_path, parent))
+        .unwrap_or_default();
+    detector.observe(&parent, &name.to_string_lossy());
 }
 
 fn rel_path_string(root_path: &Path, path: &Path) -> Option<String> {
@@ -751,6 +832,62 @@ mod tests {
         assert!(is_supported_image(Path::new("a.JPG")));
         assert!(is_supported_image(Path::new("a.heic")));
         assert!(!is_supported_image(Path::new("a.txt")));
+    }
+
+    #[test]
+    fn case_conflicts_are_detected_per_parent() {
+        let mut detector = CaseConflictDetector::default();
+        detector.observe(r"PD2324\相册备份", "camera");
+        detector.observe(r"PD2324\相册备份", "微信");
+        detector.observe(r"PD2324\相册备份", "Camera");
+        detector.observe(r"PD2324\相册备份", "CAMERA");
+        // 再遇到已登记的名字不重复记。
+        detector.observe(r"PD2324\相册备份", "Camera");
+        // 不同父目录下的同名目录不算冲突。
+        detector.observe(r"PD2324\相册备份\camera", "2024");
+        detector.observe(r"PD2324\相册备份\Camera", "2024");
+        detector.observe("", "Screenshots");
+        detector.observe("", "screenshots");
+
+        assert_eq!(
+            detector.into_conflicts(),
+            vec![
+                CaseConflict {
+                    parent: r"PD2324\相册备份".to_string(),
+                    names: vec![
+                        "camera".to_string(),
+                        "Camera".to_string(),
+                        "CAMERA".to_string()
+                    ],
+                },
+                CaseConflict {
+                    parent: String::new(),
+                    names: vec!["Screenshots".to_string(), "screenshots".to_string()],
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn same_name_seen_twice_is_not_a_conflict() {
+        let mut detector = CaseConflictDetector::default();
+        detector.observe("a", "Camera");
+        detector.observe("a", "Camera");
+        assert!(detector.into_conflicts().is_empty());
+    }
+
+    #[test]
+    fn observe_dir_uses_parent_relative_to_root() {
+        let root = Path::new(r"Y:\备份");
+        let mut detector = CaseConflictDetector::default();
+        observe_dir(&mut detector, root, &root.join("camera"));
+        observe_dir(&mut detector, root, &root.join("Camera"));
+        observe_dir(&mut detector, root, &root.join("PD2324").join("x"));
+        observe_dir(&mut detector, root, &root.join("PD2324").join("X"));
+        let conflicts = detector.into_conflicts();
+        assert_eq!(conflicts.len(), 2);
+        assert_eq!(conflicts[0].parent, "");
+        assert_eq!(conflicts[1].parent, "PD2324");
     }
 
     #[test]
