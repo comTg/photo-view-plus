@@ -35,6 +35,38 @@ impl Profile {
             Self::Prod => "prod",
         }
     }
+
+    /// 这个 profile 的数据目录名，与 `tauri*.json` 里的 identifier 一致。
+    pub fn identifier(self) -> &'static str {
+        match self {
+            Self::Dev => "com.vetoer.photoviewplus.dev",
+            Self::Test => "com.vetoer.photoviewplus.test",
+            Self::Prod => "com.vetoer.photoviewplus",
+        }
+    }
+
+    /// 环境变量 `PVP_PROFILE` 明确指定的 profile；没设或值不认识时为 `None`。
+    pub fn explicit_from_env() -> Option<Self> {
+        std::env::var("PVP_PROFILE")
+            .ok()
+            .and_then(|value| Self::from_str(&value))
+    }
+}
+
+/// `PVP_PROFILE` 明确指定的 profile 和构建里定死的 identifier 对不上时，返回拒绝启动的说明。
+///
+/// 数据目录由编译时的 identifier 决定，`PVP_PROFILE` 只改日志目录和窗口标题。两者不一致时照常启动，
+/// 会打开另一个 profile 的库并执行 migration（docs/11 R6：测量脚本用 `PVP_PROFILE=test` 启动了
+/// 正式版 identifier 的构建，正式库被迁移）。没设 `PVP_PROFILE` 时不检查（安装版就是这样启动的）。
+pub fn profile_mismatch(explicit: Option<Profile>, identifier: &str) -> Option<String> {
+    let profile = explicit?;
+    (profile.identifier() != identifier).then(|| {
+        format!(
+            "PVP_PROFILE={profile} 应使用数据目录 {}，但这个构建的数据目录是 {identifier}。\
+             为避免读写其他 profile 的数据，拒绝启动；请用对应的配置重新构建（例如 --config src-tauri/tauri.{profile}.json）",
+            profile.identifier()
+        )
+    })
 }
 
 impl fmt::Display for Profile {
@@ -336,5 +368,27 @@ fn sanitize_model_key(value: String, fallback: &str) -> String {
         fallback.to_string()
     } else {
         trimmed.to_string()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn explicit_profile_must_match_the_build_identifier() {
+        // 用 PVP_PROFILE=test 启动正式版 identifier 的构建：拒绝。
+        let refused = profile_mismatch(Some(Profile::Test), "com.vetoer.photoviewplus");
+        assert!(refused.is_some_and(|message| message.contains("com.vetoer.photoviewplus.test")));
+        assert!(profile_mismatch(Some(Profile::Prod), "com.vetoer.photoviewplus.dev").is_some());
+        // 对得上的放行。
+        for profile in [Profile::Dev, Profile::Test, Profile::Prod] {
+            assert_eq!(profile_mismatch(Some(profile), profile.identifier()), None);
+        }
+        // 没设 PVP_PROFILE（安装版）不检查。
+        assert_eq!(
+            profile_mismatch(None, "com.vetoer.photoviewplus.test"),
+            None
+        );
     }
 }

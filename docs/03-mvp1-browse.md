@@ -46,6 +46,7 @@
 - `src/main.tsx` + `src/App.tsx` + `src/styles/globals.css` 三栏 placeholder
 - 三套 `tauri.<profile>.json`（dev/test/prod，partial overlay 而非 extends）
 - `package.json` 加 `tauri:dev` / `tauri:test` / `tauri:prod` 三条脚本，用 `cross-env PVP_PROFILE=<x>` 注入
+- 数据目录由构建时的 identifier 决定，`PVP_PROFILE` 只改日志目录和窗口标题。两者对不上时（例如 `PVP_PROFILE=test` 启动了正式版 identifier 的构建）应用记一条 ERROR 后直接退出，不打开任何库（`config::profile_mismatch`，docs/11 R6 补的）。没设 `PVP_PROFILE` 时不检查
 - `src-tauri/Cargo.toml`：tauri 2 + tauri-plugin-{dialog,shell,fs} + serde + anyhow + thiserror + tracing
 - `src-tauri/src/{main.rs,lib.rs,config.rs,commands.rs}`：最小骨架，ping 命令返回 profile
 - `.cargo/config.toml`：sparse 镜像（项目本地，避免全局 git 协议慢）

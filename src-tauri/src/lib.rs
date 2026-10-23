@@ -39,6 +39,14 @@ pub fn run() {
     let profile = config::Profile::from_env();
     init_tracing(profile);
     let context = tauri::generate_context!();
+    if let Some(message) = config::profile_mismatch(
+        config::Profile::explicit_from_env(),
+        &context.config().identifier,
+    ) {
+        tracing::error!("{message}");
+        eprintln!("{message}");
+        return;
+    }
 
     // docs/10 A6b：计划任务在夜间以 --background-analyze 启动——不开窗口，只跑大模型打标。
     if std::env::args().any(|arg| arg == services::night_service::BACKGROUND_ANALYZE_ARG) {
@@ -725,10 +733,5 @@ fn init_tracing(profile: config::Profile) {
 
 pub(crate) fn log_dir_for(profile: config::Profile) -> Option<PathBuf> {
     let base = std::env::var_os("LOCALAPPDATA").map(PathBuf::from)?;
-    let identifier = match profile {
-        config::Profile::Dev => "com.vetoer.photoviewplus.dev",
-        config::Profile::Test => "com.vetoer.photoviewplus.test",
-        config::Profile::Prod => "com.vetoer.photoviewplus",
-    };
-    Some(base.join(identifier).join("logs"))
+    Some(base.join(profile.identifier()).join("logs"))
 }

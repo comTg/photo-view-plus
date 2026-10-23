@@ -84,7 +84,7 @@
 - S3 要改 dev 库的状态字段，只动 dev profile，执行前再确认一次。
 
 **工具实现时的发现**（2026-10-22，详见 [scripts/perf/README.md](../scripts/perf/README.md)）：
-- **数据目录在编译时就定死了。** 单设 `PVP_PROFILE=test` 隔离不了数据：现有 release exe 用的仍是正式版的 identifier，只有日志目录和窗口标题会变。测量用的 exe 必须这样构建：`pnpm tauri build --no-bundle --config src-tauri/tauri.test.json`。启动后先在日志里确认 `opening database` 的路径含 `.test`。
+- **数据目录在编译时就定死了。** 单设 `PVP_PROFILE=test` 隔离不了数据：现有 release exe 用的仍是正式版的 identifier，只有日志目录和窗口标题会变。测量用的 exe 必须这样构建：`pnpm tauri build --no-bundle --config src-tauri/tauri.test.json`。启动后先在日志里确认 `opening database` 的路径含 `.test`。R6 之后应用自己会拦：`PVP_PROFILE` 和构建的 identifier 对不上时直接退出（§7.1 R6）。
 - 全新的 test profile 默认开着 AI，跑 S2 之前要先关掉。
 - `Get-Counter` 在本机每次调用要 1–3 秒，撑不住每秒采样。`record.ps1` 改为直接调用 PDH API，计数器路径仍是同一套英文路径，单次采样约 15ms。
 - 本机 RTX 5070 的 `GPU Engine` 计数器里没有 Compute 类引擎，CUDA 负载预计记在 3D 引擎上，S3 要用 nvidia-smi 对照确认。
@@ -319,6 +319,9 @@
     - 调度器的运行计数改由 guard 在 drop 时归还（`queue::RunningGuard`），任务 panic 也不会永久占住名额。之前 panic 的任务会让运行数一直多 1，使用中档 P0 只有 1 个名额，整条缩略图队列就停了。
     - 批量缩略图只在读原图、解码、编码这一段进入后台模式，写库在后台模式之外（§5.3，同扫描写库）。
   - 测试：`queue::tests::panicking_task_returns_its_slot`（先在改动前的代码上确认会失败）、`thumbnail_service::tests::stuck_blocking_work_times_out`。
+- 测量时的事故：跑 release 评测（`cargo test --release --test thumb_codec_eval`）顺带用默认配置重编了 `target\release` 下的 exe，随后的实验脚本用 `PVP_PROFILE=test` 启动了它。它打开的是**正式库**，执行了 migration 7–11 和设置迁移，约 2 分钟后被关掉。
+  - 影响：migration 7–11 全是新增（新表、触发器、`images.thumb_ext` 列，已有记录都记 `webp`），改动只写进了 `app.sqlite-wal`，主文件没动；设置迁移把 `aiClipModel` 从 `clip-vit-b-32` 换成 Chinese-CLIP，`aiEnabled` 仍是关的。启动后的后台任务要等首屏或 180 秒兜底才开始，这次都没跑到：缩略图、向量和图片记录都没有变化（只读核对：ready 9,456、failed 3,001、unsupported 1,503，`thumb_ext` 全是 `webp`）。这些就是正式版升级到当前版本时本来会做的迁移。事故后的库文件和配置另外复制了一份留底（仓库外）。
+  - 修复：`config::profile_mismatch`，`PVP_PROFILE` 指定的 profile 和构建的 identifier 对不上时记 ERROR 后直接退出，不打开任何库（没设 `PVP_PROFILE` 的安装版不受影响）。`run_scenarios.ps1` 发现应用启动即退出直接报错；`scripts/perf/README.md` §0.2 补了"构建后不要再跑 `--release` 的 cargo 命令"。端到端核对：用 `PVP_PROFILE=dev` 启动 test 构建，进程立即退出，test 库没有被打开。测试 `config::tests::explicit_profile_must_match_the_build_identifier`。
 
 ## 8. 验收指标（初值，R0 之后修订）
 
