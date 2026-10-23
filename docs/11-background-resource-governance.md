@@ -208,7 +208,7 @@
 |----|------|------|
 | R0 | 测量工具 + S0–S4 基线 + 附录 A。工具已就绪，冒烟测试通过（`scripts/perf/`）；S0–S4 实测要约时间进行 | 🔄 |
 | R1-1 | AI 只在空闲时运行（先用 `GetLastInputInfo` ≥ 3 分钟做简单判断；设置"使用电脑时也运行 AI"默认关）+ 批次间 GPU 冷却 | ✅ 由 R2 覆盖 |
-| R1-2 | worker FP16 推理 | 🔄 Chinese-CLIP、bge 已是 FP16（docs/10 A5、A4）；RAM-plus 随 docs/10 A7 下线，不再单独改 |
+| R1-2 | worker FP16 推理 | ✅ Chinese-CLIP、bge 已是 FP16（docs/10 A5、A4）；RAM-plus 随 docs/10 A7 下线，不再单独改 |
 | R1-3 | `BackgroundPriorityGuard` 抽到 utils，覆盖哈希、dHash 和扫描读图头 | ✅ |
 | R1-4 | 实现 `aiIdleStopMinutes`；worker 放进作业对象 | ✅ |
 | R1-5 | 扫描期刷新减负（docs/09 P1-5） | ✅ |
@@ -227,6 +227,11 @@
 - R2 的单元测试：模式状态机用注入的假时钟和假输入源，覆盖降档立即生效、升档迟滞、全屏优先、手动覆盖；许可容量调整后，新任务遵守新上限。
 
 ### 7.1 实施记录
+
+**R1-2**：
+- worker 里常驻的两个 torch 模型在 CUDA 上都是 FP16：Chinese-CLIP（`clip_loader.py`，docs/10 A5）、bge 描述向量（`text_loader.py`，docs/10 A4）。CPU 上回退 FP32。
+- RAM-plus（Swin-L，FP32）不再改成 FP16：docs/10 A7 把打标交给了视觉大模型，设置 `aiTaggerModel = vlm` 时 worker 不加载它。仍选 `ram-plus` 时，它的 GPU 任务和其他 AI 任务一样受 R2 的 GPU 闸门约束（使用中暂停、短暂离开按占空比冷却）。
+- 提醒：2026-10-23 核对时，dev profile 的配置仍是 `aiTaggerModel = ram-plus`（`vlmEnabled = false`），也就是还在用 RAM-plus 打标。要彻底去掉这 2GB 显存和 FP32 推理，需要在设置里开启大模型打标并把标签来源切到"大模型"。
 
 **R1-3**：`utils/priority.rs` 的 `BackgroundPriorityGuard`（`THREAD_MODE_BACKGROUND_BEGIN/END`）覆盖缩略图生成、BLAKE3、dHash 和扫描读图头（`probe_image`）。扫描写库的事务不在后台模式里（§5.3）。
 
