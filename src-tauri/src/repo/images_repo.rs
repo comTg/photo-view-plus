@@ -175,10 +175,7 @@ pub fn query(conn: &Connection, params: &ImageQueryParams) -> AppResult<ImagePag
     let order_sql = order_by(params.sort.as_ref());
 
     // COUNT 不需要 roots 表：build_where 只引用 i.* 列，去掉 JOIN 省一次连接（P0-6）。
-    let count_sql = format!("SELECT COUNT(*) FROM images i {where_sql}");
-    let total: i64 = conn.query_row(&count_sql, params_from_iter(values.iter()), |row| {
-        row.get(0)
-    })?;
+    let total = count(conn, params)?;
 
     let mut page_values = values;
     page_values.push(Value::Integer(limit));
@@ -200,6 +197,14 @@ pub fn query(conn: &Connection, params: &ImageQueryParams) -> AppResult<ImagePag
         offset,
         limit,
     })
+}
+
+/// 满足 `params` 过滤条件的图片数量（忽略 `sort` / `offset` / `limit`）。扫描期用户已往下翻时，
+/// 画廊只查数量提示"有 N 张新照片"，不再重拉列表（docs/11 R1-5）。
+pub fn count(conn: &Connection, params: &ImageQueryParams) -> AppResult<i64> {
+    let (where_sql, values) = build_where(params);
+    let sql = format!("SELECT COUNT(*) FROM images i {where_sql}");
+    Ok(conn.query_row(&sql, params_from_iter(values.iter()), |row| row.get(0))?)
 }
 
 /// 满足 `params` 过滤条件的全部图片 id（忽略 `sort` / `offset` / `limit`，按 id 升序）。

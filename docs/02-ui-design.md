@@ -69,6 +69,7 @@ PhotoView                 ← App 名 / 设置入口
 - 鼠标悬停：显示快速操作（收藏、信息、删除）
 - 双击 → 详情大图模式（lightbox 全屏）
 - 增量加载：每次取 200 条，滚到底自动续
+- 扫描期间的列表更新（docs/11 R1-5，已实现）：停在列表顶部（滚动不超过半屏）时，每 1.5 秒只重拉头部一段；已经往下翻了就不动列表，在画廊顶部显示"有 N 张新照片，点击刷新"，点击后回到顶部重新加载
 
 性能要求（验收线）：
 - 10 万张图初次加载到能滚动 < 1.5 秒
@@ -307,6 +308,7 @@ events: analysis:progress
 // docs/11 后台资源治理
 governor_status, governor_set_override(mode: auto | fullSpeed | pause1h | pauseUntilRestart)
 thumbs_prioritize(ids)          // 可见区域优先的缩略图
+images_count(params)            // 只查数量：扫描期往下翻时提示"有 N 张新照片"
 events: system:load_mode
 ```
 

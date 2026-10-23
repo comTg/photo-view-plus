@@ -615,6 +615,31 @@ button {
   z-index: 1;
 }
 
+/* 画廊外层：给扫描期的"有 N 张新照片"提示做定位容器（docs/11 R1-5）。 */
+.browse-grid {
+  position: relative;
+  display: flex;
+  flex: 1 1 auto;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.list-update-banner {
+  position: absolute;
+  top: 8px;
+  left: 50%;
+  z-index: 5;
+  transform: translateX(-50%);
+  border: 1px solid var(--accent);
+  border-radius: 999px;
+  padding: 6px 14px;
+  background: var(--accent);
+  color: #fff;
+  box-shadow: var(--shadow);
+  white-space: nowrap;
+  cursor: pointer;
+}
+
 .browse-footer {
   display: grid;
   place-items: center;

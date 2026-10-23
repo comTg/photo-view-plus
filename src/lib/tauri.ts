@@ -125,6 +125,11 @@ export async function imagesQuery(params: ImageQueryParams): Promise<ImagePage> 
   return invoke<ImagePage>("images_query", { params });
 }
 
+/** 只查满足筛选条件的数量（忽略排序 / 分页），扫描期提示"有 N 张新照片"用（docs/11 R1-5）。 */
+export async function imagesCount(params: ImageQueryParams): Promise<number> {
+  return invoke<number>("images_count", { params });
+}
+
 export async function imagesGetDetail(id: number): Promise<ImageRecord | null> {
   return invoke<ImageRecord | null>("images_get_detail", { id });
 }

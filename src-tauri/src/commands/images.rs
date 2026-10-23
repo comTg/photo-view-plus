@@ -28,6 +28,13 @@ pub fn images_query(pool: State<'_, Pool>, params: ImageQueryParams) -> Result<I
     images_repo::query(&conn, &params).map_err(|e| e.to_string())
 }
 
+/// 只返回满足过滤条件的数量：扫描期用户已往下翻时，画廊用它提示"有 N 张新照片"（docs/11 R1-5）。
+#[tauri::command]
+pub fn images_count(pool: State<'_, Pool>, params: ImageQueryParams) -> Result<i64, String> {
+    let conn = pool.get().map_err(|e| e.to_string())?;
+    images_repo::count(&conn, &params).map_err(|e| e.to_string())
+}
+
 #[tauri::command]
 pub fn images_get_detail(pool: State<'_, Pool>, id: i64) -> Result<Option<ImageRecord>, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;

@@ -30,6 +30,7 @@ import {
   facesCluster,
   facesImagesForCluster,
   facesListClusters,
+  imagesCount,
   imagesGetDetail,
   imagesMapPoints,
   imagesQuery,
@@ -127,6 +128,8 @@ import { type ListRange, VirtuosoGrid } from "react-virtuoso";
 
 const PAGE_SIZE = 200;
 const SCAN_REFRESH_MS = 1500;
+/** 扫描期刷新单次最多重拉多少条（与后端 images_query 的 limit 上限一致）。 */
+const MAX_REFRESH_WINDOW = 500;
 const FORMATS = ["jpg", "jpeg", "png", "webp", "heic", "heif", "bmp", "tiff", "gif"];
 const DedupView = lazy(() =>
   import("@/components/dedup/DedupView").then((module) => ({ default: module.DedupView })),
@@ -200,6 +203,12 @@ export default function App() {
   const [images, setImages] = useState<ImageRecord[]>([]);
   const imagesRef = useRef<ImageRecord[]>([]);
   const [total, setTotal] = useState(0);
+  /** 列表上次从头重建（reset / refresh）时的总数，扫描期据此算出新增了多少张。 */
+  const syncedTotalRef = useRef(0);
+  /** 列表比库里少（或多）多少张：扫描期用户已往下翻时只查数量、在顶部提示；null = 已同步。 */
+  const [staleDelta, setStaleDelta] = useState<number | null>(null);
+  /** 画廊最近一次的渲染范围，决定扫描期刷新要重拉多少条。 */
+  const gridRangeRef = useRef<ListRange | null>(null);
   const [imageLoading, setImageLoading] = useState(false);
   const [imageError, setImageError] = useState<string | null>(null);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
@@ -328,6 +337,8 @@ export default function App() {
         setImageLoading(false);
         setImages([]);
         setTotal(0);
+        syncedTotalRef.current = 0;
+        setStaleDelta(null);
         return;
       }
       if ((mode === "more" || mode === "refresh") && imageLoadingRef.current) return;
@@ -342,12 +353,25 @@ export default function App() {
       requestSeqRef.current = seq;
       try {
         const offset = mode === "more" ? imagesRef.current.length : 0;
+        // refresh 只重拉列表头部、刚好盖住当前渲染范围的一段，不再按已加载数量全量重拉（docs/11 R1-5）。
         const limit =
-          mode === "refresh" ? Math.max(PAGE_SIZE, imagesRef.current.length) : PAGE_SIZE;
+          mode === "refresh"
+            ? refreshWindow(gridScrollerRef.current?.isConnected ? gridRangeRef.current : null)
+            : PAGE_SIZE;
         const page = await imagesQuery(buildQuery(offset, limit));
         if (seq !== requestSeqRef.current) return;
         setTotal(page.total);
-        setImages((prev) => (mode === "more" ? mergeImages(prev, page.items) : page.items));
+        if (mode !== "more") {
+          syncedTotalRef.current = page.total;
+          setStaleDelta(null);
+        }
+        setImages((prev) =>
+          mode === "more"
+            ? mergeImages(prev, page.items)
+            : mode === "refresh"
+              ? reuseUnchanged(prev, page.items)
+              : page.items,
+        );
         if (mode === "refresh") {
           restoreGridScroll(scrollTop);
         } else if (mode === "reset") {
@@ -379,13 +403,56 @@ export default function App() {
     void loadImages("reset");
   }, [buildQuery, hasRoots, loadImages]);
 
+  /**
+   * 扫描期的列表刷新（docs/11 R1-5）：用户停在列表顶部（滚动不超过半屏）时重拉头部一段；
+   * 已经往下翻了就只查数量，在顶部提示"有 N 张新照片"，不打乱正在看的位置。
+   */
+  const refreshDuringScan = useCallback(async () => {
+    const el = gridScrollerRef.current;
+    // 画廊没挂载（列表为空 / 在其他视图）时按"在顶部"处理，直接刷新。
+    const nearTop =
+      !el?.isConnected ||
+      (el.scrollTop <= el.clientHeight / 2 &&
+        (gridRangeRef.current?.endIndex ?? 0) < MAX_REFRESH_WINDOW);
+    if (nearTop) {
+      await loadImages("refresh");
+      return;
+    }
+    if (!hasRoots || imageLoadingRef.current) return;
+    const seq = requestSeqRef.current;
+    try {
+      const count = await imagesCount(buildQuery(0));
+      // 期间列表重建过或加载过更多（筛选变化、刷新、翻页），这次结果作废。
+      if (seq !== requestSeqRef.current) return;
+      setTotal(count);
+      const delta = count - syncedTotalRef.current;
+      setStaleDelta(delta === 0 ? null : delta);
+    } catch (error) {
+      console.warn("查询图片数量失败", error);
+    }
+  }, [buildQuery, hasRoots, loadImages]);
+  // 定时器触发时用最新的筛选条件，不用安排定时器那一刻的旧闭包。
+  const refreshDuringScanRef = useRef(refreshDuringScan);
+  refreshDuringScanRef.current = refreshDuringScan;
+
   const scheduleRefresh = useCallback(() => {
     if (refreshTimer.current !== null) return;
     refreshTimer.current = window.setTimeout(() => {
       refreshTimer.current = null;
-      void loadImages("refresh");
+      void refreshDuringScanRef.current();
     }, SCAN_REFRESH_MS);
-  }, [loadImages]);
+  }, []);
+
+  useEffect(
+    () => () => {
+      if (refreshTimer.current !== null) window.clearTimeout(refreshTimer.current);
+    },
+    [],
+  );
+
+  const handleGridRangeChanged = useCallback((range: ListRange) => {
+    gridRangeRef.current = range;
+  }, []);
 
   const handleScanProgress = useCallback(
     (payload: ScanProgress) => {
@@ -402,10 +469,10 @@ export default function App() {
       setToast(`扫描完成：新增 ${payload.added}，更新 ${payload.updated}，移除 ${payload.removed}`);
       void rootsReloadRef.current();
       if (allSelected || payload.rootId === selection) {
-        void loadImages("refresh");
+        void refreshDuringScanRef.current();
       }
     },
-    [allSelected, loadImages, selection],
+    [allSelected, selection],
   );
 
   const handleScanError = useCallback((payload: ScanErrorEvent) => {
@@ -1690,17 +1757,31 @@ export default function App() {
                 onAction={handleScanTargets}
               />
             ) : (
-              <ImageGrid
-                images={images}
-                viewMode={viewMode}
-                selectedIds={selectedIds}
-                selectionMode={selectionMode}
-                onClickImage={handleImageClick}
-                onPreviewImage={handlePreviewById}
-                onOpenContextMenu={handleOpenImageMenu}
-                onEndReached={handleGridEndReached}
-                scrollerRef={handleGridScrollerRef}
-              />
+              <div className="browse-grid">
+                {staleDelta !== null && (
+                  <button
+                    type="button"
+                    className="list-update-banner"
+                    onClick={() => void loadImages("reset")}
+                  >
+                    {staleDelta > 0
+                      ? `有 ${staleDelta.toLocaleString("zh-CN")} 张新照片，点击刷新`
+                      : "列表有更新，点击刷新"}
+                  </button>
+                )}
+                <ImageGrid
+                  images={images}
+                  viewMode={viewMode}
+                  selectedIds={selectedIds}
+                  selectionMode={selectionMode}
+                  onClickImage={handleImageClick}
+                  onPreviewImage={handlePreviewById}
+                  onOpenContextMenu={handleOpenImageMenu}
+                  onEndReached={handleGridEndReached}
+                  onRangeChanged={handleGridRangeChanged}
+                  scrollerRef={handleGridScrollerRef}
+                />
+              </div>
             )}
             {hasRoots && (
               <div className="browse-footer" aria-live="polite">
@@ -2698,6 +2779,8 @@ interface ImageGridProps {
   onPreviewImage: (image: ImageRecord) => void;
   onOpenContextMenu: (image: ImageRecord, event: React.MouseEvent) => void;
   onEndReached: () => void;
+  /** 渲染范围变化（扫描期刷新据此决定重拉多少条）。 */
+  onRangeChanged?: (range: ListRange) => void;
   scrollerRef: (ref: HTMLElement | null) => void;
 }
 
@@ -2710,10 +2793,11 @@ const ImageGrid = memo(function ImageGrid({
   onPreviewImage,
   onOpenContextMenu,
   onEndReached,
+  onRangeChanged,
   scrollerRef,
 }: ImageGridProps) {
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const handleRangeChanged = useVisibleThumbnailPriority(images);
+  const handleRangeChanged = useVisibleThumbnailPriority(images, onRangeChanged);
   return (
     <VirtuosoGrid
       className="virtual-image-grid"
@@ -2744,9 +2828,14 @@ const ImageGrid = memo(function ImageGrid({
  * 可见区域优先的缩略图（docs/11 §5.4）：可见范围变化或列表内容变化后防抖 200ms，把范围内
  * 还没有缩略图的图报给后端，用独立队列先生成。列表没变时不重复发送。
  */
-function useVisibleThumbnailPriority(images: ImageRecord[]) {
+function useVisibleThumbnailPriority(
+  images: ImageRecord[],
+  onRangeChanged?: (range: ListRange) => void,
+) {
   const imagesRef = useRef(images);
   imagesRef.current = images;
+  const onRangeChangedRef = useRef(onRangeChanged);
+  onRangeChangedRef.current = onRangeChanged;
   const rangeRef = useRef<ListRange | null>(null);
   const timerRef = useRef<number | null>(null);
   const lastSentRef = useRef("");
@@ -2773,6 +2862,7 @@ function useVisibleThumbnailPriority(images: ImageRecord[]) {
   const handleRangeChanged = useCallback(
     (range: ListRange) => {
       rangeRef.current = range;
+      onRangeChangedRef.current?.(range);
       schedule();
     },
     [schedule],
@@ -3569,6 +3659,38 @@ const TaskStatus = memo(function TaskStatus({
 function mergeImages(prev: ImageRecord[], next: ImageRecord[]) {
   const seen = new Set(prev.map((image) => image.id));
   return [...prev, ...next.filter((image) => !seen.has(image.id))];
+}
+
+/** 扫描期刷新要重拉的条数：至少一页，并盖住当前渲染范围（大屏小网格一屏就可能超过一页）。 */
+function refreshWindow(range: ListRange | null): number {
+  const rendered = range ? range.endIndex + 1 : 0;
+  return Math.min(
+    MAX_REFRESH_WINDOW,
+    Math.max(PAGE_SIZE, Math.ceil(rendered / PAGE_SIZE) * PAGE_SIZE),
+  );
+}
+
+/**
+ * 刷新得到的列表里，内容没变的记录沿用旧对象，memo 的卡片就不会重渲染；
+ * 整体没变时直接返回旧数组，React 跳过这次更新。
+ */
+function reuseUnchanged(prev: ImageRecord[], next: ImageRecord[]): ImageRecord[] {
+  const byId = new Map(prev.map((image) => [image.id, image]));
+  let unchanged = prev.length === next.length;
+  const merged = next.map((image, index) => {
+    const old = byId.get(image.id);
+    const kept = old && sameRecord(old, image) ? old : image;
+    if (kept !== prev[index]) unchanged = false;
+    return kept;
+  });
+  return unchanged ? prev : merged;
+}
+
+function sameRecord(a: ImageRecord, b: ImageRecord): boolean {
+  for (const key of Object.keys(b) as (keyof ImageRecord)[]) {
+    if (a[key] !== b[key]) return false;
+  }
+  return true;
 }
 
 function selectRange(images: ImageRecord[], prev: number[], fromId: number, toId: number) {

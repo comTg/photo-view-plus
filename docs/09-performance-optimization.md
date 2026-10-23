@@ -37,7 +37,7 @@
 | P1-2 | DB | 日期/时间线/地图共用的 `COALESCE(taken_at,mtime)` 绕过索引 | P1 | ✅ |
 | P1-3 | 后端 | 缩略图全分辨率解码（无降采样 / 不读 EXIF 预览） | P1 | ✅ |
 | P1-4 | 后端 | `pending_*` 查询拉全 30 列 `ImageRecord` | P1 | ✅ |
-| P1-5 | 前端 | refresh 模式全量重拉已加载图片（扫描期每 1.5s） | P1 | ⬜ |
+| P1-5 | 前端 | refresh 模式全量重拉已加载图片（扫描期每 1.5s） | P1 | ✅ |
 | P1-6 | 前端 | `replaceImageRecord` 每事件触碰 6 个 state 数组 | P1 | ⬜ |
 | P1-7 | 前端 | 二级视图（人脸/OCR/相册/AI 搜索）未虚拟化 | P1 | ⬜ |
 | P2-1 | 后端 | 去重分组 insert 无事务（第二处写放大） | P2 | ✅ |
@@ -205,8 +205,12 @@
 - **位置**：[App.tsx:326-328](../src/App.tsx#L326-L328)、[:363-369](../src/App.tsx#L363-L369)（scheduleRefresh）、[:381-390](../src/App.tsx#L381-L390)（scan:done）
 - **方案**：refresh 只拉第一页（或视口附近窗口）再 merge，而非全量。
 - **验证**：`pnpm lint && pnpm typecheck && pnpm test`；`pnpm tauri dev` 扫描期观察网络/invoke 频次与列表更新是否正常。
-- **状态**：⬜ 待办
-- **实测 / 备注**：_（完成后填写）_
+- **状态**：✅ 已完成（2026-10-23，即 docs/11 R1-5）
+- **实测 / 备注**：
+  - 改动文件：[App.tsx](../src/App.tsx)（`refreshDuringScan`、`refreshWindow`、`reuseUnchanged`、顶部提示）、[globals.css](../src/styles/globals.css)；后端新增命令 `images_count`（[images.rs](../src-tauri/src/commands/images.rs)、[images_repo.rs](../src-tauri/src/repo/images_repo.rs) `count`，`query()` 的 total 也改用它）。
+  - 停在顶部（滚动不超过半屏）：只重拉头部一段（≥ 200 条，盖住当前渲染范围，≤ 500 条）替换列表，没变的记录沿用旧对象。已往下翻：只查数量，列表不动，顶部提示"有 N 张新照片，点击刷新"。
+  - 实测（test profile，本地测试图）：已加载 1,400 张、停在中部时新增 300 张并重扫，只发 2 次 `images_count`，列表没有重拉；改动前每次刷新都整表重拉 1,400 条。详见 docs/11 §7.1 R1-5。
+  - 验证：`pnpm lint` ✓、`pnpm typecheck` ✓、`cargo clippy --all-targets -- -D warnings` ✓、`cargo test` ✓；`pnpm tauri:test` 里用 `drive_app.mjs` 拦截 IPC 请求确认查询次数和参数。
 
 ### P1-6 · `replaceImageRecord` 只更新活动视图
 - **层**：前端
@@ -375,3 +379,4 @@
 | 2026-07-02 | P3-7 | BLAKE3 去掉冗余 BufReader，直接读入 4MB buf | 待提交 |
 | 2026-07-02 | P2-1 | 去重 exact/visual 分组 insert 包进单事务批量提交 | 待提交 |
 | 2026-07-02 | P2-6 | 画廊列表查询用 `IMAGE_SELECT_LIST`（ocr_text 置 NULL），不读无界全文 | 待提交 |
+| 2026-10-23 | P1-5 | 扫描期刷新：停在顶部只重拉头部一段，往下翻了只查数量并提示"有 N 张新照片"（docs/11 R1-5） | perf(R1-5) |

@@ -233,6 +233,7 @@ pub fn run() {
             commands::scan::scan_status,
             commands::scan::queue_status,
             commands::images::images_query,
+            commands::images::images_count,
             commands::images::images_get_detail,
             commands::images::images_search_text,
             commands::images::images_timeline,
