@@ -1,4 +1,4 @@
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::fs::{self, File};
 use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
@@ -19,7 +19,7 @@ use crate::queue::{Priority, Scheduler, Task, TaskContext};
 use crate::repo::images_repo::{self, ImageRecord};
 use crate::services::phash_service;
 use crate::utils::bk_tree::DhashIndex;
-use crate::utils::limiter::AdjustableLimiter;
+use crate::utils::limiter::{AdjustableLimiter, LimiterPermit};
 use crate::utils::priority::BackgroundPriorityGuard;
 use crate::utils::read_gate;
 
@@ -52,10 +52,19 @@ static GENERATING: OnceLock<Mutex<HashSet<PathBuf>>> = OnceLock::new();
 /// 可见区域队列的状态。
 #[derive(Default)]
 struct VisibleState {
-    /// 前端最近一次报告的可见区域：排队期间用户滚走了的图留给批量队列。
-    wanted: HashSet<i64>,
+    /// 还没开始生成的图，按优先顺序排：手动重新生成的在最前，然后是前端报来的可见区域（视口里的在前）。
+    /// 每次上报替换可见区域部分：排队期间用户滚走了的图留给批量队列。
+    queue: VecDeque<VisibleJob>,
     /// 已在可见队列里（排队或生成中）的图。
     queued: HashSet<i64>,
+    /// 正在运行的工作者数，最多 [`VISIBLE_THUMBNAIL_CONCURRENCY`]。
+    workers: usize,
+}
+
+struct VisibleJob {
+    task: ThumbnailTask,
+    /// 用户手动重新生成：可见区域变了也保留。
+    regenerate: bool,
 }
 
 /// 占住"正在生成"的名额，drop 时释放。
@@ -285,9 +294,9 @@ impl ThumbnailTask {
     }
 
     /// 可见区域队列里的一张图：固定并发，不占批量名额，以正常优先级运行（用户正在等）。
-    async fn run_visible(self, require_wanted: bool) {
+    async fn run_visible(self, permit: LimiterPermit) {
         let image_id = self.image_id;
-        let result = self.run_visible_inner(require_wanted).await;
+        let result = self.run_visible_inner(permit).await;
         if let Ok(mut state) = visible_state().lock() {
             state.queued.remove(&image_id);
         }
@@ -313,18 +322,8 @@ impl ThumbnailTask {
         }
     }
 
-    /// 返回是否真的生成了（排队期间滚出可见区域、或已被批量队列处理时为 false）。
-    async fn run_visible_inner(&self, require_wanted: bool) -> AppResult<bool> {
-        let permit = visible_limiter().acquire().await;
-        if require_wanted {
-            let wanted = visible_state()
-                .lock()
-                .map(|state| state.wanted.contains(&self.image_id))
-                .unwrap_or(false);
-            if !wanted {
-                return Ok(false);
-            }
-        }
+    /// 返回是否真的生成了（已被批量队列生成或正在生成时为 false）。
+    async fn run_visible_inner(&self, permit: LimiterPermit) -> AppResult<bool> {
         let Some(claim) = GeneratingClaim::try_claim(self) else {
             return Ok(false);
         };
@@ -341,7 +340,8 @@ impl ThumbnailTask {
 /// 可见区域优先（docs/11 §5.4、R3）：前端报告当前可见范围里还没有缩略图的图，这里用独立的
 /// 固定并发生成，不占批量名额，也不受"使用中"的批量限速影响。返回新排进可见队列的张数。
 ///
-/// 每次调用都会替换"可见区域"：之前排队、但已经滚出可见区域的图不再生成，留给批量队列。
+/// 按 `image_ids` 的顺序生成（前端把视口里的排在前面，预渲染区的在后面，docs/11 R6）。每次调用都会
+/// 替换"可见区域"：之前排队、但已经滚出可见区域的图不再生成，留给批量队列。
 pub fn prioritize_visible(
     pool: &Pool,
     thumbs_dir: &Path,
@@ -353,22 +353,41 @@ pub fn prioritize_visible(
         .copied()
         .take(VISIBLE_REQUEST_LIMIT)
         .collect::<Vec<_>>();
-    let pending = {
+    let mut pending = {
         let conn = pool.get()?;
         images_repo::pending_thumbnail_images_by_ids(&conn, &ids)?
     };
-    let fresh = {
-        let mut state = visible_state()
-            .lock()
-            .map_err(|_| AppError::Other("可见区域缩略图状态不可用".to_string()))?;
-        state.wanted = ids.iter().copied().collect();
-        pending
-            .into_iter()
-            .filter(|image| state.queued.insert(image.id))
-            .collect::<Vec<_>>()
-    };
-    let count = fresh.len();
-    for image in fresh {
+    // IN 查询不保证顺序，按前端给的顺序排回来。
+    let rank = ids
+        .iter()
+        .enumerate()
+        .map(|(rank, id)| (*id, rank))
+        .collect::<HashMap<_, _>>();
+    pending.sort_by_key(|image| rank.get(&image.id).copied().unwrap_or(usize::MAX));
+
+    let mut state = visible_state()
+        .lock()
+        .map_err(|_| AppError::Other("可见区域缩略图状态不可用".to_string()))?;
+    let mut previous = HashSet::new();
+    state.queue.retain(|job| {
+        if job.regenerate {
+            return true;
+        }
+        previous.insert(job.task.image_id);
+        false
+    });
+    for id in &previous {
+        state.queued.remove(id);
+    }
+    let mut count = 0;
+    for image in pending {
+        // 正在生成的（或排着的手动重新生成）不重复排。
+        if !state.queued.insert(image.id) {
+            continue;
+        }
+        if !previous.contains(&image.id) {
+            count += 1;
+        }
         let is_network = crate::utils::path_normalize::is_network_path(Path::new(&image.root_path));
         let mut task = ThumbnailTask::new(
             pool.clone(),
@@ -383,9 +402,81 @@ pub fn prioritize_visible(
         if let Some(app) = app {
             task = task.with_event_app(app.clone());
         }
-        tauri::async_runtime::spawn(task.run_visible(true));
+        state.queue.push_back(VisibleJob {
+            task,
+            regenerate: false,
+        });
     }
+    spawn_visible_workers(&mut state);
     Ok(count)
+}
+
+/// 队列里有活、工作者不满 [`VISIBLE_THUMBNAIL_CONCURRENCY`] 个时补上。调用方持有状态锁。
+fn spawn_visible_workers(state: &mut VisibleState) {
+    while state.workers < VISIBLE_THUMBNAIL_CONCURRENCY && state.workers < state.queue.len() {
+        state.workers += 1;
+        tauri::async_runtime::spawn(visible_worker());
+    }
+}
+
+/// 可见队列的工作者：先拿并发许可（治理器可以把它调到 1），再从队头取一张生成，队列空了就退出。
+/// 拿到许可之后才取，所以总是先生成当时排在最前面的图。
+async fn visible_worker() {
+    let mut slot = VisibleWorkerSlot { released: false };
+    loop {
+        let permit = visible_limiter().acquire().await;
+        let job = {
+            let Ok(mut state) = visible_state().lock() else {
+                return;
+            };
+            match state.queue.pop_front() {
+                Some(job) => job,
+                None => {
+                    // 和"取任务"在同一把锁里退出：上报方看到的工作者数总是准的，不会有活没人干。
+                    state.workers = state.workers.saturating_sub(1);
+                    slot.released = true;
+                    return;
+                }
+            }
+        };
+        job.task.run_visible(permit).await;
+    }
+}
+
+/// 工作者异常退出（panic）时归还名额，否则可见队列从此少一个工作者。
+struct VisibleWorkerSlot {
+    released: bool,
+}
+
+impl Drop for VisibleWorkerSlot {
+    fn drop(&mut self) {
+        if self.released {
+            return;
+        }
+        if let Ok(mut state) = visible_state().lock() {
+            state.workers = state.workers.saturating_sub(1);
+        }
+    }
+}
+
+/// 测试用：可见队列里还没开始生成的图，按生成顺序。
+#[doc(hidden)]
+pub fn visible_queue_snapshot() -> Vec<i64> {
+    visible_state()
+        .lock()
+        .map(|state| state.queue.iter().map(|job| job.task.image_id).collect())
+        .unwrap_or_default()
+}
+
+/// 测试用：占住可见队列当前的全部并发许可，工作者取不到任务；drop 后放行。
+#[doc(hidden)]
+pub async fn hold_visible_permits() -> Vec<LimiterPermit> {
+    let limiter = visible_limiter();
+    let mut permits = Vec::new();
+    for _ in 0..limiter.limit() {
+        permits.push(limiter.acquire().await);
+    }
+    permits
 }
 
 /// 资源治理器调整可见区域队列的并发（全屏 / 游戏时 1，其他 2）。
@@ -418,10 +509,18 @@ pub fn enqueue_thumbnail_regeneration(
         is_network,
     )
     .with_completion(completion);
-    if let Ok(mut state) = visible_state().lock() {
-        state.queued.insert(image_id);
-    }
-    tauri::async_runtime::spawn(task.run_visible(false));
+    let mut state = visible_state()
+        .lock()
+        .map_err(|_| AppError::Other("可见区域缩略图状态不可用".to_string()))?;
+    // 用户点了就在等：排到最前面，替换掉同一张图排着的可见区域任务。
+    state.queue.retain(|job| job.task.image_id != image_id);
+    state.queued.insert(image_id);
+    state.queue.push_front(VisibleJob {
+        task,
+        regenerate: true,
+    });
+    spawn_visible_workers(&mut state);
+    drop(state);
 
     image.thumb_status = "pending".to_string();
     image.thumb_hash = None;

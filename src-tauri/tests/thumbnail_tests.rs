@@ -7,8 +7,12 @@ use photo_view_plus_lib::repo::images_repo::{self, NewImageMetadata};
 use photo_view_plus_lib::repo::roots_repo::{self, NewRoot};
 use photo_view_plus_lib::services::thumbnail_service::{self, ThumbnailTask};
 
+/// 可见队列是进程内全局的：用到它的测试串行跑，免得互相占名额、看到别的测试排的图。
+static VISIBLE_QUEUE: tokio::sync::Mutex<()> = tokio::sync::Mutex::const_new(());
+
 #[tokio::test]
 async fn thumbnail_task_generates_jpeg_and_updates_db() {
+    let _visible = VISIBLE_QUEUE.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let db_path = dir.path().join("app.sqlite");
     let pool = photo_view_plus_lib::db::open(&db_path).expect("db");
@@ -245,6 +249,7 @@ fn write_jpeg(path: &PathBuf, width: u32, height: u32) {
 // 之后到来的批量任务发现图已就绪就跳过，不重复读原图。
 #[tokio::test]
 async fn visible_queue_generates_ahead_of_batch_and_dedupes() {
+    let _visible = VISIBLE_QUEUE.lock().await;
     let dir = tempfile::tempdir().expect("tempdir");
     let pool = photo_view_plus_lib::db::open(&dir.path().join("app.sqlite")).expect("db");
     let root_dir = dir.path().join("photos");
@@ -358,6 +363,76 @@ async fn visible_queue_generates_ahead_of_batch_and_dedupes() {
         modified, after,
         "batch task must not regenerate a ready thumbnail"
     );
+}
+
+// docs/11 R6：可见队列按上报的顺序生成（前端把视口里的排在前面）；新的上报替换掉滚出去的图；
+// 手动重新生成排最前，之后的上报也不会把它挤掉。
+#[tokio::test]
+async fn visible_queue_follows_request_order() {
+    let _visible = VISIBLE_QUEUE.lock().await;
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = photo_view_plus_lib::db::open(&dir.path().join("app.sqlite")).expect("db");
+    let root_dir = dir.path().join("photos");
+    let thumbs_dir = dir.path().join("thumbs");
+    std::fs::create_dir_all(&root_dir).expect("root dir");
+    let conn = pool.get().expect("conn");
+    let root = roots_repo::insert(
+        &conn,
+        &NewRoot {
+            path: root_dir.to_string_lossy().to_string(),
+            label: None,
+            root_type: "local".to_string(),
+        },
+        1,
+    )
+    .expect("root");
+    let mut ids = Vec::new();
+    for name in ["a.png", "b.png", "c.png"] {
+        write_png(&root_dir.join(name), name == "b.png");
+        ids.push(insert_image(&conn, root.id, name, "png"));
+    }
+    drop(conn);
+    let (a, b, c) = (ids[0], ids[1], ids[2]);
+
+    // 先占住全部许可：工作者取不到任务，队列顺序可以直接看。
+    let held = thumbnail_service::hold_visible_permits().await;
+    let queued = thumbnail_service::prioritize_visible(&pool, &thumbs_dir, None, &[c, a, b])
+        .expect("prioritize");
+    assert_eq!(queued, 3);
+    assert_eq!(thumbnail_service::visible_queue_snapshot(), vec![c, a, b]);
+    let queued = thumbnail_service::prioritize_visible(&pool, &thumbs_dir, None, &[b, c])
+        .expect("prioritize");
+    assert_eq!(queued, 0, "b、c 只是换了顺序，不算新排进来的");
+    assert_eq!(thumbnail_service::visible_queue_snapshot(), vec![b, c]);
+    let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+    thumbnail_service::enqueue_thumbnail_regeneration(&pool, &thumbs_dir, a, tx)
+        .expect("regenerate");
+    thumbnail_service::prioritize_visible(&pool, &thumbs_dir, None, &[c, b]).expect("prioritize");
+    assert_eq!(thumbnail_service::visible_queue_snapshot(), vec![a, c, b]);
+
+    drop(held);
+    tokio::time::timeout(Duration::from_secs(5), rx.recv())
+        .await
+        .expect("regeneration timed out");
+    tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            let ready = {
+                let conn = pool.get().expect("conn");
+                ids.iter().all(|id| {
+                    images_repo::thumb_status(&conn, *id)
+                        .expect("status")
+                        .as_deref()
+                        == Some("ready")
+                })
+            };
+            if ready && thumbnail_service::visible_queue_snapshot().is_empty() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("visible queue drained");
 }
 
 fn insert_image(conn: &rusqlite::Connection, root_id: i64, name: &str, extension: &str) -> i64 {

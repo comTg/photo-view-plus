@@ -2729,7 +2729,19 @@ const ImageGrid = memo(function ImageGrid({
   scrollerRef,
 }: ImageGridProps) {
   const selectedIdSet = useMemo(() => new Set(selectedIds), [selectedIds]);
-  const handleRangeChanged = useVisibleThumbnailPriority(images, onRangeChanged);
+  const scrollerElementRef = useRef<HTMLElement | null>(null);
+  const handleScrollerRef = useCallback(
+    (element: HTMLElement | null) => {
+      scrollerElementRef.current = element;
+      scrollerRef(element);
+    },
+    [scrollerRef],
+  );
+  const handleRangeChanged = useVisibleThumbnailPriority(
+    images,
+    scrollerElementRef,
+    onRangeChanged,
+  );
   return (
     <VirtuosoGrid
       className="virtual-image-grid"
@@ -2750,18 +2762,53 @@ const ImageGrid = memo(function ImageGrid({
         />
       )}
       listClassName={`image-grid image-grid--${viewMode}`}
-      scrollerRef={scrollerRef}
+      scrollerRef={handleScrollerRef}
       style={{ height: "100%" }}
     />
   );
 });
 
 /**
+ * 渲染范围里待生成缩略图的图：真正在视口里的排前面，其余按离视口的远近排（docs/11 R6）。
+ * 渲染范围含上下预渲染区（`increaseViewportBy`），后端可见队列按收到的顺序生成；按下标顺序发的话，
+ * 视口上方那几行会先占掉名额，用户正在看的一屏反而排在后面。
+ */
+function visibleFirstPendingIds(
+  images: ImageRecord[],
+  range: ListRange,
+  scroller: HTMLElement | null,
+): number[] {
+  let first = range.startIndex;
+  let last = range.endIndex;
+  if (scroller) {
+    const box = scroller.getBoundingClientRect();
+    const shown: number[] = [];
+    for (const item of scroller.querySelectorAll<HTMLElement>("[data-index]")) {
+      const rect = item.getBoundingClientRect();
+      if (rect.bottom > box.top && rect.top < box.bottom) shown.push(Number(item.dataset.index));
+    }
+    if (shown.length > 0) {
+      first = Math.min(...shown);
+      last = Math.max(...shown);
+    }
+  }
+  const distance = (index: number) =>
+    index < first ? first - index : index > last ? index - last : 0;
+  return images
+    .slice(range.startIndex, range.endIndex + 1)
+    .map((image, offset) => ({ image, index: range.startIndex + offset }))
+    .filter(({ image }) => image.thumbStatus === "pending")
+    .sort((a, b) => distance(a.index) - distance(b.index))
+    .map(({ image }) => image.id);
+}
+
+/**
  * 可见区域优先的缩略图（docs/11 §5.4）：可见范围变化或列表内容变化后防抖 200ms，把范围内
- * 还没有缩略图的图报给后端，用独立队列先生成。列表没变时不重复发送。
+ * 还没有缩略图的图报给后端，用独立队列先生成，视口里的排最前。列表没变时不重复发送。
  */
 function useVisibleThumbnailPriority(
   images: ImageRecord[],
+  scrollerRef: React.RefObject<HTMLElement | null>,
   onRangeChanged?: (range: ListRange) => void,
 ) {
   const imagesRef = useRef(images);
@@ -2776,15 +2823,12 @@ function useVisibleThumbnailPriority(
     timerRef.current = null;
     const range = rangeRef.current;
     if (!range) return;
-    const ids = imagesRef.current
-      .slice(range.startIndex, range.endIndex + 1)
-      .filter((image) => image.thumbStatus === "pending")
-      .map((image) => image.id);
+    const ids = visibleFirstPendingIds(imagesRef.current, range, scrollerRef.current);
     const key = ids.join(",");
     if (key === lastSentRef.current) return;
     lastSentRef.current = key;
     thumbsPrioritize(ids).catch((error) => console.warn("可见区域缩略图优先失败", error));
-  }, []);
+  }, [scrollerRef]);
 
   const schedule = useCallback(() => {
     if (timerRef.current !== null) window.clearTimeout(timerRef.current);

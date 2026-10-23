@@ -308,7 +308,7 @@ events: analysis:progress
 
 // docs/11 后台资源治理
 governor_status, governor_set_override(mode: auto | fullSpeed | pause1h | pauseUntilRestart)
-thumbs_prioritize(ids)          // 可见区域优先的缩略图
+thumbs_prioritize(ids)          // 可见区域优先的缩略图（按 ids 顺序生成，视口里的排前面）
 images_count(params)            // 只查数量：扫描期往下翻时提示"有 N 张新照片"
 events: system:load_mode
 ```

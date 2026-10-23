@@ -141,7 +141,7 @@
 ### 5.4 可见区域优先的缩略图
 
 批量生成被限速之后，用户正在看的那一屏不能等。
-- 前端在 `VirtuosoGrid` 的 `rangeChanged` 回调里，把可见范围内还没有缩略图的 id 收集起来，防抖 200ms 后调用新命令 `thumbs_prioritize(ids)`。
+- 前端在 `VirtuosoGrid` 的 `rangeChanged` 回调里，把可见范围内还没有缩略图的 id 收集起来，防抖 200ms 后调用新命令 `thumbs_prioritize(ids)`。真正在视口里的排最前，预渲染区的按离视口远近排在后面；后端按收到的顺序生成（R6 补的）。
 - 后端把这些图放进独立的"可见队列"，有固定并发，不占批量名额；用正在处理的 id 集合去重，避免同一张图生成两次。
 
 ### 5.5 界面
@@ -261,6 +261,7 @@
 - 手动"重新生成缩略图"也走可见队列，不排在批量任务后面，暂停时也能用。
 - 预算表回到方案原值：全屏 / 暂停档批量缩略图 0；暂停档可见队列 2、网络盘读 2（只够可见区域用）。
 - 测试：`thumbnail_tests::visible_queue_generates_ahead_of_batch_and_dedupes`；`governor_tests::budget_table_matches_docs` 覆盖新的预算。
+- R6 发现可见区域出图慢（一屏 20 张 6–8 秒），改成按视口顺序生成的有序队列，见 R6 记录。
 
 **R1-5**（docs/09 P1-5）：
 - 扫描期的刷新（`scan:progress` 每 1.5 秒一次的节拍，以及 `scan:done`）先看画廊的滚动位置：
@@ -319,6 +320,12 @@
     - 调度器的运行计数改由 guard 在 drop 时归还（`queue::RunningGuard`），任务 panic 也不会永久占住名额。之前 panic 的任务会让运行数一直多 1，使用中档 P0 只有 1 个名额，整条缩略图队列就停了。
     - 批量缩略图只在读原图、解码、编码这一段进入后台模式，写库在后台模式之外（§5.3，同扫描写库）。
   - 测试：`queue::tests::panicking_task_returns_its_slot`（先在改动前的代码上确认会失败）、`thumbnail_service::tests::stuck_blocking_work_times_out`。
+- 可见区域出图慢：§8 的目标是 2 秒，S2A 实测一屏 20 张待生成的图要 7.6 秒和 9.6 秒。
+  - 原因：前端按渲染范围的下标顺序上报，而渲染范围含视口上方 640px、下方 1280px 的预渲染区（`increaseViewportBy`），一次报约 65 张；后端用 `IN` 查询取图，不保证顺序，而且每张图一个任务去抢可调许可（`notify_waiters` 一起唤醒），先后基本随机。结果视口里的 20 张要和上下 45 张一起排。
+  - 改法：前端按 `data-index` 找出真正在视口里的卡片，这些排最前，其余按离视口远近排（`visibleFirstPendingIds`）。后端改成有序队列：每次上报按收到的顺序替换队列（滚走的图不再生成），最多 2 个工作者，拿到许可后才取队头，所以总是先做当时排在最前的；手动"重新生成"插到最前，之后的上报不会把它挤掉。全屏档仍由治理器把许可调到 1。
+  - 复测（test profile，"暂停"档只剩可见队列，同一台机器、同一个 NAS 目录，两个构建只差这项改动，各测 3 屏、互不重叠以免命中文件缓存）：改动前一屏 19–20 张 5.5 / 7.6 / 6.6 秒，上下预渲染区的 45 张和可见的几乎同时做完；改动后 1.9 / 2.6 / 2.4 秒（另一次 2.1 秒），预渲染区基本等可见的做完才开始。"使用中"档还要和 1 路批量生成分 NAS 带宽，会略慢；这次测量时远程桌面会话已断开，模拟输入无效，没能在"使用中"档复测。
+  - 读原图的方式不是瓶颈：`thumb_codec_eval::nas_read_strategy_for_thumbnails`，NAS 上 40 张没读过的 jpg（平均 2.4MB），现在的 BufReader 边读边解 p50 41ms / 平均 58ms，整个读进内存再解 p50 36ms / 平均 48ms，只快约 15%，没有改。
+  - 测试：`thumbnail_tests::visible_queue_follows_request_order`（排队顺序、上报替换、手动重新生成排最前）。
 - 测量时的事故：跑 release 评测（`cargo test --release --test thumb_codec_eval`）顺带用默认配置重编了 `target\release` 下的 exe，随后的实验脚本用 `PVP_PROFILE=test` 启动了它。它打开的是**正式库**，执行了 migration 7–11 和设置迁移，约 2 分钟后被关掉。
   - 影响：migration 7–11 全是新增（新表、触发器、`images.thumb_ext` 列，已有记录都记 `webp`），改动只写进了 `app.sqlite-wal`，主文件没动；设置迁移把 `aiClipModel` 从 `clip-vit-b-32` 换成 Chinese-CLIP，`aiEnabled` 仍是关的。启动后的后台任务要等首屏或 180 秒兜底才开始，这次都没跑到：缩略图、向量和图片记录都没有变化（只读核对：ready 9,456、failed 3,001、unsupported 1,503，`thumb_ext` 全是 `webp`）。这些就是正式版升级到当前版本时本来会做的迁移。事故后的库文件和配置另外复制了一份留底（仓库外）。
   - 修复：`config::profile_mismatch`，`PVP_PROFILE` 指定的 profile 和构建的 identifier 对不上时记 ERROR 后直接退出，不打开任何库（没设 `PVP_PROFILE` 的安装版不受影响）。`run_scenarios.ps1` 发现应用启动即退出直接报错；`scripts/perf/README.md` §0.2 补了"构建后不要再跑 `--release` 的 cargo 命令"。端到端核对：用 `PVP_PROFILE=dev` 启动 test 构建，进程立即退出，test 库没有被打开。测试 `config::tests::explicit_profile_must_match_the_build_identifier`。
