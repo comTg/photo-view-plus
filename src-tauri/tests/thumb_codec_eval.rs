@@ -481,3 +481,63 @@ fn synthetic_near_duplicates_keep_f1_with_jpeg_thumbnails() {
         println!("  相对现状 F1 变化 {:+.3}", f1 - baseline);
     }
 }
+
+/// NAS 上读原图的方式（docs/11 R6 发现可见区域出图偏慢）：现在是先单独打开一次读尺寸，再经 8KB 的
+/// BufReader 边读边解码；对比"整个文件一次读进内存再解码"。两种方式各用一半文件（不重复读，避免命中缓存）。
+/// 环境变量 `PVP_EVAL_NAS_DIR`：一个最近没读过的 NAS 照片目录。
+#[test]
+#[ignore]
+fn nas_read_strategy_for_thumbnails() {
+    use std::io::{BufReader, Cursor};
+
+    let dir = PathBuf::from(std::env::var("PVP_EVAL_NAS_DIR").expect("PVP_EVAL_NAS_DIR"));
+    let mut files: Vec<PathBuf> = std::fs::read_dir(&dir)
+        .expect("read dir")
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|path| {
+            path.extension()
+                .and_then(|ext| ext.to_str())
+                .is_some_and(|ext| ext.eq_ignore_ascii_case("jpg"))
+        })
+        .collect();
+    files.sort();
+    files.truncate(40);
+    assert!(files.len() >= 20, "目录里的 jpg 不够");
+
+    fn decode(reader: impl std::io::Read) -> (u32, u32) {
+        let mut decoder = jpeg_decoder::Decoder::new(reader);
+        decoder.scale(512, 512).expect("scale");
+        decoder.decode().expect("decode");
+        let info = decoder.info().expect("info");
+        (u32::from(info.width), u32::from(info.height))
+    }
+
+    let (mut streamed, mut buffered) = (Vec::new(), Vec::new());
+    for (index, path) in files.iter().enumerate() {
+        let started = Instant::now();
+        if index % 2 == 0 {
+            let _ = image::image_dimensions(path).expect("dims");
+            let file = std::fs::File::open(path).expect("open");
+            decode(BufReader::new(file));
+            streamed.push(started.elapsed().as_secs_f64() * 1000.0);
+        } else {
+            let bytes = std::fs::read(path).expect("read");
+            let _ = image::ImageReader::new(Cursor::new(&bytes))
+                .with_guessed_format()
+                .expect("format")
+                .into_dimensions()
+                .expect("dims");
+            decode(Cursor::new(bytes));
+            buffered.push(started.elapsed().as_secs_f64() * 1000.0);
+        }
+    }
+    let p50 = |values: &mut Vec<f64>| percentile(values, 0.5);
+    println!(
+        "{} 张：BufReader 边读边解 p50 {:.0} ms / 平均 {:.0} ms；整个读进内存再解 p50 {:.0} ms / 平均 {:.0} ms",
+        files.len(),
+        p50(&mut streamed.clone()),
+        streamed.iter().sum::<f64>() / streamed.len() as f64,
+        p50(&mut buffered.clone()),
+        buffered.iter().sum::<f64>() / buffered.len() as f64,
+    );
+}

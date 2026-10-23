@@ -10,6 +10,9 @@
 | `frame_probe.html` | 在 Chrome 里打开：自动滚动长图墙 + rAF 帧间隔统计，测"其他应用感受到的卡"（GPU 争用） | 点按钮下载 `frames_<标签>_<时间>.csv` |
 | `drive_app.mjs` | 通过 CDP 驱动应用的 WebView2：调 Tauri 命令（加根目录、扫描、开关 AI）、程序化滚动画廊、统计应用内长任务和帧时间 | `ui_<标签>_<时间>.json/.csv`（加 `--out` 时） |
 | `summarize.py` | 读取测量目录，按场景标签分组，输出各指标 mean / p95 和派生指标（变慢 %、p99 增量、>33ms 帧、长任务/分钟） | `summary.md` |
+| `run_scenarios.ps1` | 无人值守跑完 S0–S5（§6）：串起上面几个工具，模拟"使用中"、检测有没有人在用电脑、重置缩略图负载、测可见区域出图和降档速度 | 以上全部 + `events.log`、`interference.csv`、`visible_latency.json`、`S5_events.json` |
+| `frame_probe_run.mjs` | 用独立的浏览器实例跑一次 frame_probe，经 CDP 取结果（不用手动下载） | `frames_<标签>_<时间>.csv` |
+| `downgrade_report.py` | S5 降档速度：输入前后 CPU / GPU 的水平和回落用时 | 打印表格 |
 
 > docs/11 §4 表里的"应用内探针（`PVP_PERF_PROBE=1`）"没有做——那需要改 `src/`。`drive_app.mjs ui-stats / scroll-gallery` 通过 CDP 在页面里装同样的 `PerformanceObserver('longtask')` 和帧采样器，效果等价，且不用改应用代码。
 
@@ -50,6 +53,8 @@ Remove-Item Env:PVP_PROFILE
 
 - `--config src-tauri/tauri.test.json` 把 identifier 换成 `com.vetoer.photoviewplus.test`，数据落在 `%LOCALAPPDATA%\com.vetoer.photoviewplus.test`。
 - `--no-bundle` 跳过 MSI/NSIS 打包。产物是 `src-tauri\target\release\photo-view-plus.exe`（会覆盖旧文件）。**测完后这个 exe 不要当正式版用**，需要正式版时重新 `pnpm tauri:build:prod`。
+- **构建之后、测量之前，不要在 `src-tauri` 里跑任何 `--release` 的 cargo 命令。** `cargo test --release`（例如跑 `thumb_codec_eval`）和 `cargo build --release` 会顺带重编 bin 目标，用默认配置覆盖这个 exe。docs/11 R6 就这样出过一次事故：评测测试重编了 exe，测量脚本随后用 `PVP_PROFILE=test` 启动它，打开并迁移了正式库。需要跑 release 评测时，跑完重新按上面构建一次。
+- 现在应用自己会拦：`PVP_PROFILE` 指定的 profile 和构建的 identifier 对不上时，记一条 ERROR 日志后直接退出，不打开任何库（`config::profile_mismatch`）。`run_scenarios.ps1` 发现应用启动即退出会直接报错。
 
 ### 0.3 test profile 的数据
 
@@ -283,3 +288,37 @@ python scripts\perf\summarize.py $R0 --all
 - `record.ps1` 用 PDH API 采样（`PdhAddEnglishCounter`，与 `Get-Counter` 同一套英文计数器路径，所以中文系统也能用）。没有直接循环调用 `Get-Counter`：本机实测每次调用要 1.1–3.2 秒（每次都重新展开 `Process(*)` / `GPU Engine(*)` 通配符），撑不住 1 秒一次；而 `-Continuous` 只在开始时展开一次通配符，中途启动的 AI worker、llama-server 会漏掉。现在一个 PDH 查询贯穿全程，每次采集都会重新枚举实例，进程中途出现或退出都能正确处理。
 - 帧数据只在页面可见时有效：Chrome 窗口和应用窗口在各自测量的那一分钟里都要在前台。
 - 用 PowerShell 变量接 `node` 的输出时，先设 `[Console]::OutputEncoding = [System.Text.Encoding]::UTF8`，否则 JSON 里的中文会乱码（`id` 之类不受影响）。
+
+---
+
+## 6. 无人值守：run_scenarios.ps1
+
+手工流程（§1–§3）要人在场切窗口、滚动页面。`run_scenarios.ps1` 把同一套工具串起来，可以在电脑没人用时自己跑完（docs/11 R6 用它测的）。
+
+```powershell
+# 先按 §0.2 构建 test profile 的 release exe；应用不要开着
+pwsh -NoProfile -File scripts\perf\run_scenarios.ps1 -OutDir D:\perf\r6-20261023
+python scripts\perf\downgrade_report.py D:\perf\r6-20261023      # S5 降档速度
+```
+
+| 场景 | 内容 |
+|------|------|
+| S0 ×2 | 应用不开（基线） |
+| S1 | 应用打开，没有后台任务 |
+| S2F / S2A | 生成缩略图：F = 治理器"全速"覆盖（≈ 改动前不限速），A = 自动档 + 模拟有人在用（使用中档）。S2F 是第一次扫描 NAS 目录；S2A 重排一批缩略图，结束后测可见区域出图耗时 |
+| S3F / S3A | 只跑 AI（图像向量 + 标签）；S3F 含 worker 冷启动 |
+| S4F / S4A | 缩略图 + AI 同时 |
+| S5 | 降档速度：等电脑连续 3 分钟以上没人碰、治理器升到空闲档全速后，模拟一次输入，看 CPU / GPU 多久降下来 |
+
+和手工流程的差别：
+
+- **"使用中"靠模拟输入**：每 5 秒发一次零位移的鼠标移动（`SendInput`，光标不动），刷新系统的"最近输入时间"。
+- **有人在用电脑会被记下来**：不是自己发出的输入记进 `interference.csv`（`user_inputs` 列），这些场景的数据要打折扣。
+- **缩略图负载靠重置**：应用关闭时把 test 库里一批已就绪的缩略图标回待生成，重启后由启动重排交给批量队列。只改 test profile 的库，原图只读。NAS 原图第二次读取时可能命中系统文件缓存，网络读取量会偏低，CPU 解码编码量不变。
+- **frame_probe 用独立的浏览器实例**（`frame_probe_run.mjs`，独立用户数据目录，不碰日常的浏览器配置）。它和应用窗口在各自测量的那一分钟会被置顶。
+- **场景时长可以缩短**：`-DurationSec 30 -Only S0,S1` 用来试运行。`-NasRoot` / `-RootLabel` 可以换成本地测试目录。
+
+注意：
+
+- 远程桌面会话里，浏览器和 WebView 按 RDP 虚拟显示器的刷新率出帧（本机实测 32Hz）。帧相关指标只能在场景之间相对比较，不能和本机显示器上的数字直接对比。CPU、GPU、probe、应用长任务不受影响。
+- 跑完约 1 小时，期间电脑会很卡。
