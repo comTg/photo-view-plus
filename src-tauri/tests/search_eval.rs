@@ -388,12 +388,12 @@ async fn eval_prepare() {
         }
         let items = {
             let conn = env.pool.get().expect("conn");
-            images_repo::ready_thumb_hashes(&conn, &ids).expect("thumbs")
+            images_repo::ready_thumb_files(&conn, &ids).expect("thumbs")
         }
         .into_iter()
-        .map(|(id, hash)| ClipEmbedItem {
+        .map(|(id, hash, ext)| ClipEmbedItem {
             id,
-            thumb_path: thumbnail_service::thumb_path(&env.thumbs_dir, &hash)
+            thumb_path: thumbnail_service::thumb_path(&env.thumbs_dir, &hash, &ext)
                 .to_string_lossy()
                 .to_string(),
         })

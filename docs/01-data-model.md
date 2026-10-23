@@ -8,7 +8,7 @@
 |------|------|------|
 | 元数据 / 标签 / 任务 | SQLite | `%LOCALAPPDATA%\PhotoViewPlus\db\app.sqlite` |
 | 向量 | LanceDB | `%LOCALAPPDATA%\PhotoViewPlus\vectors\` |
-| 缩略图 | WebP 文件 | `%LOCALAPPDATA%\PhotoViewPlus\thumbs\<ab>\<hash>.webp` |
+| 缩略图 | JPEG 文件（R4 之前的旧缩略图是 WebP，空闲时自动转换） | `%LOCALAPPDATA%\PhotoViewPlus\thumbs\<ab>\<hash>.jpg` |
 | 模型权重 | 本地 | `%LOCALAPPDATA%\PhotoViewPlus\models\` |
 | 日志 | 文本 | `%LOCALAPPDATA%\PhotoViewPlus\logs\` |
 | 用户设置 | JSON | `%LOCALAPPDATA%\PhotoViewPlus\config.json` |
@@ -64,6 +64,7 @@ CREATE TABLE images (
     -- 缩略图
     thumb_status    TEXT NOT NULL DEFAULT 'pending',   -- 'pending' | 'ready' | 'failed' | 'unsupported'
     thumb_hash      TEXT,                        -- 缩略图文件名前缀（SHA1 前 16 字符）
+    thumb_ext       TEXT NOT NULL DEFAULT 'webp', -- 缩略图扩展名：新生成的 'jpg'，还没转换的旧缩略图 'webp'（migration 0011，docs/11 R4）
 
     -- 去重相关（MVP2 加入，migration 0002）
     blake3          TEXT,                        -- 全文件 BLAKE3，hex
@@ -266,15 +267,17 @@ LanceDB 用作向量列存。每个模型独立 table，因为不同模型维度
 ```
 %LOCALAPPDATA%\PhotoViewPlus\thumbs\
     ab\
-        abcdef0123456789.webp        # 256px 主缩略图
-        abcdef0123456789@512.webp    # 512px（按需，详情页使用）
+        abcdef0123456789.jpg         # 256px 主缩略图
     cd\
-        cd1234abcd5678ef.webp
+        cd1234abcd5678ef.jpg
+        cd5678ef01234567.webp        # R4 之前生成、还没转换的旧缩略图
 ```
 
 - 前两位作为子目录，避免单目录过万文件
-- 文件名 = `thumb_hash`（SHA1(root_id || rel_path) 前 16 字符的 hex）
-- 格式 WebP，quality 78，无 alpha 的图用 lossy，有 alpha 的用 lossless
+- 文件名 = `thumb_hash`（SHA1(root_id || rel_path) 前 16 字符的 hex）+ `images.thumb_ext`
+- 格式（docs/11 R4）：JPEG quality 85，带透明通道的图（PNG 截图等）先铺到白底上。正式库抽 1,000 张实测，体积是原来无损 WebP 的 24%（平均 62.7KB → 15.0KB），编码每张约 1.3ms
+- 旧缩略图：R4 之前是无损 WebP（`thumb_ext='webp'`）。缩略图协议按 `thumb_ext` 读文件、设 Content-Type；空闲档里后台每批 50 张转成 JPEG（只读本地缓存，不读原图），已有 dHash 的顺带用新缩略图重算，转完删掉旧文件。旧文件丢失或损坏的标回 `pending` 重新生成
+- 512px 大图暂未实现（详情页用原图协议）
 
 ### 4.2 失效策略
 
@@ -334,7 +337,7 @@ CREATE TABLE schema_version (
 | 单库图片上限 | 100 万张 |
 | SQLite 文件大小 | < 2 GB（10 万图约 200MB） |
 | LanceDB 大小 | 10 万图 × 512 × float16 = 100MB 左右 |
-| 缩略图 5GB 缓存能装 | 约 30 万张 256px WebP |
+| 缩略图 5GB 缓存能装 | 约 35 万张 256px JPEG（平均约 15KB） |
 | 主键查询 | < 1ms |
 | 按目录 + 时间排序分页 | < 50ms（覆盖索引） |
 | pHash hamming top-100 | < 200ms（BK-tree） |

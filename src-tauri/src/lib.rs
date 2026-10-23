@@ -192,6 +192,15 @@ pub fn run() {
             // BK-tree 全量加载：一次性查全库，放后台线程，让 setup 尽快返回。
             spawn_bktree_init(pool.clone(), dhash_index.clone());
 
+            // docs/11 R4：空闲时把旧的无损 WebP 缩略图逐批转成 JPEG。
+            spawn_legacy_thumbnail_conversion(
+                pool.clone(),
+                paths.thumbs_dir.clone(),
+                governor.clone(),
+                dhash_index.clone(),
+                startup_gate.clone(),
+            );
+
             // 检索全文索引：触发器记下的积压由后台批量重写（升级后首次启动会整库建一遍）。
             spawn_search_index_loop(pool.clone(), startup_gate.clone());
 
@@ -349,6 +358,61 @@ fn spawn_bktree_init(pool: db::Pool, dhash_index: Arc<DhashIndex>) {
     });
 }
 
+/// 旧缩略图每批转换的张数，以及批与批之间的间隔。
+const LEGACY_THUMB_BATCH: usize = 50;
+const LEGACY_THUMB_PAUSE: Duration = Duration::from_millis(500);
+
+/// 旧缩略图转 JPEG（docs/11 R4）：只在空闲档（或手动"全速"）运行，每批 50 张，批间歇一下；
+/// 只读本地缓存，不读原图。全部转完就结束，以后新生成的缩略图本来就是 JPEG。
+fn spawn_legacy_thumbnail_conversion(
+    pool: db::Pool,
+    thumbs_dir: PathBuf,
+    governor: Arc<ResourceGovernor>,
+    dhash_index: Arc<DhashIndex>,
+    gate: Arc<StartupGate>,
+) {
+    tauri::async_runtime::spawn(async move {
+        gate.wait(STARTUP_DEFERRED_WORK_FALLBACK).await;
+        let mut converted = 0usize;
+        loop {
+            if governor.status().tier != services::resource_governor::Tier::Idle {
+                tokio::time::sleep(Duration::from_secs(30)).await;
+                continue;
+            }
+            let (pool, thumbs_dir, index) = (pool.clone(), thumbs_dir.clone(), dhash_index.clone());
+            let batch = tokio::task::spawn_blocking(move || {
+                services::thumbnail_service::convert_legacy_thumbnails(
+                    &pool,
+                    &thumbs_dir,
+                    Some(&index),
+                    LEGACY_THUMB_BATCH,
+                )
+            })
+            .await;
+            match batch {
+                Ok(Ok(outcome)) if outcome.processed() == 0 => {
+                    if converted > 0 {
+                        tracing::info!(converted, "legacy thumbnails converted to jpeg");
+                    }
+                    break;
+                }
+                Ok(Ok(outcome)) => {
+                    converted += outcome.converted;
+                    tokio::time::sleep(LEGACY_THUMB_PAUSE).await;
+                }
+                Ok(Err(error)) => {
+                    tracing::warn!(%error, "legacy thumbnail conversion failed; retrying later");
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                }
+                Err(error) => {
+                    tracing::warn!(%error, "legacy thumbnail conversion task join failed");
+                    tokio::time::sleep(Duration::from_secs(300)).await;
+                }
+            }
+        }
+    });
+}
+
 /// 检索全文索引的后台维护：等首屏完成后开始，每 2 秒把触发器记下的积压批量写进 `search_fts`
 /// （每批一个短事务，批与批之间释放写锁）。搜索前也会顺手处理少量积压，这里负责大批量的情况。
 fn spawn_search_index_loop(pool: db::Pool, gate: Arc<StartupGate>) {
@@ -487,19 +551,30 @@ fn thumb_response(app: &tauri::AppHandle<tauri::Wry>, image_id: i64) -> http::Re
             return text_response(http::StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
         }
     };
-    let hash = match repo::images_repo::get_thumb_hash(&conn, image_id) {
-        Ok(Some(hash)) => hash,
+    let (hash, ext) = match repo::images_repo::get_thumb_file(&conn, image_id) {
+        Ok(Some(file)) => file,
         Ok(None) => return text_response(http::StatusCode::NOT_FOUND, "thumbnail is not ready"),
         Err(error) => {
             return text_response(http::StatusCode::INTERNAL_SERVER_ERROR, &error.to_string())
         }
     };
     drop(conn);
-    let path = services::thumbnail_service::thumb_path(&paths.thumbs_dir, &hash);
-    match std::fs::read(path) {
-        Ok(bytes) => http::Response::builder()
+    use services::thumbnail_service::{thumb_path, LEGACY_THUMB_EXT, THUMB_EXT};
+    // 旧缩略图转 JPEG 时（docs/11 R4），读库和读文件之间可能刚好换了文件：按记录的扩展名读不到就试另一种。
+    let other = if ext == THUMB_EXT {
+        LEGACY_THUMB_EXT
+    } else {
+        THUMB_EXT
+    };
+    let read = std::fs::read(thumb_path(&paths.thumbs_dir, &hash, &ext))
+        .map(|bytes| (bytes, ext.as_str()))
+        .or_else(|_| {
+            std::fs::read(thumb_path(&paths.thumbs_dir, &hash, other)).map(|bytes| (bytes, other))
+        });
+    match read {
+        Ok((bytes, ext)) => http::Response::builder()
             .status(http::StatusCode::OK)
-            .header(header::CONTENT_TYPE, "image/webp")
+            .header(header::CONTENT_TYPE, image_content_type(ext))
             .header(header::CACHE_CONTROL, "max-age=86400")
             .body(bytes)
             .unwrap_or_else(|_| http::Response::new(Vec::new())),

@@ -140,7 +140,7 @@
 
 ### T7 缩略图生成
 
-**目标**：从原图生成 256px WebP，写入缓存目录。
+**目标**：从原图生成 256px 缩略图，写入缓存目录。（MVP1 实现时用的是无损 WebP；docs/11 R4 起改为 JPEG quality 85，旧缩略图空闲时自动转换，见 docs/01 §4。）
 
 具体：
 - 依赖：`image` crate（jpeg/png/webp 默认开），HEIC 用 `libheif-rs`（feature 标 `heic`）
@@ -149,19 +149,19 @@
   1. 读 EXIF Orientation，决定旋转
   2. image::open 解码
   3. resize_with_filter(Lanczos3) 到长边 256
-  4. WebP 编码（quality 78）写到 thumbs/<ab>/<hash>.webp
-  5. update images: thumb_status='ready', thumb_hash=...
+  4. JPEG 编码（quality 85，透明像素铺白底）写到 thumbs/<ab>/<hash>.jpg
+  5. update images: thumb_status='ready', thumb_hash=..., thumb_ext='jpg'
   ```
 - 失败处理：
   - 解码失败 → `thumb_status='failed'`，记 error 列（新加在 0001？决定加 `thumb_error TEXT`）
   - 不支持格式 → `thumb_status='unsupported'`
 - 支持用户从详情面板或图片右键菜单手动重新生成单张缩略图：先重置为 `pending`，再进入同一个 P0 队列；任务完成后随下一批 `thumbnails:updated` 发出（docs/11 R5：每 250ms 合成一批，只带窄字段）
 - 优先级 P0，与扫描 P1 并发跑（扫描喂入新文件，缩略图立刻拣起来做）
-- CPU 限流：缩略图生成是完整解码 + resize + WebP 编码，必须有专用 CPU semaphore；默认按逻辑核数取一半，1-2 核为 1，封顶 6，避免大图库首扫把 CPU 长时间打满导致 UI 卡顿
+- CPU 限流：缩略图生成是完整解码 + resize + 编码，必须有专用 CPU semaphore；默认按逻辑核数取一半，1-2 核为 1，封顶 6，避免大图库首扫把 CPU 长时间打满导致 UI 卡顿
 
 **验收**：
 - 1 万张 JPG 出图 < 90s（CPU 8 核）
-- 缩略图目录布局符合 `<ab>/<hash>.webp`
+- 缩略图目录布局符合 `<ab>/<hash>.<thumb_ext>`
 - 删原图、重扫，缩略图自动失效重建
 
 ### T8 扫描进度事件
@@ -208,7 +208,7 @@
 具体：
 - 用 Tauri 2 的 `register_uri_scheme_protocol("thumb", ...)`：
   - URL：`thumb://<image_id>?size=256`
-  - 处理器查 `images.thumb_hash`，读 `thumbs/<ab>/<hash>.webp` 返回
+  - 处理器查 `images.thumb_hash` 和 `thumb_ext`，读 `thumbs/<ab>/<hash>.<thumb_ext>` 返回，Content-Type 按扩展名设置（docs/11 R4）
   - 加 `Cache-Control: max-age=86400`
 - 前端工具：`thumbUrl(imageId, size=256)`
 
@@ -324,7 +324,7 @@ T1-T4 是单线依赖。T5-T9 是后端管线，可在 T11-T14 前后端并行�
 ## 4. 关键技术点与坑
 
 - **不要把扫描跑在 Tauri command handler 里**：command 只入队 + 返回，循环靠 scheduler
-- **WebP 编码用 `image::codecs::webp::WebPEncoder`** 而不是外部 `cwebp` 进程，避免 Windows 上 dll 依赖
+- **缩略图编码用 `image` crate 自带的编码器**（现为 `image::codecs::jpeg::JpegEncoder`，最初是 `WebPEncoder`），不调外部 `cwebp` / `cjpeg` 进程，避免 Windows 上 dll 依赖
 - **react-virtuoso 的 `VirtuosoGrid` 不会自动测量元素**：必须给固定 `itemHeight` 或精确实现 `useWindowScroll`
 - **EXIF Orientation 必须在缩略图生成时旋转**：否则 lightbox 与列表显示不一致
 - **HEIC 在 MVP1 内可降级**：若 `libheif` 集成成本大，先 `thumb_status='unsupported'` 占位，MVP1.1 补

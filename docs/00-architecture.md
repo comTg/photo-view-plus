@@ -110,7 +110,7 @@ P7 人脸 embedding    ←  默认关
 | Rust 异步 | **tokio** | async-std | 生态绝对主流 |
 | 数据库 | **SQLite（rusqlite + r2d2 连接池）** | Postgres / DuckDB | 单文件、零运维；够撑 100 万行 |
 | 向量库 | **LanceDB** | sqlite-vec / Qdrant local | LanceDB 列存性能好且嵌入式；sqlite-vec 在 50 万向量后明显变慢；Qdrant 要独立进程 |
-| 缩略图编码 | **WebP（libwebp via image-rs）** | AVIF / JPEG | 体积/速度平衡最好；浏览器原生解 |
+| 缩略图编码 | **JPEG quality 85（image-rs 自带编码器）** | WebP 无损 / AVIF | 照片缩略图体积约为无损 WebP 的 24%，编码每张约 1.3ms，纯 Rust 无 dll；最初用无损 WebP，docs/11 R4 改成 JPEG（ADR-011） |
 | 全文索引（MVP4） | **SQLite FTS5** | Tantivy | FTS5 与主库同事务；smart-search 用 Tantivy 但本项目场景 FTS5 足够 |
 | 图片解码 | **image-rs + libheif（HEIC）** | libvips | image-rs 纯 Rust，无 dll 依赖；HEIC 单独走 libheif |
 | AI 框架 | **PyTorch CUDA → ONNX Runtime CUDA** | TensorRT / DirectML | 开发期 PyTorch，产品化转 ONNX；DirectML 仅作 CPU 回退之上的备选 |

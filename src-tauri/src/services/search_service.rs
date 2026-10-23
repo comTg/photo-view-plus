@@ -1444,13 +1444,9 @@ fn hydrate_hits(
 }
 
 fn thumb_path_for(thumbs_dir: &Path, image: &ImageRecord) -> AppResult<String> {
-    let hash = image
-        .thumb_hash
-        .as_deref()
+    let path = thumbnail_service::record_thumb_path(thumbs_dir, image)
         .ok_or_else(|| AppError::Other("缩略图尚未生成，无法运行 AI".to_string()))?;
-    Ok(thumbnail_service::thumb_path(thumbs_dir, hash)
-        .to_string_lossy()
-        .to_string())
+    Ok(path.to_string_lossy().to_string())
 }
 
 fn and_clauses(clauses: &[String]) -> String {

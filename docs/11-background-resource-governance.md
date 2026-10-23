@@ -216,7 +216,7 @@
 | R1-7 | （条件项）若 R0 显示 CPU 是主因，先把缩略图默认并发从 6 降到 4 | ⬜ |
 | R2 | 资源治理器：负载模式、可调许可、预算表、GPU 占空比、`system:load_mode` 事件、状态栏与手动覆盖 | ✅ 前后对比待 R0 / R6 实测 |
 | R3 | 可见区域优先的缩略图 | ✅ |
-| R4 | 缩略图改有损编码 + 迁移 + dHash 回归 | ⬜ |
+| R4 | 缩略图改有损编码 + 迁移 + dHash 回归 | ✅ |
 | R5 | 事件合批 + docs/09 P0-3 剩余部分 | ✅ |
 | R6 | 回归测量（与 R0 同场景）+ 写结论 | ⬜ |
 
@@ -283,6 +283,28 @@
   - 选中一个新目录扫描：可见的 50 张里 30 张先显示"生成中"，生成完全部出图，没有重拉列表；手动"重刷缩略图"后提示"缩略图已重新生成"。
   - React 提交统计（按 DevTools 的判定）：空闲 20 秒，改前 App 整体重渲染 30 次（`queue:status` 每秒一次、`ai:progress` 每 2 秒一次，工具栏和侧栏跟着重渲染），改后 0 次；一次无变化的重扫（12 秒），改前 21 次，改后 2 次（扫描完成提示、目录列表刷新），页脚状态单独渲染 3 次。
 - 测试：`thumbnail_service::tests::event_batches_merge_ids_within_window`、`images_tests::thumbnail_updates_and_count_use_narrow_queries`。
+
+**R4**（ADR-011）：
+- 编码：JPEG quality 85，用 `image` crate 自带的 `JpegEncoder`，不引入新的原生依赖；带透明通道的图先铺到白底上。
+- 迁移：migration 0011 给 `images` 加 `thumb_ext`，已有的记 `webp`，新生成的写 `jpg`；另加部分索引 `idx_images_thumb_webp`，供后台转换查询。
+  - `thumb_path()` 改为带扩展名参数。缩略图协议按 `thumb_ext` 读文件、设 Content-Type，读不到时试另一种扩展名，覆盖转换中途换文件的情况。
+  - AI（图像向量、OCR、人脸）、以图搜图、dHash 都按记录里的扩展名拼路径。
+- 旧缩略图转换：`thumbnail_service::convert_legacy_thumbnails`，在空闲档（或手动"全速"）里每批 50 张、批间隔 500ms。
+  - 只读本地缓存，不读原图。
+  - 已有 dHash 的用新缩略图重算并写回 BK-tree。
+  - 转完删掉旧的 `.webp`；旧文件丢失或损坏的标回待生成。
+  - 全部转完就退出。重新生成缩略图时也会顺手删掉旧的 `.webp`。
+- 抽样实测（`tests/thumb_codec_eval.rs`，正式库快照只读，release 构建）：
+  - 体积：抽 200 张，无损 WebP 平均 56.9KB；JPEG q80 12.1KB（4.7 倍），q85 14.1KB（4.0 倍）。抽 1,000 张，q85 是 WebP 的 24%，其中 PNG 原图 34%。
+  - 编码耗时：p50 约 1.2ms，WebP 无损约 0.5ms，相对解码原图可以忽略，不需要换 `jpeg-encoder`。
+  - dHash 回归（同一张图从无损换成 q85，200 张）：0 位变化 123 张、1 位 41 张、2 位 25 张、3 位及以上 11 张。所以转换时重算 dHash，避免新旧口径混在一起。
+  - 分组回归：快照里阈值 2 下没有现成的近似对（4,866 张有 dHash 的图里 0 对），改用真实缩略图造近似重复：200 组 × 5 张，分别是原图、重压缩 q70、缩到 85%、调亮、缩到 92% 再存 q90。结果：无损 WebP F1 0.439，JPEG q85 0.453，q80 0.507，precision 都是 1.000，没有退化。召回率本身只有约 0.3，是阈值 2 对这类副本偏严，与编码格式无关，记在 ADR-011 后果里另行评估。`dedup_tests` 的 F1 ≥ 0.92 用例（合成 dHash 值）照常通过。
+- 端到端（test profile）：
+  - 2,445 张旧缩略图在"全速"下约 70 秒转完（调试构建），`.webp` 全部删除，画廊正常出图。
+  - 新扫描的 60 张直接生成 `.jpg`。
+  - 这批测试图是大块纯色的合成图，JPEG 反而比无损 WebP 大（11.0MB → 14.9MB），真实照片是缩小 4 倍左右。
+- 预计正式库缩略图缓存从约 979MB 降到约 240MB。
+- 测试：`thumbnail_tests` 新增透明 PNG 铺白底、旧缩略图转换（转换、重算 dHash、旧文件丢失时标回待生成、转完不再重复）、重新生成时删除旧 `.webp`；`db_tests::test_migration_0011_marks_existing_thumbnails_as_webp`。
 
 ## 8. 验收指标（初值，R0 之后修订）
 

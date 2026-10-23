@@ -59,8 +59,15 @@ fn seed(pool: &Pool, n: usize) -> (i64, Vec<i64>) {
                 images_repo::upsert_scanned_image(&conn, &image(root, &format!("{i}.jpg"), 1), 1)
                     .expect("insert")
                     .image_id();
-            images_repo::update_thumbnail_ready(&conn, id, &format!("hash{i:04}"), None, None)
-                .expect("thumb");
+            images_repo::update_thumbnail_ready(
+                &conn,
+                id,
+                &format!("hash{i:04}"),
+                "jpg",
+                None,
+                None,
+            )
+            .expect("thumb");
             id
         })
         .collect();
@@ -197,7 +204,8 @@ fn deleted_or_thumbless_images_are_not_pending_and_changed_files_are_recomputed(
             )
             .expect("count");
         assert_eq!(left, 0);
-        images_repo::update_thumbnail_ready(&conn, ids[2], "newhash", None, None).expect("thumb");
+        images_repo::update_thumbnail_ready(&conn, ids[2], "newhash", "jpg", None, None)
+            .expect("thumb");
     }
     assert_eq!(pending(&pool, NEW), vec![ids[2]]);
 }
@@ -243,8 +251,12 @@ fn migration_0007_inherits_ready_legacy_clip_embeddings() {
                 )
                 .expect("insert")
                 .image_id();
-                images_repo::update_thumbnail_ready(&conn, id, &format!("hash{i}"), None, None)
-                    .expect("thumb");
+                // v6 的表结构还没有 thumb_ext（0011），不能用按最新结构写的 update_thumbnail_ready。
+                conn.execute(
+                    "UPDATE images SET thumb_status = 'ready', thumb_hash = ?1 WHERE id = ?2",
+                    rusqlite::params![format!("hash{i}"), id],
+                )
+                .expect("thumb");
                 id
             })
             .collect::<Vec<_>>();

@@ -94,7 +94,7 @@ let bytes = hasher.hash_image(&dyn_img).as_bytes().to_vec();  // 8 字节 = u64
 
 **字段存储**：8 字节按 `u64` 存到 `images.dhash`。`phash` 列保留（设置里可选切换为 pHash，启用 `.preproc_dct()`）。
 
-**输入**：从 thumbs 缓存读 256px WebP（**不要重新解原图**）。
+**输入**：从 thumbs 缓存读 256px 缩略图（**不要重新解原图**）。docs/11 R4 起缩略图是 JPEG；旧的 WebP 缩略图转成 JPEG 时，已有的 dHash 用新缩略图重算，全库口径一致。抽样评测（`tests/thumb_codec_eval.rs`）：在默认阈值 2 下，用 JPEG 缩略图算的分组 F1 不低于无损 WebP（合成近似重复 0.453 vs 0.439，precision 都是 1.000）。
 
 **任务优先级**：P3。**依赖**：`thumb_status='ready'`。**并发**：worker 内 `rayon` batch。**失败**：单张失败标 `hash_status='failed'`，不阻塞队列。
 

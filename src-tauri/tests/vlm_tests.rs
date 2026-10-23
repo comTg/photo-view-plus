@@ -713,7 +713,7 @@ fn vlm_tagger_switches_ram_tagging_off() {
     let ids = add_images(&pool, r"D:\photos", &[("a.jpg", None)]);
     {
         let conn = pool.get().expect("conn");
-        images_repo::update_thumbnail_ready(&conn, ids[0], "abcd", Some(10), Some(10))
+        images_repo::update_thumbnail_ready(&conn, ids[0], "abcd", "jpg", Some(10), Some(10))
             .expect("thumb");
     }
     let supervisor = std::sync::Arc::new(

@@ -13,7 +13,7 @@ const IMAGE_SELECT: &str = "\
            i.indexed_at, i.deleted_at, r.path,
            i.blake3, i.phash, i.dhash, i.hash_status,
            i.tag_status, i.embedding_status,
-           i.ocr_status, i.ocr_text, i.face_status
+           i.ocr_status, i.ocr_text, i.face_status, i.thumb_ext
     FROM images i
     JOIN roots r ON r.id = i.root_id";
 
@@ -27,7 +27,7 @@ const IMAGE_SELECT_LIST: &str = "\
            i.indexed_at, i.deleted_at, r.path,
            i.blake3, i.phash, i.dhash, i.hash_status,
            i.tag_status, i.embedding_status,
-           i.ocr_status, NULL, i.face_status
+           i.ocr_status, NULL, i.face_status, i.thumb_ext
     FROM images i
     JOIN roots r ON r.id = i.root_id";
 
@@ -52,6 +52,8 @@ pub struct ImageRecord {
     pub thumb_status: String,
     pub thumb_hash: Option<String>,
     pub thumb_error: Option<String>,
+    /// 缩略图文件的扩展名：新生成的是 `jpg`，R4 之前生成、还没转换的是 `webp`（docs/11 R4）。
+    pub thumb_ext: String,
     pub indexed_at: i64,
     pub deleted_at: Option<i64>,
     pub root_path: String,
@@ -252,29 +254,35 @@ pub fn get_details_by_ids(conn: &Connection, ids: &[i64]) -> AppResult<Vec<Image
     Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
-/// 批量取缩略图哈希（只返回缩略图就绪、未删除的图），保持 `ids` 的顺序。
-pub fn ready_thumb_hashes(conn: &Connection, ids: &[i64]) -> AppResult<Vec<(i64, String)>> {
+/// 批量取缩略图文件 (id, thumb_hash, 扩展名)（只返回缩略图就绪、未删除的图），保持 `ids` 的顺序。
+pub fn ready_thumb_files(conn: &Connection, ids: &[i64]) -> AppResult<Vec<(i64, String, String)>> {
     if ids.is_empty() {
         return Ok(Vec::new());
     }
     let sql = format!(
-        "SELECT id, thumb_hash FROM images
+        "SELECT id, thumb_hash, thumb_ext FROM images
          WHERE id IN ({}) AND deleted_at IS NULL AND thumb_status = 'ready' AND thumb_hash IS NOT NULL",
         placeholders(ids.len())
     );
     let mut stmt = conn.prepare(&sql)?;
     let rows = stmt.query_map(
         params_from_iter(ids.iter().copied().map(Value::Integer)),
-        |row| Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?)),
+        |row| {
+            Ok((
+                row.get::<_, i64>(0)?,
+                row.get::<_, String>(1)?,
+                row.get::<_, String>(2)?,
+            ))
+        },
     )?;
     let mut by_id = std::collections::HashMap::new();
     for row in rows {
-        let (id, hash) = row?;
-        by_id.insert(id, hash);
+        let (id, hash, ext) = row?;
+        by_id.insert(id, (hash, ext));
     }
     Ok(ids
         .iter()
-        .filter_map(|id| by_id.remove(id).map(|hash| (*id, hash)))
+        .filter_map(|id| by_id.remove(id).map(|(hash, ext)| (*id, hash, ext)))
         .collect())
 }
 
@@ -321,12 +329,15 @@ pub fn thumbnail_updates(conn: &Connection, ids: &[i64]) -> AppResult<Vec<Thumbn
     Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
-pub fn get_thumb_hash(conn: &Connection, id: i64) -> AppResult<Option<String>> {
-    Ok(conn
-        .prepare_cached("SELECT thumb_hash FROM images WHERE id = ?1")?
-        .query_row([id], |row| row.get(0))
-        .optional()?
-        .flatten())
+/// 缩略图文件的 (thumb_hash, 扩展名)；还没有缩略图时为 `None`。
+pub fn get_thumb_file(conn: &Connection, id: i64) -> AppResult<Option<(String, String)>> {
+    let row = conn
+        .prepare_cached("SELECT thumb_hash, thumb_ext FROM images WHERE id = ?1")?
+        .query_row([id], |row| {
+            Ok((row.get::<_, Option<String>>(0)?, row.get::<_, String>(1)?))
+        })
+        .optional()?;
+    Ok(row.and_then(|(hash, ext)| hash.map(|hash| (hash, ext))))
 }
 
 /// 重复扫描快速跳过用的轻量状态：只取判断"文件是否改动"所需字段，
@@ -468,17 +479,66 @@ pub fn update_thumbnail_ready(
     conn: &Connection,
     id: i64,
     thumb_hash: &str,
+    thumb_ext: &str,
     width: Option<i64>,
     height: Option<i64>,
 ) -> AppResult<()> {
     conn.execute(
         "UPDATE images
-         SET thumb_status = 'ready', thumb_hash = ?1, thumb_error = NULL,
-             width = COALESCE(width, ?2), height = COALESCE(height, ?3)
-         WHERE id = ?4",
-        params![thumb_hash, width, height, id],
+         SET thumb_status = 'ready', thumb_hash = ?1, thumb_ext = ?2, thumb_error = NULL,
+             width = COALESCE(width, ?3), height = COALESCE(height, ?4)
+         WHERE id = ?5",
+        params![thumb_hash, thumb_ext, width, height, id],
     )?;
     Ok(())
+}
+
+/// 还没转成 JPEG 的旧缩略图（docs/11 R4），按 id 顺序取一批：(id, thumb_hash, 是否已有 dHash)。
+pub fn legacy_webp_thumbnails(
+    conn: &Connection,
+    limit: usize,
+) -> AppResult<Vec<(i64, String, bool)>> {
+    let mut stmt = conn.prepare_cached(
+        "SELECT id, thumb_hash, dhash IS NOT NULL FROM images
+         WHERE thumb_ext = 'webp' AND thumb_status = 'ready'
+           AND thumb_hash IS NOT NULL AND deleted_at IS NULL
+         ORDER BY id LIMIT ?1",
+    )?;
+    let rows = stmt.query_map([i64::try_from(limit).unwrap_or(i64::MAX)], |row| {
+        Ok((row.get(0)?, row.get(1)?, row.get(2)?))
+    })?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+/// 旧缩略图文件丢失或损坏：标回待生成（只在它仍是那张旧缩略图时），返回是否更新了。
+pub fn requeue_legacy_thumbnail(conn: &Connection, id: i64, thumb_hash: &str) -> AppResult<bool> {
+    let updated = conn.execute(
+        "UPDATE images SET thumb_status = 'pending', thumb_hash = NULL, thumb_error = NULL
+         WHERE id = ?1 AND thumb_hash = ?2 AND thumb_ext = 'webp' AND thumb_status = 'ready'",
+        params![id, thumb_hash],
+    )?;
+    Ok(updated > 0)
+}
+
+/// 旧缩略图转换完成：记下新扩展名；`dhash` 有值时换成从新缩略图重算的值。
+/// 只在这张图仍是那张旧缩略图时生效（转换期间被重扫或重刷过的不动），返回是否更新了。
+pub fn mark_thumbnail_converted(
+    conn: &Connection,
+    id: i64,
+    thumb_hash: &str,
+    thumb_ext: &str,
+    dhash: Option<i64>,
+) -> AppResult<bool> {
+    let updated = conn.execute(
+        "UPDATE images SET thumb_ext = ?1, dhash = COALESCE(?2, dhash)
+         WHERE id = ?3 AND thumb_hash = ?4 AND thumb_ext = 'webp' AND thumb_status = 'ready'",
+        params![thumb_ext, dhash, id, thumb_hash],
+    )?;
+    Ok(updated > 0)
 }
 
 pub fn update_thumbnail_failed(
@@ -731,11 +791,12 @@ pub struct PendingImage {
     pub full_path: String,
     pub orientation: Option<i64>,
     pub thumb_hash: Option<String>,
+    pub thumb_ext: String,
 }
 
-/// 窄投影列集（6 列），列顺序与 `row_to_pending` 严格对应。
+/// 窄投影列集（7 列），列顺序与 `row_to_pending` 严格对应。
 const PENDING_SELECT: &str = "\
-    SELECT i.id, i.root_id, i.rel_path, r.path, i.orientation, i.thumb_hash
+    SELECT i.id, i.root_id, i.rel_path, r.path, i.orientation, i.thumb_hash, i.thumb_ext
     FROM images i
     JOIN roots r ON r.id = i.root_id";
 
@@ -755,6 +816,7 @@ fn row_to_pending(row: &rusqlite::Row<'_>) -> rusqlite::Result<PendingImage> {
         full_path,
         orientation: row.get(4)?,
         thumb_hash: row.get(5)?,
+        thumb_ext: row.get(6)?,
     })
 }
 
@@ -1387,6 +1449,7 @@ fn row_to_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<ImageRecord> {
         ocr_status: row.get(27)?,
         ocr_text: row.get(28)?,
         face_status: row.get(29)?,
+        thumb_ext: row.get(30)?,
     })
 }
 

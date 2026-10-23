@@ -1,8 +1,9 @@
-//! 视觉哈希服务（默认 dHash / Gradient）。从缩略图缓存读 256px WebP，算 64-bit hash 写入 `images.dhash`。
+//! 视觉哈希服务（默认 dHash / Gradient）。从缩略图缓存读 256px 缩略图（JPEG；R4 之前的旧缩略图是
+//! WebP，见 docs/11 R4），算 64-bit hash 写入 `images.dhash`。
 //!
 //! 设计要点（详见 `docs/04` § 2 T3 + ADR-005）：
 //! - 用 `image_hasher` crate；默认参数与 czkawka 对齐（dHash, hash_size=8, Lanczos3, 不启用 DCT）
-//! - **不**重解原图，从 `thumbs/<ab>/<hash>.webp` 读——快 10×
+//! - **不**重解原图，从 `thumbs/<ab>/<hash>.<ext>` 读——快 10×
 //! - 完成后塞进共享的 `DhashIndex`（BK-tree），dedup_service 增量查询用
 //! - 优先级 P3，依赖 thumb_status='ready'
 
@@ -16,7 +17,6 @@ use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Task, TaskContext};
 use crate::repo::images_repo;
-use crate::services::thumbnail_service;
 use crate::utils::bk_tree::DhashIndex;
 use crate::utils::priority::BackgroundPriorityGuard;
 
@@ -24,24 +24,16 @@ use crate::utils::priority::BackgroundPriorityGuard;
 pub struct DhashTask {
     pool: Pool,
     image_id: i64,
-    thumbs_dir: PathBuf,
-    thumb_hash: String,
+    thumb_path: PathBuf,
     index: Arc<DhashIndex>,
 }
 
 impl DhashTask {
-    pub fn new(
-        pool: Pool,
-        image_id: i64,
-        thumbs_dir: PathBuf,
-        thumb_hash: String,
-        index: Arc<DhashIndex>,
-    ) -> Self {
+    pub fn new(pool: Pool, image_id: i64, thumb_path: PathBuf, index: Arc<DhashIndex>) -> Self {
         Self {
             pool,
             image_id,
-            thumbs_dir,
-            thumb_hash,
+            thumb_path,
             index,
         }
     }
@@ -67,10 +59,10 @@ impl Task for DhashTask {
 }
 
 fn compute(task: DhashTask) -> AppResult<()> {
-    let thumb_path = thumbnail_service::thumb_path(&task.thumbs_dir, &task.thumb_hash);
+    let thumb_path = &task.thumb_path;
     let computed = {
         let _bg = BackgroundPriorityGuard::enter();
-        dhash_from_thumb(&thumb_path)
+        dhash_from_thumb(thumb_path)
     };
     let dhash = match computed {
         Ok(value) => value,
@@ -87,16 +79,19 @@ fn compute(task: DhashTask) -> AppResult<()> {
     Ok(())
 }
 
-/// 把缩略图 WebP 解码 → image_hasher dHash → u64。
-/// hash_size=8 ⇒ as_bytes() 是 8 字节，按 little-endian 拼成 u64。
+/// 把缩略图解码 → image_hasher dHash → u64。
 pub fn dhash_from_thumb(thumb_path: &std::path::Path) -> AppResult<u64> {
-    let img = image::open(thumb_path)?;
+    dhash_of_image(&image::open(thumb_path)?)
+}
+
+/// 对已解码的图算 dHash。hash_size=8 ⇒ as_bytes() 是 8 字节，按 little-endian 拼成 u64。
+pub fn dhash_of_image(img: &image::DynamicImage) -> AppResult<u64> {
     let hasher = HasherConfig::new()
         .hash_alg(HashAlg::Gradient)
         .hash_size(8, 8)
         .resize_filter(FilterType::Lanczos3)
         .to_hasher();
-    let bytes = hasher.hash_image(&img).as_bytes().to_vec();
+    let bytes = hasher.hash_image(img).as_bytes().to_vec();
     let arr: [u8; 8] = bytes.as_slice().try_into().map_err(|_| {
         AppError::Other(format!(
             "image_hasher 返回 {} 字节，期望 8 字节",

@@ -27,7 +27,9 @@ def snapshot_db() -> Path:
 
 
 def thumb_path(thumbs_dir: Path, thumb_hash: str) -> Path:
-    return thumbs_dir / thumb_hash[:2] / f"{thumb_hash}.webp"
+    # docs/11 R4 起缩略图是 JPEG；还没转换的旧缩略图是 WebP。
+    jpeg = thumbs_dir / thumb_hash[:2] / f"{thumb_hash}.jpg"
+    return jpeg if jpeg.exists() else jpeg.with_suffix(".webp")
 
 
 def main() -> None:

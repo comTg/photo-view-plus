@@ -79,9 +79,9 @@ pub fn thumbs_path(
     _size: Option<u32>,
 ) -> Result<Option<String>, String> {
     let conn = pool.get().map_err(|e| e.to_string())?;
-    let hash = images_repo::get_thumb_hash(&conn, image_id).map_err(|e| e.to_string())?;
-    Ok(hash.map(|hash| {
-        thumbnail_service::thumb_path(&paths.thumbs_dir, &hash)
+    let file = images_repo::get_thumb_file(&conn, image_id).map_err(|e| e.to_string())?;
+    Ok(file.map(|(hash, ext)| {
+        thumbnail_service::thumb_path(&paths.thumbs_dir, &hash, &ext)
             .to_string_lossy()
             .to_string()
     }))

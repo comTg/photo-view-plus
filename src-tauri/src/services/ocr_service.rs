@@ -136,14 +136,13 @@ fn records_to_ocr_items(
     records
         .iter()
         .map(|record| {
-            let hash = record.thumb_hash.as_deref().ok_or_else(|| {
-                AppError::Other(format!("image {} thumbnail is not ready", record.id))
-            })?;
+            let thumb_path =
+                thumbnail_service::record_thumb_path(thumbs_dir, record).ok_or_else(|| {
+                    AppError::Other(format!("image {} thumbnail is not ready", record.id))
+                })?;
             Ok(OcrImageItem {
                 id: record.id,
-                thumb_path: thumbnail_service::thumb_path(thumbs_dir, hash)
-                    .to_string_lossy()
-                    .to_string(),
+                thumb_path: thumb_path.to_string_lossy().to_string(),
             })
         })
         .collect()

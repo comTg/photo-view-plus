@@ -57,7 +57,10 @@ def cell(item: dict, number: int, fonts) -> Image.Image:
     title_font, text_font = fonts
     img = Image.new("RGB", (CELL_W, THUMB_H + TEXT_H), (24, 24, 28))
     thumb_hash = item["record"]["thumb_hash"]
-    path = thumbs_dir() / thumb_hash[:2] / f"{thumb_hash}.webp"
+    # docs/11 R4 起缩略图是 JPEG；还没转换的旧缩略图是 WebP。
+    path = thumbs_dir() / thumb_hash[:2] / f"{thumb_hash}.jpg"
+    if not path.exists():
+        path = path.with_suffix(".webp")
     try:
         thumb = Image.open(path).convert("RGB")
         thumb.thumbnail((CELL_W, THUMB_H))

@@ -27,7 +27,7 @@ use crate::queue::{Priority, Scheduler, Task, TaskContext};
 use crate::repo::{duplicates_repo, images_repo};
 use crate::services::hash_service::BlakeHashTask;
 use crate::services::phash_service::{self, DhashTask};
-use crate::services::trash_service;
+use crate::services::{thumbnail_service, trash_service};
 use crate::utils::bk_tree::DhashIndex;
 use crate::utils::path_normalize;
 
@@ -279,7 +279,7 @@ pub fn start_dedup(
     if method.includes_visual() {
         let conn = pool.get()?;
         for img in images_repo::pending_dhash_images(&conn)? {
-            let Some(thumb_hash) = img.thumb_hash.clone() else {
+            let Some(thumb_hash) = img.thumb_hash.as_deref() else {
                 continue;
             };
             coord.dhash_inflight.fetch_add(1, Ordering::Relaxed);
@@ -287,8 +287,7 @@ pub fn start_dedup(
                 inner: DhashTask::new(
                     pool.clone(),
                     img.id,
-                    thumbs_dir.clone(),
-                    thumb_hash,
+                    thumbnail_service::thumb_path(&thumbs_dir, thumb_hash, &img.thumb_ext),
                     index.clone(),
                 ),
                 coord: coord.clone(),

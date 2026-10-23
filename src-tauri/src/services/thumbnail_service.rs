@@ -1,13 +1,13 @@
 use std::collections::HashSet;
 use std::fs::{self, File};
-use std::io::{BufReader, BufWriter};
+use std::io::{BufReader, BufWriter, Write};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use async_trait::async_trait;
-use image::codecs::webp::WebPEncoder;
-use image::{DynamicImage, ImageEncoder};
+use image::codecs::jpeg::JpegEncoder;
+use image::{DynamicImage, ExtendedColorType, ImageEncoder, Rgb, RgbImage};
 use sha1::{Digest, Sha1};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
@@ -16,7 +16,9 @@ use tokio_util::sync::CancellationToken;
 use crate::db::Pool;
 use crate::error::{AppError, AppResult};
 use crate::queue::{Priority, Scheduler, Task, TaskContext};
-use crate::repo::images_repo;
+use crate::repo::images_repo::{self, ImageRecord};
+use crate::services::phash_service;
+use crate::utils::bk_tree::DhashIndex;
 use crate::utils::limiter::AdjustableLimiter;
 use crate::utils::priority::BackgroundPriorityGuard;
 use crate::utils::read_gate;
@@ -29,6 +31,12 @@ pub const VISIBLE_THUMBNAIL_CONCURRENCY: usize = 2;
 const VISIBLE_REQUEST_LIMIT: usize = 160;
 /// 缩略图完成事件的合批窗口（docs/11 R5）。
 pub const EVENT_BATCH_WINDOW: Duration = Duration::from_millis(250);
+/// 新生成的缩略图格式（docs/11 R4）：有损 JPEG。
+pub const THUMB_EXT: &str = "jpg";
+/// R4 之前生成的缩略图是无损 WebP，空闲时由 [`convert_legacy_thumbnails`] 逐批转成 JPEG。
+pub const LEGACY_THUMB_EXT: &str = "webp";
+/// JPEG 质量：抽样实测体积约为无损 WebP 的 25%，dHash 分组效果不变（docs/11 R4）。
+const JPEG_QUALITY: u8 = 85;
 
 static THUMBNAIL_CPU_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
 static VISIBLE_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
@@ -51,10 +59,14 @@ struct GeneratingClaim(PathBuf);
 
 impl GeneratingClaim {
     fn try_claim(task: &ThumbnailTask) -> Option<Self> {
-        let path = thumb_path(
+        Self::try_claim_path(thumb_path(
             &task.thumbs_dir,
             &thumb_hash_for(task.root_id, &task.rel_path),
-        );
+            THUMB_EXT,
+        ))
+    }
+
+    fn try_claim_path(path: PathBuf) -> Option<Self> {
         let mut generating = GENERATING
             .get_or_init(|| Mutex::new(HashSet::new()))
             .lock()
@@ -490,6 +502,84 @@ pub fn requeue_pending_thumbnails(
     Ok(count)
 }
 
+/// 一批旧缩略图转换的结果（docs/11 R4）。
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub struct LegacyConversion {
+    /// 转成 JPEG 的张数。
+    pub converted: usize,
+    /// 旧文件丢失或损坏、标回待生成的张数（由可见区域队列或下次启动的重排重新生成）。
+    pub regenerate: usize,
+    /// 正在被生成任务处理、或转换期间被重扫重刷过的张数，这批跳过。
+    pub skipped: usize,
+}
+
+impl LegacyConversion {
+    pub fn processed(&self) -> usize {
+        self.converted + self.regenerate + self.skipped
+    }
+}
+
+/// 把一批 R4 之前的无损 WebP 缩略图转成 JPEG（docs/11 R4）。只读本地缓存，不读原图；转完删掉旧文件。
+/// 已有 dHash 的图顺带用新缩略图重算，全库的 dHash 都出自同一种缩略图，视觉去重前后可比。
+pub fn convert_legacy_thumbnails(
+    pool: &Pool,
+    thumbs_dir: &Path,
+    dhash_index: Option<&DhashIndex>,
+    limit: usize,
+) -> AppResult<LegacyConversion> {
+    let legacy = {
+        let conn = pool.get()?;
+        images_repo::legacy_webp_thumbnails(&conn, limit)?
+    };
+    let _bg = BackgroundPriorityGuard::enter();
+    let mut outcome = LegacyConversion::default();
+    for (image_id, hash, has_dhash) in legacy {
+        let target = thumb_path(thumbs_dir, &hash, THUMB_EXT);
+        let Some(_claim) = GeneratingClaim::try_claim_path(target.clone()) else {
+            outcome.skipped += 1;
+            continue;
+        };
+        let source = thumb_path(thumbs_dir, &hash, LEGACY_THUMB_EXT);
+        let image = match image::open(&source) {
+            Ok(image) => image,
+            Err(error) => {
+                tracing::warn!(image_id, path = ?source, %error, "legacy thumbnail unreadable; regenerating");
+                let conn = pool.get()?;
+                if images_repo::requeue_legacy_thumbnail(&conn, image_id, &hash)? {
+                    outcome.regenerate += 1;
+                } else {
+                    outcome.skipped += 1;
+                }
+                continue;
+            }
+        };
+        write_jpeg(&image, &target)?;
+        let dhash = if has_dhash {
+            Some(phash_service::dhash_from_thumb(&target)?)
+        } else {
+            None
+        };
+        let conn = pool.get()?;
+        let converted = images_repo::mark_thumbnail_converted(
+            &conn,
+            image_id,
+            &hash,
+            THUMB_EXT,
+            dhash.map(|value| value as i64),
+        )?;
+        if !converted {
+            outcome.skipped += 1;
+            continue;
+        }
+        if let (Some(index), Some(dhash)) = (dhash_index, dhash) {
+            index.insert(image_id, dhash);
+        }
+        let _ = fs::remove_file(&source);
+        outcome.converted += 1;
+    }
+    Ok(outcome)
+}
+
 pub fn thumb_hash_for(root_id: i64, rel_path: &str) -> String {
     let mut hasher = Sha1::new();
     hasher.update(root_id.to_le_bytes());
@@ -502,9 +592,46 @@ pub fn thumb_hash_for(root_id: i64, rel_path: &str) -> String {
         .collect()
 }
 
-pub fn thumb_path(thumbs_dir: &Path, thumb_hash: &str) -> PathBuf {
+/// 缩略图文件：`<thumbs>/<hash 前两位>/<hash>.<ext>`，`ext` 见 [`THUMB_EXT`] / [`LEGACY_THUMB_EXT`]。
+pub fn thumb_path(thumbs_dir: &Path, thumb_hash: &str, ext: &str) -> PathBuf {
     let prefix = thumb_hash.get(0..2).unwrap_or("00");
-    thumbs_dir.join(prefix).join(format!("{thumb_hash}.webp"))
+    thumbs_dir.join(prefix).join(format!("{thumb_hash}.{ext}"))
+}
+
+/// 一条图片记录的缩略图文件；还没有缩略图时为 `None`。
+pub fn record_thumb_path(thumbs_dir: &Path, record: &ImageRecord) -> Option<PathBuf> {
+    record
+        .thumb_hash
+        .as_deref()
+        .map(|hash| thumb_path(thumbs_dir, hash, &record.thumb_ext))
+}
+
+/// 缩略图编码成 JPEG 写到 `path`；带透明通道的（PNG 截图等）先铺到白底上。
+fn write_jpeg(thumb: &DynamicImage, path: &Path) -> AppResult<()> {
+    let rgb = flatten_on_white(thumb);
+    let mut writer = BufWriter::new(File::create(path)?);
+    JpegEncoder::new_with_quality(&mut writer, JPEG_QUALITY).write_image(
+        rgb.as_raw(),
+        rgb.width(),
+        rgb.height(),
+        ExtendedColorType::Rgb8,
+    )?;
+    writer.flush()?;
+    Ok(())
+}
+
+fn flatten_on_white(image: &DynamicImage) -> RgbImage {
+    if !image.color().has_alpha() {
+        return image.to_rgb8();
+    }
+    let rgba = image.to_rgba8();
+    RgbImage::from_fn(rgba.width(), rgba.height(), |x, y| {
+        let [r, g, b, a] = rgba.get_pixel(x, y).0;
+        let alpha = u16::from(a);
+        let blend =
+            |channel: u8| ((u16::from(channel) * alpha + 255 * (255 - alpha) + 127) / 255) as u8;
+        Rgb([blend(r), blend(g), blend(b)])
+    })
 }
 
 /// `background`：批量队列整段降到后台优先级；可见区域队列用正常优先级（用户正在等这张图）。
@@ -512,11 +639,11 @@ fn generate(task: ThumbnailTask, cancel: &CancellationToken, background: bool) -
     if cancel.is_cancelled() {
         return Ok(());
     }
-    // 解码 / 缩放 / WebP 编码 + 读原图都很重，批量生成整段降到后台优先级，避免拖卡前台 UI。
+    // 解码 / 缩放 / JPEG 编码 + 读原图都很重，批量生成整段降到后台优先级，避免拖卡前台 UI。
     let _bg = background.then(BackgroundPriorityGuard::enter);
 
     let hash = thumb_hash_for(task.root_id, &task.rel_path);
-    let path = thumb_path(&task.thumbs_dir, &hash);
+    let path = thumb_path(&task.thumbs_dir, &hash, THUMB_EXT);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
@@ -547,18 +674,19 @@ fn generate(task: ThumbnailTask, cancel: &CancellationToken, background: bool) -
     // width/height 用原生尺寸（按 orientation 交换），拿不到时退回解码后的尺寸。
     let (width, height) = oriented_native_dims(native_dims, task.orientation)
         .unwrap_or((i64::from(oriented.width()), i64::from(oriented.height())));
-    let thumb = oriented.thumbnail(THUMB_SIZE, THUMB_SIZE).to_rgba8();
-    let mut writer = BufWriter::new(File::create(&path)?);
-    let encoder = WebPEncoder::new_lossless(&mut writer);
-    encoder.write_image(
-        thumb.as_raw(),
-        thumb.width(),
-        thumb.height(),
-        image::ColorType::Rgba8.into(),
-    )?;
+    write_jpeg(&oriented.thumbnail(THUMB_SIZE, THUMB_SIZE), &path)?;
 
     let conn = task.pool.get()?;
-    images_repo::update_thumbnail_ready(&conn, task.image_id, &hash, Some(width), Some(height))?;
+    images_repo::update_thumbnail_ready(
+        &conn,
+        task.image_id,
+        &hash,
+        THUMB_EXT,
+        Some(width),
+        Some(height),
+    )?;
+    // 重新生成的图，R4 之前留下的 WebP 旧文件已经没用了。
+    let _ = fs::remove_file(thumb_path(&task.thumbs_dir, &hash, LEGACY_THUMB_EXT));
     Ok(())
 }
 
@@ -668,8 +796,10 @@ mod tests {
 
     #[test]
     fn thumb_path_uses_two_char_prefix() {
-        let path = thumb_path(Path::new("thumbs"), "abcdef0123456789");
-        assert!(path.ends_with(Path::new("ab").join("abcdef0123456789.webp")));
+        let path = thumb_path(Path::new("thumbs"), "abcdef0123456789", THUMB_EXT);
+        assert!(path.ends_with(Path::new("ab").join("abcdef0123456789.jpg")));
+        let legacy = thumb_path(Path::new("thumbs"), "abcdef0123456789", LEGACY_THUMB_EXT);
+        assert!(legacy.ends_with(Path::new("ab").join("abcdef0123456789.webp")));
     }
 
     #[test]

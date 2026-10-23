@@ -292,13 +292,9 @@ fn query_encoder(
 }
 
 fn thumb_path_for(paths: &AppPaths, image: &ImageRecord) -> Result<String, String> {
-    let hash = image
-        .thumb_hash
-        .as_deref()
+    let path = thumbnail_service::record_thumb_path(&paths.thumbs_dir, image)
         .ok_or_else(|| "缩略图尚未生成，无法运行 AI".to_string())?;
-    Ok(thumbnail_service::thumb_path(&paths.thumbs_dir, hash)
-        .to_string_lossy()
-        .to_string())
+    Ok(path.to_string_lossy().to_string())
 }
 
 fn now_unix() -> i64 {

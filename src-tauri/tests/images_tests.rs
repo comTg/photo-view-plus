@@ -259,8 +259,15 @@ fn thumbnail_updates_and_count_use_narrow_queries() {
     };
     let ready = insert("a.jpg", "jpg");
     let failed = insert("b.png", "png");
-    images_repo::update_thumbnail_ready(&conn, ready, "abcdef0123456789", Some(1), Some(3000))
-        .expect("ready");
+    images_repo::update_thumbnail_ready(
+        &conn,
+        ready,
+        "abcdef0123456789",
+        "jpg",
+        Some(1),
+        Some(3000),
+    )
+    .expect("ready");
     images_repo::update_thumbnail_failed(&conn, failed, "failed", "boom").expect("failed");
 
     let updates = images_repo::thumbnail_updates(&conn, &[failed, 9_999, ready]).expect("updates");

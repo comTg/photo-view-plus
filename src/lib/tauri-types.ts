@@ -73,6 +73,8 @@ export interface ImageRecord {
   thumbStatus: ThumbStatus;
   thumbHash: string | null;
   thumbError: string | null;
+  /** 缩略图文件扩展名：`jpg`；R4 之前生成、还没转换的是 `webp`（docs/11 R4）。 */
+  thumbExt: string;
   indexedAt: number;
   deletedAt: number | null;
   rootPath: string;

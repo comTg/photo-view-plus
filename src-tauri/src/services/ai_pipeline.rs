@@ -727,12 +727,12 @@ impl EmbedBatchTask {
         };
         let request_items = {
             let conn = self.pool.get()?;
-            images_repo::ready_thumb_hashes(&conn, &self.image_ids)?
+            images_repo::ready_thumb_files(&conn, &self.image_ids)?
         }
         .into_iter()
-        .map(|(id, hash)| ClipEmbedItem {
+        .map(|(id, hash, ext)| ClipEmbedItem {
             id,
-            thumb_path: thumbnail_service::thumb_path(&self.thumbs_dir, &hash)
+            thumb_path: thumbnail_service::thumb_path(&self.thumbs_dir, &hash, &ext)
                 .to_string_lossy()
                 .to_string(),
         })
@@ -837,14 +837,13 @@ fn records_to_ai_items(records: &[ImageRecord], thumbs_dir: &Path) -> AppResult<
     records
         .iter()
         .map(|record| {
-            let hash = record.thumb_hash.as_deref().ok_or_else(|| {
-                AppError::Other(format!("image {} thumbnail is not ready", record.id))
-            })?;
+            let thumb_path =
+                thumbnail_service::record_thumb_path(thumbs_dir, record).ok_or_else(|| {
+                    AppError::Other(format!("image {} thumbnail is not ready", record.id))
+                })?;
             Ok(AiImageItem {
                 id: record.id,
-                thumb_path: thumbnail_service::thumb_path(thumbs_dir, hash)
-                    .to_string_lossy()
-                    .to_string(),
+                thumb_path: thumb_path.to_string_lossy().to_string(),
             })
         })
         .collect()

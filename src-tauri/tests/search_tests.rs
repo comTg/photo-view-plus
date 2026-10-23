@@ -680,7 +680,7 @@ async fn fallback_encoder_skips_semantic_channel() {
     // 以图搜图：库里没有该图向量、临时编码又是兜底 → 空结果，不报错。
     {
         let conn = env.pool.get().expect("conn");
-        images_repo::update_thumbnail_ready(&conn, ids[3], "abcdef0123", None, None)
+        images_repo::update_thumbnail_ready(&conn, ids[3], "abcdef0123", "jpg", None, None)
             .expect("thumb");
     }
     let thumbs = env.dir.path().join("thumbs");
@@ -728,7 +728,7 @@ async fn fallback_embedding_response_is_not_written() {
     {
         let conn = env.pool.get().expect("conn");
         for id in &ids {
-            images_repo::update_thumbnail_ready(&conn, *id, "abcdef0123", None, None)
+            images_repo::update_thumbnail_ready(&conn, *id, "abcdef0123", "jpg", None, None)
                 .expect("thumb");
         }
     }

@@ -256,3 +256,62 @@ fn test_006_unique_root_path() {
         "duplicate root path should fail UNIQUE constraint"
     );
 }
+
+// docs/11 R4：0011 给已有的图补上 thumb_ext = 'webp'（R4 之前的缩略图都是无损 WebP），
+// 新生成的写 'jpg'；还没转换的旧缩略图能被后台转换查到。
+#[test]
+fn test_migration_0011_marks_existing_thumbnails_as_webp() {
+    use photo_view_plus_lib::repo::images_repo;
+
+    let dir = tempfile::tempdir().unwrap();
+    let path = dir.path().join("app.sqlite");
+    {
+        let mut conn = rusqlite::Connection::open(&path).unwrap();
+        migrations::run_to(&mut conn, 10).unwrap();
+        conn.execute(
+            "INSERT INTO roots(path, type, enabled, created_at) VALUES ('D:/photos', 'local', 1, 1)",
+            [],
+        )
+        .unwrap();
+        for (rel, status, hash) in [
+            ("a.jpg", "ready", Some("aaaa000000000000")),
+            ("b.jpg", "pending", None),
+        ] {
+            conn.execute(
+                "INSERT INTO images(root_id, rel_path, filename, extension, size_bytes, mtime,
+                                    thumb_status, thumb_hash, indexed_at)
+                 VALUES (1, ?1, ?1, 'jpg', 1, 1, ?2, ?3, 1)",
+                params![rel, status, hash],
+            )
+            .unwrap();
+        }
+    }
+
+    let pool = db::open(&path).unwrap();
+    let conn = pool.get().unwrap();
+    let exts: Vec<String> = conn
+        .prepare("SELECT thumb_ext FROM images ORDER BY id")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .map(Result::unwrap)
+        .collect();
+    assert_eq!(exts, vec!["webp", "webp"]);
+    assert_eq!(
+        images_repo::legacy_webp_thumbnails(&conn, 10).unwrap(),
+        vec![(1, "aaaa000000000000".to_string(), false)],
+        "只有已就绪的旧缩略图需要转换"
+    );
+
+    images_repo::update_thumbnail_ready(&conn, 2, "bbbb000000000000", "jpg", None, None).unwrap();
+    assert_eq!(
+        images_repo::get_thumb_file(&conn, 2).unwrap(),
+        Some(("bbbb000000000000".to_string(), "jpg".to_string()))
+    );
+    assert_eq!(
+        images_repo::legacy_webp_thumbnails(&conn, 10)
+            .unwrap()
+            .len(),
+        1
+    );
+}
