@@ -31,6 +31,10 @@ pub const VISIBLE_THUMBNAIL_CONCURRENCY: usize = 2;
 const VISIBLE_REQUEST_LIMIT: usize = 160;
 /// 缩略图完成事件的合批窗口（docs/11 R5）。
 pub const EVENT_BATCH_WINDOW: Duration = Duration::from_millis(250);
+/// 单张缩略图生成的时间上限（docs/11 R6）。读 NAS 原图或解码一旦卡住，不能让它一直占着并发名额：
+/// 使用中档只有 1 个名额，一张卡住整条队列就停了（R6 测量时见过队列停住，根因未确认）。
+/// 正常情况下单张远低于这个值（大 PNG 也只要几秒）。
+const GENERATE_TIMEOUT: Duration = Duration::from_secs(120);
 /// 新生成的缩略图格式（docs/11 R4）：有损 JPEG。
 pub const THUMB_EXT: &str = "jpg";
 /// R4 之前生成的缩略图是无损 WebP，空闲时由 [`convert_legacy_thumbnails`] 逐批转成 JPEG。
@@ -270,14 +274,9 @@ impl ThumbnailTask {
             permit = read_gate::acquire_read(self.is_network) => permit?,
             _ = cancellation.cancelled() => return Ok(()),
         };
-        let task = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let _read_permit = read_permit;
-            let _claim = claim;
-            generate(task, &cancellation, true)
-        })
-        .await?
+        // 许可和"正在生成"标记留在这里，不交给阻塞线程：生成超时后照常归还。
+        let _held = (permit, read_permit, claim);
+        run_generate(self.clone(), cancellation, true).await
     }
 
     fn still_pending(&self) -> AppResult<bool> {
@@ -333,14 +332,8 @@ impl ThumbnailTask {
             return Ok(false);
         }
         let read_permit = read_gate::acquire_read(self.is_network).await?;
-        let task = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            let _read_permit = read_permit;
-            let _claim = claim;
-            generate(task, &CancellationToken::new(), false)
-        })
-        .await??;
+        let _held = (permit, read_permit, claim);
+        run_generate(self.clone(), CancellationToken::new(), false).await?;
         Ok(true)
     }
 }
@@ -634,26 +627,89 @@ fn flatten_on_white(image: &DynamicImage) -> RgbImage {
     })
 }
 
+/// 在阻塞线程池里跑 `work`，最多等 `limit`；超时返回 `None`。卡住的线程留在池里，
+/// 调用方手上的许可不受它牵连，照常释放。
+async fn blocking_with_timeout<T: Send + 'static>(
+    limit: Duration,
+    work: impl FnOnce() -> T + Send + 'static,
+) -> Option<Result<T, tokio::task::JoinError>> {
+    tokio::time::timeout(limit, tokio::task::spawn_blocking(work))
+        .await
+        .ok()
+}
+
+/// 生成一张缩略图，超过 [`GENERATE_TIMEOUT`] 就放弃这一张：标记失败（用户可以重新生成），
+/// 让出并发名额，后面的图继续做。
+async fn run_generate(
+    task: ThumbnailTask,
+    cancel: CancellationToken,
+    background: bool,
+) -> AppResult<()> {
+    let image_id = task.image_id;
+    let pool = task.pool.clone();
+    // 超时后取消这一次尝试：卡住的线程以后醒过来也不再写文件、改状态，免得和重新生成撞车。
+    let attempt = cancel.child_token();
+    let worker_cancel = attempt.clone();
+    match blocking_with_timeout(GENERATE_TIMEOUT, move || {
+        generate(task, &worker_cancel, background)
+    })
+    .await
+    {
+        Some(joined) => joined?,
+        None => {
+            attempt.cancel();
+            tracing::warn!(
+                image_id,
+                timeout_secs = GENERATE_TIMEOUT.as_secs(),
+                "thumbnail generation timed out; giving up on this image"
+            );
+            let conn = pool.get()?;
+            images_repo::update_thumbnail_failed(
+                &conn,
+                image_id,
+                "failed",
+                "缩略图生成超时（读取原图或解码卡住），可以稍后重新生成",
+            )
+        }
+    }
+}
+
 /// `background`：批量队列整段降到后台优先级；可见区域队列用正常优先级（用户正在等这张图）。
 fn generate(task: ThumbnailTask, cancel: &CancellationToken, background: bool) -> AppResult<()> {
     if cancel.is_cancelled() {
         return Ok(());
     }
-    // 解码 / 缩放 / JPEG 编码 + 读原图都很重，批量生成整段降到后台优先级，避免拖卡前台 UI。
-    let _bg = background.then(BackgroundPriorityGuard::enter);
-
     let hash = thumb_hash_for(task.root_id, &task.rel_path);
     let path = thumb_path(&task.thumbs_dir, &hash, THUMB_EXT);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
 
-    // 原生尺寸只需读图头（便宜），与解码分辨率解耦：JPEG 会被 DCT 降采样解码，
-    // 不能拿降采样后的像素尺寸当原始 width/height 回填。
-    let native_dims = image::image_dimensions(&task.full_path).ok();
-
-    let image = match decode_for_thumbnail(&task.full_path) {
-        Ok(image) => image,
+    // 读原图 / 解码 / 缩放 / JPEG 编码都很重，批量生成这一段降到后台优先级，避免拖卡前台 UI。
+    // 写库不在后台模式里（见 utils/priority.rs：I/O 优先级被压低后持写锁的时间会变长）。
+    let encoded = {
+        let _bg = background.then(BackgroundPriorityGuard::enter);
+        // 原生尺寸只需读图头（便宜），与解码分辨率解耦：JPEG 会被 DCT 降采样解码，
+        // 不能拿降采样后的像素尺寸当原始 width/height 回填。
+        let native_dims = image::image_dimensions(&task.full_path).ok();
+        match decode_for_thumbnail(&task.full_path) {
+            Ok(image) => {
+                if cancel.is_cancelled() {
+                    return Ok(());
+                }
+                let oriented = apply_orientation(image, task.orientation);
+                // width/height 用原生尺寸（按 orientation 交换），拿不到时退回解码后的尺寸。
+                let dims = oriented_native_dims(native_dims, task.orientation)
+                    .unwrap_or((i64::from(oriented.width()), i64::from(oriented.height())));
+                write_jpeg(&oriented.thumbnail(THUMB_SIZE, THUMB_SIZE), &path)?;
+                Ok(dims)
+            }
+            Err(error) => Err(error),
+        }
+    };
+    let (width, height) = match encoded {
+        Ok(dims) => dims,
+        Err(_) if cancel.is_cancelled() => return Ok(()),
         Err(error) => {
             let status = if matches!(error, image::ImageError::Unsupported(_)) {
                 "unsupported"
@@ -665,16 +721,6 @@ fn generate(task: ThumbnailTask, cancel: &CancellationToken, background: bool) -
             return Ok(());
         }
     };
-
-    if cancel.is_cancelled() {
-        return Ok(());
-    }
-
-    let oriented = apply_orientation(image, task.orientation);
-    // width/height 用原生尺寸（按 orientation 交换），拿不到时退回解码后的尺寸。
-    let (width, height) = oriented_native_dims(native_dims, task.orientation)
-        .unwrap_or((i64::from(oriented.width()), i64::from(oriented.height())));
-    write_jpeg(&oriented.thumbnail(THUMB_SIZE, THUMB_SIZE), &path)?;
 
     let conn = task.pool.get()?;
     images_repo::update_thumbnail_ready(
@@ -763,6 +809,21 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn stuck_blocking_work_times_out() {
+        let (release, wait) = std::sync::mpsc::channel::<()>();
+        // 模拟卡死的读取：一直等到测试结束才放行。
+        let stuck = blocking_with_timeout(Duration::from_millis(50), move || {
+            let _ = wait.recv();
+            1
+        })
+        .await;
+        assert!(stuck.is_none(), "卡住的工作应当超时");
+        drop(release);
+        let done = blocking_with_timeout(Duration::from_secs(5), || 7).await;
+        assert_eq!(done.map(|joined| joined.expect("join")), Some(7));
     }
 
     #[tokio::test]

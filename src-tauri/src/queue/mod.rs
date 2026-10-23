@@ -274,6 +274,11 @@ async fn dispatch_loop(
             tokio::spawn(async move {
                 let _permit = permit;
                 inner_for_task.running.fetch_add(1, Ordering::Relaxed);
+                // 运行计数靠 drop 归还：任务在异步代码里 panic 时也不会永久占住并发名额。
+                let _running = RunningGuard {
+                    inner: inner_for_task.clone(),
+                    idx,
+                };
                 let label = task.label();
                 tracing::debug!(label, priority = ?priority, "queue task started");
                 let result = task
@@ -281,8 +286,7 @@ async fn dispatch_loop(
                         cancellation: token,
                     })
                     .await;
-                inner_for_task.running.fetch_sub(1, Ordering::Relaxed);
-                inner_for_task.running_by_priority[idx].fetch_sub(1, Ordering::Relaxed);
+                drop(_running);
                 match result {
                     Ok(()) => {
                         inner_for_task.completed.fetch_add(1, Ordering::Relaxed);
@@ -298,6 +302,19 @@ async fn dispatch_loop(
         }
 
         tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+}
+
+/// 一个已派发任务占用的运行计数，drop 时归还（含 panic 展开）。
+struct RunningGuard {
+    inner: Arc<SchedulerInner>,
+    idx: usize,
+}
+
+impl Drop for RunningGuard {
+    fn drop(&mut self) {
+        self.inner.running.fetch_sub(1, Ordering::Relaxed);
+        self.inner.running_by_priority[self.idx].fetch_sub(1, Ordering::Relaxed);
     }
 }
 
@@ -388,6 +405,33 @@ mod tests {
         scheduler.resume();
         tokio::time::sleep(Duration::from_millis(300)).await;
         assert_eq!(*order.lock().expect("order"), vec![0, 1, 3]);
+    }
+
+    #[tokio::test]
+    async fn panicking_task_returns_its_slot() {
+        // P0 上限 1：第一个任务 panic 后名额必须还回来，否则后面的 P0 任务永远派发不出去。
+        let mut caps = [usize::MAX; 8];
+        caps[Priority::P0.index()] = 1;
+        let scheduler = Scheduler::start_with_caps(2, caps);
+        let ran = Arc::new(AtomicUsize::new(0));
+        scheduler
+            .enqueue(FnTask::new(Priority::P0, "panics", |_| {
+                Box::pin(async { panic!("task panicked") })
+            }))
+            .expect("enqueue");
+        let counter = ran.clone();
+        scheduler
+            .enqueue(FnTask::new(Priority::P0, "after", move |_| {
+                let counter = counter.clone();
+                Box::pin(async move {
+                    counter.fetch_add(1, Ordering::Relaxed);
+                    Ok(())
+                })
+            }))
+            .expect("enqueue");
+        tokio::time::sleep(Duration::from_millis(300)).await;
+        assert_eq!(ran.load(Ordering::Relaxed), 1);
+        assert_eq!(scheduler.status().running, 0);
     }
 
     #[tokio::test]
