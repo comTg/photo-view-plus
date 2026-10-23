@@ -3,12 +3,13 @@ use std::fs::{self, File};
 use std::io::{BufReader, BufWriter};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
+use std::time::Duration;
 
 use async_trait::async_trait;
 use image::codecs::webp::WebPEncoder;
 use image::{DynamicImage, ImageEncoder};
 use sha1::{Digest, Sha1};
-use tauri::{AppHandle, Emitter};
+use tauri::{AppHandle, Emitter, Manager};
 use tokio::sync::mpsc;
 use tokio_util::sync::CancellationToken;
 
@@ -26,6 +27,8 @@ const MAX_THUMBNAIL_CPU_WORKERS: usize = 6;
 pub const VISIBLE_THUMBNAIL_CONCURRENCY: usize = 2;
 /// 一次最多接受多少张可见区域的图（一屏加上下预加载区）。
 const VISIBLE_REQUEST_LIMIT: usize = 160;
+/// 缩略图完成事件的合批窗口（docs/11 R5）。
+pub const EVENT_BATCH_WINDOW: Duration = Duration::from_millis(250);
 
 static THUMBNAIL_CPU_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
 static VISIBLE_LIMITER: OnceLock<Arc<AdjustableLimiter>> = OnceLock::new();
@@ -68,6 +71,70 @@ impl Drop for GeneratingClaim {
             }
         }
     }
+}
+
+/// 缩略图完成事件合批（docs/11 R5）。每张图完成时只记下 id；第一张完成后等 250ms，把这段时间里
+/// 完成的图一起读出窄字段（id、状态、hash、宽高、错误），发一个 `thumbnails:updated`。
+/// 以前每张图各发一次 `thumbnail:updated`，每次还要回读一整条 30 列的记录。
+#[derive(Clone)]
+pub struct ThumbnailEvents {
+    tx: mpsc::UnboundedSender<i64>,
+}
+
+impl ThumbnailEvents {
+    pub fn spawn(app: AppHandle, pool: Pool) -> Self {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        tauri::async_runtime::spawn(async move {
+            while let Some(ids) = next_event_batch(&mut rx, EVENT_BATCH_WINDOW).await {
+                let pool = pool.clone();
+                let updates = tokio::task::spawn_blocking(move || -> AppResult<_> {
+                    let conn = pool.get()?;
+                    images_repo::thumbnail_updates(&conn, &ids)
+                })
+                .await;
+                match updates {
+                    Ok(Ok(updates)) if !updates.is_empty() => {
+                        let _ = app.emit("thumbnails:updated", updates);
+                    }
+                    Ok(Ok(_)) => {}
+                    Ok(Err(error)) => tracing::warn!(%error, "failed to read thumbnail updates"),
+                    Err(error) => tracing::warn!(%error, "thumbnail update task join failed"),
+                }
+            }
+        });
+        Self { tx }
+    }
+
+    /// 记下一张缩略图状态变了（生成完成、失败或被取消），在下一批事件里发出去。
+    pub fn notify(&self, image_id: i64) {
+        let _ = self.tx.send(image_id);
+    }
+}
+
+/// 等到第一个 id，再收 `window` 时间内陆续到达的其余 id（去重，保持先后顺序）。通道关闭时返回 `None`。
+pub async fn next_event_batch(
+    rx: &mut mpsc::UnboundedReceiver<i64>,
+    window: Duration,
+) -> Option<Vec<i64>> {
+    let first = rx.recv().await?;
+    let mut ids = vec![first];
+    let mut seen = HashSet::from([first]);
+    let deadline = tokio::time::sleep(window);
+    tokio::pin!(deadline);
+    loop {
+        tokio::select! {
+            _ = &mut deadline => break,
+            next = rx.recv() => match next {
+                Some(id) => {
+                    if seen.insert(id) {
+                        ids.push(id);
+                    }
+                }
+                None => break,
+            },
+        }
+    }
+    Some(ids)
 }
 
 fn visible_state() -> &'static Mutex<VisibleState> {
@@ -166,15 +233,8 @@ impl ThumbnailTask {
         let Some(app) = &self.event_app else {
             return;
         };
-        // 事件只需 thumb_status/thumb_hash 等窄字段，走轻量投影（ocr_text=NULL），
-        // 避免大扫描时每张缩略图都回读一次 OCR 全文。详情面板的 OCR 由前端单独保留。
-        let updated = self.pool.get().ok().and_then(|conn| {
-            images_repo::get_detail_light(&conn, self.image_id)
-                .ok()
-                .flatten()
-        });
-        if let Some(updated) = updated {
-            let _ = app.emit("thumbnail:updated", updated);
+        if let Some(events) = app.try_state::<ThumbnailEvents>() {
+            events.notify(self.image_id);
         }
     }
 
@@ -575,6 +635,35 @@ mod tests {
         assert_eq!(a, b);
         assert_ne!(a, c);
         assert_eq!(a.len(), 16);
+    }
+
+    #[tokio::test]
+    async fn event_batches_merge_ids_within_window() {
+        let (tx, mut rx) = mpsc::unbounded_channel();
+        for id in [3, 1, 3, 2] {
+            tx.send(id).expect("send");
+        }
+        // 窗口内稍后到达的也并进同一批。
+        let late = tx.clone();
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(20)).await;
+            late.send(5).expect("send");
+        });
+        assert_eq!(
+            next_event_batch(&mut rx, Duration::from_millis(300)).await,
+            Some(vec![3, 1, 2, 5])
+        );
+
+        tx.send(7).expect("send");
+        assert_eq!(
+            next_event_batch(&mut rx, Duration::from_millis(30)).await,
+            Some(vec![7])
+        );
+        drop(tx);
+        assert_eq!(
+            next_event_batch(&mut rx, Duration::from_millis(30)).await,
+            None
+        );
     }
 
     #[test]

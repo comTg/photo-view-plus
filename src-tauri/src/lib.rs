@@ -78,6 +78,11 @@ pub fn run() {
                 db::open(&paths.db_path).map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
             services::scan_service::recover_interrupted_tasks(&pool)
                 .map_err(|e| Box::new(e) as Box<dyn std::error::Error>)?;
+            // 缩略图完成事件合批（docs/11 R5）：任务完成只记 id，每 250ms 发一个 thumbnails:updated。
+            app.manage(services::thumbnail_service::ThumbnailEvents::spawn(
+                app.handle().clone(),
+                pool.clone(),
+            ));
             // 给缩略图（P0）设并发上限 = 缩略图 CPU 限额，避免一大批待生成缩略图占满全部
             // 并发槽、饿死扫描（P1）和去重哈希（P2/P3）。缩略图本就受 CPU 限流，不会因此变慢。
             let mut task_caps = [usize::MAX; 8];

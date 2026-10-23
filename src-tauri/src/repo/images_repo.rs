@@ -231,16 +231,6 @@ pub fn get_detail(conn: &Connection, id: i64) -> AppResult<Option<ImageRecord>> 
         .optional()?)
 }
 
-/// 与 `get_detail` 同布局，但走 `IMAGE_SELECT_LIST`（ocr_text 置 NULL），用于缩略图完成事件等
-/// 只关心 thumb_status/thumb_hash 的高频回读——避免每张缩略图都读一次 OCR 全文（overflow page）。
-pub fn get_detail_light(conn: &Connection, id: i64) -> AppResult<Option<ImageRecord>> {
-    let sql = format!("{IMAGE_SELECT_LIST} WHERE i.id = ?1");
-    Ok(conn
-        .prepare_cached(&sql)?
-        .query_row([id], row_to_record)
-        .optional()?)
-}
-
 pub fn get_details_by_ids(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ImageRecord>> {
     if ids.is_empty() {
         return Ok(Vec::new());
@@ -286,6 +276,49 @@ pub fn ready_thumb_hashes(conn: &Connection, ids: &[i64]) -> AppResult<Vec<(i64,
         .iter()
         .filter_map(|id| by_id.remove(id).map(|hash| (*id, hash)))
         .collect())
+}
+
+/// 缩略图状态的窄投影：`thumbnails:updated` 事件只带这几个字段（docs/11 R5）。
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase")]
+pub struct ThumbnailUpdate {
+    pub id: i64,
+    pub thumb_status: String,
+    pub thumb_hash: Option<String>,
+    pub thumb_error: Option<String>,
+    pub width: Option<i64>,
+    pub height: Option<i64>,
+}
+
+/// 批量读缩略图状态的窄字段，保持 `ids` 的顺序；库里已经没有的 id 跳过。
+pub fn thumbnail_updates(conn: &Connection, ids: &[i64]) -> AppResult<Vec<ThumbnailUpdate>> {
+    let mut by_id = std::collections::HashMap::with_capacity(ids.len());
+    for chunk in ids.chunks(500) {
+        let sql = format!(
+            "SELECT id, thumb_status, thumb_hash, thumb_error, width, height
+             FROM images WHERE id IN ({})",
+            placeholders(chunk.len())
+        );
+        let mut stmt = conn.prepare(&sql)?;
+        let rows = stmt.query_map(
+            params_from_iter(chunk.iter().copied().map(Value::Integer)),
+            |row| {
+                Ok(ThumbnailUpdate {
+                    id: row.get(0)?,
+                    thumb_status: row.get(1)?,
+                    thumb_hash: row.get(2)?,
+                    thumb_error: row.get(3)?,
+                    width: row.get(4)?,
+                    height: row.get(5)?,
+                })
+            },
+        )?;
+        for row in rows {
+            let update = row?;
+            by_id.insert(update.id, update);
+        }
+    }
+    Ok(ids.iter().filter_map(|id| by_id.remove(id)).collect())
 }
 
 pub fn get_thumb_hash(conn: &Connection, id: i64) -> AppResult<Option<String>> {

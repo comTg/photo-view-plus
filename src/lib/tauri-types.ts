@@ -44,6 +44,16 @@ export interface DbStatus {
 
 export type ThumbStatus = "pending" | "ready" | "failed" | "unsupported";
 
+/** `thumbnails:updated` 事件里的一项：缩略图状态的窄字段（docs/11 R5，每 250ms 合成一批）。 */
+export interface ThumbnailUpdate {
+  id: number;
+  thumbStatus: ThumbStatus;
+  thumbHash: string | null;
+  thumbError: string | null;
+  width: number | null;
+  height: number | null;
+}
+
 export interface ImageRecord {
   id: number;
   rootId: number;

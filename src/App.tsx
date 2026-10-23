@@ -1,10 +1,12 @@
 import { RootList } from "@/components/sidebar/RootList";
 import { AnalysisBadge, AnalysisSettings } from "@/components/system/AnalysisSettings";
 import { LoadModeControl } from "@/components/system/LoadModeControl";
+import { TaskStatus, aiStatusText } from "@/components/system/TaskStatus";
 import { ContextMenu, menuPosition } from "@/components/ui/ContextMenu";
 import { useRoots } from "@/hooks/useRoots";
 import { useTauriEvent } from "@/lib/events";
 import { markBoot } from "@/lib/perf";
+import { aiPipelineStore, aiWorkerStatusStore, useEventStore } from "@/lib/stores";
 import {
   aiImageTags,
   aiImagesByTag,
@@ -44,7 +46,6 @@ import {
   ocrRun,
   ocrStatus,
   ping,
-  queueStatus,
   scanCancel,
   scanPause,
   scanResume,
@@ -65,7 +66,6 @@ import {
 } from "@/lib/tauri";
 import type {
   AiDiagnostics,
-  AiPipelineStatus,
   AiSearchResult,
   AiTag,
   AiWorkerStatus,
@@ -80,13 +80,13 @@ import type {
   ImageTag,
   MapImagePoint,
   OcrStatus,
-  QueueStatus,
   ScanDone,
   ScanErrorEvent,
   ScanProgress,
   SmartAlbum,
   SortDir,
   SortField,
+  ThumbnailUpdate,
   TimelineBucket,
   WatcherStatus,
 } from "@/lib/tauri-types";
@@ -145,6 +145,8 @@ type ViewMode = "grid-lg" | "grid-md" | "grid-sm" | "list";
 type GpsFilter = "any" | "yes" | "no";
 type ActiveView = "browse" | "dedup" | "ai" | "timeline" | "map" | "people" | "mvp4" | "settings";
 type LoadMode = "reset" | "more" | "refresh";
+/** 一组图片 id（Set 或以 id 为键的 Map 都行）。 */
+type IdLookup = { has: (id: number) => boolean };
 
 export default function App() {
   const [profile, setProfile] = useState<string | null>(null);
@@ -152,9 +154,8 @@ export default function App() {
   const [toast, setToast] = useState<string | null>(null);
   const [activeView, setActiveView] = useState<ActiveView>("browse");
   const [settings, setSettings] = useState<AppSettings | null>(null);
-  const [aiStatus, setAiStatus] = useState<AiWorkerStatus | null>(null);
+  // worker 状态、AI 队列、扫描进度、任务队列不放在 App 里：用到的小组件各自订阅（src/lib/stores.ts，docs/09 P0-3）。
   const [aiDiagnostics, setAiDiagnostics] = useState<AiDiagnostics | null>(null);
-  const [aiPipeline, setAiPipeline] = useState<AiPipelineStatus | null>(null);
   const [aiTags, setAiTags] = useState<AiTag[]>([]);
   const [imageTags, setImageTags] = useState<ImageTag[]>([]);
   const [imageAnalysis, setImageAnalysis] = useState<ImageAnalysis | null>(null);
@@ -219,9 +220,6 @@ export default function App() {
   const [detail, setDetail] = useState<ImageRecord | null>(null);
   const [thumbnailRefreshIds, setThumbnailRefreshIds] = useState<number[]>([]);
   const thumbnailRefreshIdsRef = useRef(new Set<number>());
-  // 待合并的缩略图更新（按 id 去重）与合帧句柄，见 handleThumbnailUpdated。
-  const pendingThumbUpdatesRef = useRef(new Map<number, ImageRecord>());
-  const thumbFlushHandleRef = useRef<number | null>(null);
   const [previewImages, setPreviewImages] = useState<ImageRecord[]>([]);
   const [previewIndex, setPreviewIndex] = useState<number | null>(null);
   const [imageMenu, setImageMenu] = useState<{
@@ -230,8 +228,6 @@ export default function App() {
     image: ImageRecord;
   } | null>(null);
 
-  const [scanProgress, setScanProgress] = useState<Record<number, ScanProgress>>({});
-  const [queue, setQueue] = useState<QueueStatus | null>(null);
   const gridScrollerRef = useRef<HTMLElement | null>(null);
   const refreshTimer = useRef<number | null>(null);
   const imageLoadingRef = useRef(false);
@@ -266,15 +262,6 @@ export default function App() {
         applyTheme(loaded.theme);
       })
       .catch((error) => setToast(`读取设置失败：${String(error)}`));
-    queueStatus()
-      .then(setQueue)
-      .catch(() => undefined);
-    aiWorkerStatus()
-      .then(setAiStatus)
-      .catch(() => undefined);
-    aiPipelineStatus()
-      .then(setAiPipeline)
-      .catch(() => undefined);
     aiTagsList(120)
       .then(setAiTags)
       .catch(() => undefined);
@@ -457,7 +444,7 @@ export default function App() {
 
   const handleScanProgress = useCallback(
     (payload: ScanProgress) => {
-      setScanProgress((prev) => ({ ...prev, [payload.rootId]: payload }));
+      // 进度文字由 TaskStatus 自己订阅；这里只安排列表刷新，不改 App 的状态（docs/09 P0-3）。
       if ((allSelected || payload.rootId === selection) && activeView === "browse") {
         scheduleRefresh();
       }
@@ -483,68 +470,52 @@ export default function App() {
     setToast(`扫描错误：${payload.error}`);
   }, []);
 
-  const handleQueueStatus = useCallback((payload: QueueStatus) => setQueue(payload), []);
+  // worker 就绪后重跑降级的那次搜索；worker 状态本身由用到的组件各自订阅（src/lib/stores.ts）。
   const handleAiStatus = useCallback((payload: AiWorkerStatus) => {
-    setAiStatus(payload);
     const pending = degradedSearchRef.current;
     if (payload.status === "ready" && pending) {
       degradedSearchRef.current = null;
       void runAiSearchRef.current(pending.text, pending.rootIds);
     }
   }, []);
-  const handleAiProgress = useCallback((payload: AiPipelineStatus) => setAiPipeline(payload), []);
 
-  // 批量替换多张图片记录：仅在数组确有命中项时才产生新引用，空/无关数组返回 prev 让 React bail out，
-  // 避免扫描期每张缩略图都触发 7 个数组的全量 map + App 整体重渲染。
-  const replaceImageRecords = useCallback((batch: Map<number, ImageRecord>) => {
-    const remap = (prev: ImageRecord[]) =>
-      prev.some((image) => batch.has(image.id))
-        ? prev.map((image) => batch.get(image.id) ?? image)
-        : prev;
-    setImages(remap);
-    setPreviewImages(remap);
-    setAdvancedImages(remap);
-    setDetail((prev) => {
-      if (!prev) return prev;
-      const next = batch.get(prev.id);
-      if (!next) return prev;
-      // 缩略图事件走轻量投影，ocrText 为 null；详情面板的 OCR 由 get_detail 单独加载，此处保留旧值。
-      return next.ocrText == null && prev.ocrText != null
-        ? { ...next, ocrText: prev.ocrText }
-        : next;
-    });
-    setAiResults((prev) =>
-      prev.some((result) => batch.has(result.image.id))
-        ? prev.map((result) => {
-            const next = batch.get(result.image.id);
-            return next ? { ...result, image: next } : result;
-          })
-        : prev,
-    );
-    setTimelineBuckets((prev) =>
-      prev.some((bucket) => bucket.samples.some((sample) => batch.has(sample.id)))
-        ? prev.map((bucket) => ({
-            ...bucket,
-            samples: bucket.samples.map((sample) => batch.get(sample.id) ?? sample),
-          }))
-        : prev,
-    );
-    setMapPoints((prev) =>
-      prev.some((point) => batch.has(point.image.id))
-        ? prev.map((point) => {
-            const next = batch.get(point.image.id);
-            return next ? { ...point, image: next } : point;
-          })
-        : prev,
-    );
-  }, []);
+  // 对各个视图里的同一批图片做同一个更新。只有真有记录变了，数组才换新引用；
+  // 其余状态原样返回，React 跳过这些更新。
+  const patchImageRecords = useCallback(
+    (ids: IdLookup, patch: (image: ImageRecord) => ImageRecord) => {
+      const patchOne = (image: ImageRecord) => (ids.has(image.id) ? patch(image) : image);
+      const patchNested = <T extends { image: ImageRecord }>(item: T): T => {
+        const image = patchOne(item.image);
+        return image === item.image ? item : { ...item, image };
+      };
+      const remap = (prev: ImageRecord[]) => mapChanged(prev, patchOne);
+      setImages(remap);
+      setPreviewImages(remap);
+      setAdvancedImages(remap);
+      setDetail((prev) => (prev ? patchOne(prev) : prev));
+      setAiResults((prev) => mapChanged(prev, patchNested));
+      setTimelineBuckets((prev) =>
+        mapChanged(prev, (bucket) => {
+          const samples = mapChanged(bucket.samples, patchOne);
+          return samples === bucket.samples ? bucket : { ...bucket, samples };
+        }),
+      );
+      setMapPoints((prev) => mapChanged(prev, patchNested));
+    },
+    [],
+  );
 
-  // 手动重刷等需立即生效的单张路径复用批量逻辑（附带同样的空数组守卫）。
+  // 用一条完整记录替换各视图里的这张图（手动重刷缩略图等）。列表记录不带 OCR 全文，
+  // 详情面板已加载的全文保留。
   const replaceImageRecord = useCallback(
     (updated: ImageRecord) => {
-      replaceImageRecords(new Map([[updated.id, updated]]));
+      patchImageRecords(new Set([updated.id]), (image) =>
+        updated.ocrText == null && image.ocrText != null
+          ? { ...updated, ocrText: image.ocrText }
+          : updated,
+      );
     },
-    [replaceImageRecords],
+    [patchImageRecords],
   );
 
   const setThumbnailRefreshing = useCallback((imageId: number, refreshing: boolean) => {
@@ -556,57 +527,33 @@ export default function App() {
     setThumbnailRefreshIds([...thumbnailRefreshIdsRef.current]);
   }, []);
 
-  // 把一帧内积攒的缩略图更新一次性提交。
-  const flushThumbnailUpdates = useCallback(() => {
-    thumbFlushHandleRef.current = null;
-    const batch = pendingThumbUpdatesRef.current;
-    if (batch.size === 0) return;
-    pendingThumbUpdatesRef.current = new Map();
-    replaceImageRecords(batch);
-  }, [replaceImageRecords]);
-
-  const scheduleThumbnailFlush = useCallback(() => {
-    if (thumbFlushHandleRef.current !== null) return;
-    thumbFlushHandleRef.current = window.requestAnimationFrame(flushThumbnailUpdates);
-  }, [flushThumbnailUpdates]);
-
-  useEffect(() => {
-    return () => {
-      if (thumbFlushHandleRef.current !== null) {
-        window.cancelAnimationFrame(thumbFlushHandleRef.current);
-      }
-    };
-  }, []);
-
-  const handleThumbnailUpdated = useCallback(
-    (updated: ImageRecord) => {
-      const wasManualRefresh = thumbnailRefreshIdsRef.current.has(updated.id);
-      bustThumbnailCache(updated.id);
-      // thumbnail:updated 是逐图片、无节流的高频事件；入队后交给动画帧批量提交，
-      // 避免每张缩略图都单独触发一次全局重渲染。
-      pendingThumbUpdatesRef.current.set(updated.id, updated);
-      scheduleThumbnailFlush();
-      // 自动扫描产生的缩略图（非手动重刷）到此为止，不再触碰刷新追踪状态与 toast。
-      if (!wasManualRefresh) return;
-      setThumbnailRefreshing(updated.id, false);
-      if (updated.thumbStatus === "ready") {
-        setToast("缩略图已重新生成");
-      } else if (updated.thumbStatus === "pending") {
-        setToast("缩略图任务已取消，可再次重试");
-      } else {
-        setToast(`缩略图生成失败：${updated.thumbError ?? thumbStatusText(updated.thumbStatus)}`);
+  // 缩略图状态变化（docs/11 R5）：后端每 250ms 合成一批，只带窄字段，这里整批打补丁。
+  const handleThumbnailsUpdated = useCallback(
+    (updates: ThumbnailUpdate[]) => {
+      const byId = new Map(updates.map((update) => [update.id, update]));
+      for (const id of byId.keys()) bustThumbnailCache(id);
+      patchImageRecords(byId, (image) => applyThumbnailUpdate(image, byId.get(image.id)));
+      for (const update of byId.values()) {
+        // 自动生成的缩略图到此为止；手动重刷的还要收尾刷新状态并提示。
+        if (!thumbnailRefreshIdsRef.current.has(update.id)) continue;
+        setThumbnailRefreshing(update.id, false);
+        if (update.thumbStatus === "ready") {
+          setToast("缩略图已重新生成");
+        } else if (update.thumbStatus === "pending") {
+          setToast("缩略图任务已取消，可再次重试");
+        } else {
+          setToast(`缩略图生成失败：${update.thumbError ?? thumbStatusText(update.thumbStatus)}`);
+        }
       }
     },
-    [scheduleThumbnailFlush, setThumbnailRefreshing],
+    [patchImageRecords, setThumbnailRefreshing],
   );
 
   useTauriEvent<ScanProgress>("scan:progress", handleScanProgress);
   useTauriEvent<ScanDone>("scan:done", handleScanDone);
   useTauriEvent<ScanErrorEvent>("scan:error", handleScanError);
-  useTauriEvent<QueueStatus>("queue:status", handleQueueStatus);
   useTauriEvent<AiWorkerStatus>("ai:worker_status", handleAiStatus);
-  useTauriEvent<AiPipelineStatus>("ai:progress", handleAiProgress);
-  useTauriEvent<ImageRecord>("thumbnail:updated", handleThumbnailUpdated);
+  useTauriEvent<ThumbnailUpdate[]>("thumbnails:updated", handleThumbnailsUpdated);
 
   const primarySelectedId =
     selectedIds.length > 0 ? (selectedIds[selectedIds.length - 1] ?? null) : null;
@@ -891,13 +838,12 @@ export default function App() {
   const handleAiStart = useCallback(async () => {
     setAiBusy(true);
     try {
-      const status = await aiWorkerStart();
-      setAiStatus(status);
+      aiWorkerStatusStore.set(await aiWorkerStart());
       setToast("AI Worker 已启动");
     } catch (error) {
       setToast(`启动 AI Worker 失败：${String(error)}`);
       void aiWorkerStatus()
-        .then(setAiStatus)
+        .then(aiWorkerStatusStore.set)
         .catch(() => undefined);
     } finally {
       setAiBusy(false);
@@ -907,8 +853,7 @@ export default function App() {
   const handleAiStop = useCallback(async () => {
     setAiBusy(true);
     try {
-      const status = await aiWorkerStop();
-      setAiStatus(status);
+      aiWorkerStatusStore.set(await aiWorkerStop());
       setToast("AI Worker 已停止");
     } catch (error) {
       setToast(`停止 AI Worker 失败：${String(error)}`);
@@ -923,13 +868,13 @@ export default function App() {
       const diagnostics = await aiWorkerDiagnostics();
       setAiDiagnostics(diagnostics);
       void aiWorkerStatus()
-        .then(setAiStatus)
+        .then(aiWorkerStatusStore.set)
         .catch(() => undefined);
       setToast("AI 诊断已刷新");
     } catch (error) {
       setToast(`AI 诊断失败：${String(error)}`);
       void aiWorkerStatus()
-        .then(setAiStatus)
+        .then(aiWorkerStatusStore.set)
         .catch(() => undefined);
     } finally {
       setAiBusy(false);
@@ -938,7 +883,7 @@ export default function App() {
 
   const refreshAiState = useCallback(async () => {
     const [pipeline, tags] = await Promise.all([aiPipelineStatus(), aiTagsList(120)]);
-    setAiPipeline(pipeline);
+    aiPipelineStore.set(pipeline);
     setAiTags(tags);
   }, []);
 
@@ -1341,13 +1286,6 @@ export default function App() {
     gridScrollerRef.current = ref;
   }, []);
 
-  // 全部模式下：优先显示仍在进行中的扫描，否则显示最近一条进度。
-  const allProgress = Object.values(scanProgress);
-  const selectedProgress = allSelected
-    ? (allProgress.find((p) => p.processed < p.total) ?? allProgress[allProgress.length - 1])
-    : typeof selection === "number"
-      ? scanProgress[selection]
-      : undefined;
   const selectedCount = selectedIds.length;
   const selectedRecords = useMemo(() => {
     // 用 Set 做 O(1) 命中，避免 filter × includes 的 O(n·m)（P3-2）。
@@ -1606,9 +1544,7 @@ export default function App() {
         {activeView === "settings" ? (
           <SettingsView
             settings={settings}
-            aiStatus={aiStatus}
             aiDiagnostics={aiDiagnostics}
-            aiPipeline={aiPipeline}
             aiBusy={aiBusy}
             onPatch={handleSettingsPatch}
             onAiStart={handleAiStart}
@@ -1643,8 +1579,6 @@ export default function App() {
             results={aiResults}
             title={aiResultsTitle}
             degradedReason={aiSearchDegraded}
-            pipeline={aiPipeline}
-            workerStatus={aiStatus}
             busy={aiBusy}
           />
         ) : activeView === "timeline" ? (
@@ -1843,12 +1777,7 @@ export default function App() {
                 ? `${selectedRoot.path} · ${total.toLocaleString("zh-CN")} 张`
                 : `${roots.roots.length} 个目录`}
         </span>
-        <TaskStatus
-          queue={queue}
-          progress={selectedProgress}
-          aiStatus={aiStatus}
-          aiPipeline={aiPipeline}
-        />
+        <TaskStatus selection={selection} />
         <AnalysisBadge />
         <LoadModeControl onError={setToast} />
       </footer>
@@ -1929,8 +1858,6 @@ interface AiSearchViewProps {
   results: AiSearchResult[];
   title: string;
   degradedReason: string | null;
-  pipeline: AiPipelineStatus | null;
-  workerStatus: AiWorkerStatus | null;
   busy: boolean;
 }
 
@@ -2070,10 +1997,11 @@ function AiSearchView({
   results,
   title,
   degradedReason,
-  pipeline,
-  workerStatus,
   busy,
 }: AiSearchViewProps) {
+  // AI 队列和 worker 状态自己订阅，不经过 App（docs/09 P0-3）。
+  const pipeline = useEventStore(aiPipelineStore);
+  const workerStatus = useEventStore(aiWorkerStatusStore);
   return (
     <section className="ai-view">
       <div className="ai-toolbar">
@@ -3191,9 +3119,7 @@ function DetailRow({ label, value }: { label: string; value: string | null }) {
 
 function SettingsView({
   settings,
-  aiStatus,
   aiDiagnostics,
-  aiPipeline,
   aiBusy,
   onPatch,
   onAiStart,
@@ -3207,9 +3133,7 @@ function SettingsView({
   onMessage,
 }: {
   settings: AppSettings | null;
-  aiStatus: AiWorkerStatus | null;
   aiDiagnostics: AiDiagnostics | null;
-  aiPipeline: AiPipelineStatus | null;
   aiBusy: boolean;
   onPatch: (patch: Partial<AppSettings>) => Promise<void>;
   onAiStart: () => Promise<void>;
@@ -3222,6 +3146,9 @@ function SettingsView({
   onAiDownloadModel: (modelKey: string) => Promise<void>;
   onMessage: (message: string) => void;
 }) {
+  // worker 状态和 AI 队列自己订阅，不经过 App（docs/09 P0-3）。
+  const aiStatus = useEventStore(aiWorkerStatusStore);
+  const aiPipeline = useEventStore(aiPipelineStore);
   if (!settings) {
     return <EmptyState title="正在读取设置" body="配置文件位于应用本地数据目录。" />;
   }
@@ -3632,33 +3559,41 @@ function EmptyState({
   );
 }
 
-const TaskStatus = memo(function TaskStatus({
-  queue,
-  progress,
-  aiStatus,
-  aiPipeline,
-}: {
-  queue: QueueStatus | null;
-  progress?: ScanProgress;
-  aiStatus: AiWorkerStatus | null;
-  aiPipeline: AiPipelineStatus | null;
-}) {
-  const progressText = progress
-    ? `扫描 ${progress.processed.toLocaleString("zh-CN")}/${progress.total.toLocaleString("zh-CN")}`
-    : "扫描空闲";
-  const queueText = queue
-    ? `缩略图队列 ${queue.p0} · 运行 ${queue.running}${queue.paused ? " · 已暂停" : ""}`
-    : "队列状态未知";
-  const aiText = `AI ${aiStatusText(aiStatus?.status)}`;
-  const aiQueueText = aiPipeline
-    ? `CLIP ${aiPipeline.embeddingPending} · 标签 ${aiPipeline.taggingPending}`
-    : "AI 队列未知";
-  return (
-    <span>
-      {progressText} · {queueText} · {aiText} · {aiQueueText}
-    </span>
-  );
-});
+/** 逐项映射；没有任何一项变化（引用相同）时返回原数组，React 据此跳过更新。 */
+function mapChanged<T>(list: T[], fn: (item: T) => T): T[] {
+  let changed = false;
+  const next = list.map((item) => {
+    const mapped = fn(item);
+    if (mapped !== item) changed = true;
+    return mapped;
+  });
+  return changed ? next : list;
+}
+
+/** 把缩略图状态的窄字段合进记录；这几个字段都没变时返回原对象，卡片不重渲染。 */
+function applyThumbnailUpdate(
+  image: ImageRecord,
+  update: ThumbnailUpdate | undefined,
+): ImageRecord {
+  if (
+    !update ||
+    (image.thumbStatus === update.thumbStatus &&
+      image.thumbHash === update.thumbHash &&
+      image.thumbError === update.thumbError &&
+      image.width === update.width &&
+      image.height === update.height)
+  ) {
+    return image;
+  }
+  return {
+    ...image,
+    thumbStatus: update.thumbStatus,
+    thumbHash: update.thumbHash,
+    thumbError: update.thumbError,
+    width: update.width,
+    height: update.height,
+  };
+}
 
 /** 扫描完成提示里的大小写冲突告警（docs/11 §6.1、R1-6）；没有冲突时为空串。 */
 function caseConflictWarning(conflicts: CaseConflict[]): string {
@@ -3761,15 +3696,6 @@ function mvp4StatusText(status: string): string {
   if (status === "pending") return "待处理";
   if (status === "failed") return "失败";
   return "未启用";
-}
-
-function aiStatusText(status: string | null | undefined): string {
-  if (status === "ready") return "运行中";
-  if (status === "starting") return "启动中";
-  if (status === "stopping") return "停止中";
-  if (status === "degraded") return "降级";
-  if (status === "stopped") return "已停止";
-  return "未知";
 }
 
 function isTypingTarget(target: EventTarget | null): boolean {

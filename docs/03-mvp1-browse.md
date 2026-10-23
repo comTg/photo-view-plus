@@ -155,7 +155,7 @@
 - 失败处理：
   - 解码失败 → `thumb_status='failed'`，记 error 列（新加在 0001？决定加 `thumb_error TEXT`）
   - 不支持格式 → `thumb_status='unsupported'`
-- 支持用户从详情面板或图片右键菜单手动重新生成单张缩略图：先重置为 `pending`，再进入同一个 P0 队列；任务完成后发送 `thumbnail:updated`
+- 支持用户从详情面板或图片右键菜单手动重新生成单张缩略图：先重置为 `pending`，再进入同一个 P0 队列；任务完成后随下一批 `thumbnails:updated` 发出（docs/11 R5：每 250ms 合成一批，只带窄字段）
 - 优先级 P0，与扫描 P1 并发跑（扫描喂入新文件，缩略图立刻拣起来做）
 - CPU 限流：缩略图生成是完整解码 + resize + WebP 编码，必须有专用 CPU semaphore；默认按逻辑核数取一半，1-2 核为 1，封顶 6，避免大图库首扫把 CPU 长时间打满导致 UI 卡顿
 

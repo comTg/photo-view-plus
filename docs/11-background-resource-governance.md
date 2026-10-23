@@ -217,7 +217,7 @@
 | R2 | 资源治理器：负载模式、可调许可、预算表、GPU 占空比、`system:load_mode` 事件、状态栏与手动覆盖 | ✅ 前后对比待 R0 / R6 实测 |
 | R3 | 可见区域优先的缩略图 | ✅ |
 | R4 | 缩略图改有损编码 + 迁移 + dHash 回归 | ⬜ |
-| R5 | 事件合批 + docs/09 P0-3 剩余部分 | ⬜ |
+| R5 | 事件合批 + docs/09 P0-3 剩余部分 | ✅ |
 | R6 | 回归测量（与 R0 同场景）+ 写结论 | ⬜ |
 
 **每项的验证**：
@@ -273,6 +273,16 @@
 - 只告警，不改用户的目录，也不改表结构。
 - 测试：`scan_service` 单元测试 3 个，覆盖同一父目录下的两种和三种写法、不同父目录下的同名目录不算冲突、相对根目录的父路径。
 - 端到端：本机用 `fsutil file setCaseSensitiveInfo` 打开一个测试目录的大小写敏感，造出 `PD2324\camera` 和 `PD2324\Camera`，test profile 扫描后提示里出现了告警；扫描普通测试图库时没有误报。
+
+**R5**（docs/09 P2-4、P0-3）：
+- 缩略图完成事件合批：`thumbnail_service::ThumbnailEvents`。任务完成只记 id；第一张完成后等 250ms，把这段时间完成的图用一次查询读出窄字段（id、状态、hash、错误、宽、高），发一个 `thumbnails:updated`。手动重刷也走这条路，旧的逐张事件 `thumbnail:updated` 删除。
+- 前端按窄字段给各视图里的记录打补丁，没变的记录沿用旧对象，有记录真变了数组才换新引用；原来按动画帧合批的代码删除。
+- 进度类事件下沉（docs/09 P0-3 剩余部分）：新增 `src/lib/stores.ts`，`queue:status`、`ai:worker_status`、`ai:progress`、`scan:progress` 各自全局只挂一个监听，页脚 `TaskStatus`、设置页、AI 视图各自订阅；内容和上一条相同时不触发重渲染。App 不再持有这四个状态。
+- 实测（test profile）：
+  - 新目录 300 张缩略图：事件从 300 个降到 36 批（每批最多 11 张，批次间隔 ≥ 262ms），每批 1 次查询；原来每张图各发一次事件，还要回读一条 30 列记录。
+  - 选中一个新目录扫描：可见的 50 张里 30 张先显示"生成中"，生成完全部出图，没有重拉列表；手动"重刷缩略图"后提示"缩略图已重新生成"。
+  - React 提交统计（按 DevTools 的判定）：空闲 20 秒，改前 App 整体重渲染 30 次（`queue:status` 每秒一次、`ai:progress` 每 2 秒一次，工具栏和侧栏跟着重渲染），改后 0 次；一次无变化的重扫（12 秒），改前 21 次，改后 2 次（扫描完成提示、目录列表刷新），页脚状态单独渲染 3 次。
+- 测试：`thumbnail_service::tests::event_batches_merge_ids_within_window`、`images_tests::thumbnail_updates_and_count_use_narrow_queries`。
 
 ## 8. 验收指标（初值，R0 之后修订）
 

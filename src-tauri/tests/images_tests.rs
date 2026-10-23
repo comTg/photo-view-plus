@@ -218,3 +218,74 @@ fn query_filters_by_all_tags_in_sql_with_matching_total() {
         serde_json::from_str(r#"{"tagNamesAll":["猫"]}"#).expect("json");
     assert_eq!(with_tags.tag_names_all, Some(vec!["猫".to_string()]));
 }
+
+// docs/11 R5：thumbnails:updated 只带窄字段，按请求顺序返回，库里没有的 id 跳过。
+// R1-5：count 与 query 的 total 用同一套过滤条件。
+#[test]
+fn thumbnail_updates_and_count_use_narrow_queries() {
+    let dir = tempfile::tempdir().expect("tempdir");
+    let pool = photo_view_plus_lib::db::open(&dir.path().join("app.sqlite")).expect("db");
+    let conn = pool.get().expect("conn");
+    let root = roots_repo::insert(
+        &conn,
+        &NewRoot {
+            path: dir.path().to_string_lossy().to_string(),
+            label: None,
+            root_type: "local".to_string(),
+        },
+        1,
+    )
+    .expect("root");
+    let insert = |rel: &str, extension: &str| -> i64 {
+        let image = NewImageMetadata {
+            root_id: root.id,
+            rel_path: rel.to_string(),
+            filename: rel.to_string(),
+            extension: extension.to_string(),
+            size_bytes: 10,
+            mtime: 1,
+            width: Some(4000),
+            height: None,
+            orientation: None,
+            taken_at: None,
+            gps_lat: None,
+            gps_lng: None,
+            camera_make: None,
+            camera_model: None,
+        };
+        images_repo::upsert_scanned_image(&conn, &image, 1)
+            .expect("insert")
+            .image_id()
+    };
+    let ready = insert("a.jpg", "jpg");
+    let failed = insert("b.png", "png");
+    images_repo::update_thumbnail_ready(&conn, ready, "abcdef0123456789", Some(1), Some(3000))
+        .expect("ready");
+    images_repo::update_thumbnail_failed(&conn, failed, "failed", "boom").expect("failed");
+
+    let updates = images_repo::thumbnail_updates(&conn, &[failed, 9_999, ready]).expect("updates");
+    assert_eq!(updates.len(), 2);
+    assert_eq!(updates[0].id, failed);
+    assert_eq!(updates[0].thumb_status, "failed");
+    assert_eq!(updates[0].thumb_error.as_deref(), Some("boom"));
+    assert_eq!(updates[1].id, ready);
+    assert_eq!(updates[1].thumb_status, "ready");
+    assert_eq!(updates[1].thumb_hash.as_deref(), Some("abcdef0123456789"));
+    // 已知的原生宽度不被缩略图回填覆盖，缺的高度会补上。
+    assert_eq!(
+        (updates[1].width, updates[1].height),
+        (Some(4000), Some(3000))
+    );
+
+    let all = ImageQueryParams::default();
+    let jpg_only = ImageQueryParams {
+        formats: Some(vec!["jpg".to_string()]),
+        ..ImageQueryParams::default()
+    };
+    assert_eq!(images_repo::count(&conn, &all).expect("count"), 2);
+    assert_eq!(images_repo::count(&conn, &jpg_only).expect("count"), 1);
+    assert_eq!(
+        images_repo::query(&conn, &jpg_only).expect("query").total,
+        1
+    );
+}

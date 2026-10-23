@@ -3,7 +3,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use serde::Deserialize;
-use tauri::{AppHandle, Emitter, State};
+use tauri::{AppHandle, Manager, State};
 use tokio::sync::mpsc;
 
 use crate::config::AppPaths;
@@ -120,17 +120,13 @@ pub fn images_regenerate_thumbnail(
     )
     .map_err(|e| e.to_string())?;
 
-    let pool = pool.inner().clone();
+    // 完成后和批量生成一样走 thumbnails:updated（docs/11 R5），前端据此提示"已重新生成"。
     tauri::async_runtime::spawn(async move {
         if completion_rx.recv().await.is_none() {
             return;
         }
-        let updated = pool
-            .get()
-            .ok()
-            .and_then(|conn| images_repo::get_detail(&conn, id).ok().flatten());
-        if let Some(updated) = updated {
-            let _ = app.emit("thumbnail:updated", updated);
+        if let Some(events) = app.try_state::<thumbnail_service::ThumbnailEvents>() {
+            events.notify(id);
         }
     });
 

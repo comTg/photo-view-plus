@@ -283,7 +283,7 @@ scan_start, scan_pause, scan_cancel, scan_status
 images_query(params), images_get_detail, images_update_meta
 thumbs_path(image_id, size)
 images_regenerate_thumbnail(image_id)
-events: scan:progress, scan:done, scan:error, thumbnail:updated
+events: scan:progress, scan:done, scan:error, thumbnails:updated（每 250ms 一批，只带 id / 状态 / hash / 宽高 / 错误，docs/11 R5）
 
 // MVP2
 hash_start, phash_start, dedup_groups, dedup_resolve, dedup_undo, trash_move

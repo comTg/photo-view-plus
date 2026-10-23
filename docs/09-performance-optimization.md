@@ -29,7 +29,7 @@
 |----|----|------|--------|------|
 | P0-1 | DB/后端 | 扫描逐文件各自 autocommit，全程无批量事务 | P0 | ✅ |
 | P0-2 | 后端 | 人脸聚类每批 8 张就全量 O(n²) 重建 | P0 | ✅ |
-| P0-3 | 前端 | 全 App 在每个高频事件上整树重渲染 | P0 | 🔄 部分 |
+| P0-3 | 前端 | 全 App 在每个高频事件上整树重渲染 | P0 | ✅ |
 | P0-4 | 前端 | 内联 `onPreviewImage` 箭头破坏 `ImageGrid` 的 memo | P0 | ✅ |
 | P0-5 | DB | Timeline N+1：每桶一次 `strftime` 全表扫描 | P0 | ✅ |
 | P0-6 | DB | 主画廊默认排序无索引 + `LIKE '%%'` + COUNT 二次全扫 | P0 | 🔄 部分 |
@@ -43,7 +43,7 @@
 | P2-1 | 后端 | 去重分组 insert 无事务（第二处写放大） | P2 | ✅ |
 | P2-2 | 后端 | `batch_resolve` N+1（逐 item `get_detail`） | P2 | ⬜ |
 | P2-3 | 后端 | 热路径缺 `prepare_cached`，每次重编译 SQL | P2 | ✅ |
-| P2-4 | 后端 | `get_detail` 仅为发 `thumbnail:updated` 事件跑 30 列 JOIN | P2 | ⬜ |
+| P2-4 | 后端 | `get_detail` 仅为发 `thumbnail:updated` 事件跑 30 列 JOIN | P2 | ✅ |
 | P2-5 | 后端 | `probe_image` 双开文件（尺寸 + EXIF 各一次） | P2 | ✅ |
 | P2-6 | DB | `IMAGE_SELECT` 每行都带无界 `ocr_text` | P2 | ✅ |
 | P2-7 | 前端 | MapView 一次建 3000 个 Leaflet marker，无聚类 | P2 | ⬜ |
@@ -96,9 +96,13 @@
 - **位置**：[App.tsx:137-215](../src/App.tsx#L137-L215)（state 声明）、[:371-379](../src/App.tsx#L371-L379)（scan 进度 handler）、[:396-398](../src/App.tsx#L396-L398)、[:446-452](../src/App.tsx#L446-L452)（监听器）
 - **方案**：把进度相关 state 与画廊/工具栏/页脚拆成独立组件或 context slice，让进度更新只重渲订阅它的小组件。可分阶段做：先抽 `TaskStatus`/footer 已 memo 的部分的数据源，再抽工具栏。
 - **验证**：`pnpm lint && pnpm typecheck && pnpm test`；`pnpm tauri dev` 开 React DevTools Profiler，扫描时确认外壳不再随每 tick 重渲。
-- **状态**：🔄 部分完成（2026-07-02）
+- **状态**：✅ 已完成（2026-07-02 第一部分；2026-10-23 剩余部分，即 docs/11 R5）
 - **实测 / 备注**：
-  - **已完成（安全、可静态验证的部分）**：
+  - **2026-10-23 剩余部分（docs/11 R5）**：
+    - 新增 [stores.ts](../src/lib/stores.ts)：`queue:status`、`ai:worker_status`、`ai:progress`、`scan:progress` 各自全局只挂一个监听，组件用 `useEventStore`（`useSyncExternalStore`）订阅；内容和上一条相同（浅比较）时沿用旧对象，不触发重渲染。
+    - 页脚的 [TaskStatus](../src/components/system/TaskStatus.tsx) 改为自己订阅；设置页和 AI 视图自己订阅 worker 状态和 AI 队列；App 里删掉 `queue` / `scanProgress` / `aiStatus` / `aiPipeline` 四个状态。`scan:progress` 在 App 里只剩安排列表刷新的副作用，`ai:worker_status` 只剩"就绪后重跑降级搜索"。
+    - 实测（test profile，React 提交钩子按 DevTools 的判定统计）：空闲 20 秒，改前 App 整体重渲染 30 次（工具栏、侧栏跟着重渲染），改后 0 次；一次无变化的重扫（12 秒），改前 App 重渲染 21 次，改后 2 次（扫描完成提示 + 目录列表刷新），只有页脚状态渲染 3 次。
+  - **2026-07-02 已完成（安全、可静态验证的部分）**：
     1. 昂贵的 `ImageGrid` 已由 [[P0-4]] 隔离（memo + 全部 props 稳定）——这是 P0-3 问题里最贵的子树。
     2. `FilterBar` 包进 `memo`（[App.tsx](../src/App.tsx)）：其 props 全是 state 值 + 稳定 setter，进度 tick 时直接跳过。
     3. `DetailPane` 包进 `memo`，并把它的 3 个内联箭头（`onRegenerateThumbnail`/`onPreview`/`onFindSimilar`）用 `useCallback` 稳定，使详情面板在不改变选中项的高频事件时跳过重渲。
@@ -273,8 +277,13 @@
 - **位置**：[thumbnail_service.rs:137-149](../src-tauri/src/services/thumbnail_service.rs#L137-L149)
 - **方案**：只发 id + status 的轻量 payload；或合并 UI 刷新。与前端 P1-6 联动。
 - **验证**：`cargo test`；确认前端仍能正确更新缩略图状态。
-- **状态**：⬜ 待办
-- **实测 / 备注**：_（完成后填写）_
+- **状态**：✅ 已完成（2026-10-23，即 docs/11 R5）
+- **实测 / 备注**：
+  - 改动文件：[thumbnail_service.rs](../src-tauri/src/services/thumbnail_service.rs)（`ThumbnailEvents`、`next_event_batch`）、[images_repo.rs](../src-tauri/src/repo/images_repo.rs)（`ThumbnailUpdate`、`thumbnail_updates`，删掉不再使用的 `get_detail_light`）、[images.rs](../src-tauri/src/commands/images.rs)、[App.tsx](../src/App.tsx)。
+  - 任务完成只记 id；第一张完成后等 250ms，把这段时间完成的图用一次 `IN` 查询读出 6 个窄字段（id、状态、hash、错误、宽、高），发一个 `thumbnails:updated`。旧事件 `thumbnail:updated` 删除，手动重刷也走新事件。
+  - 前端按窄字段给各视图里的记录打补丁，字段没变就沿用旧对象；有记录真变了数组才换新引用。原来按动画帧合批的代码删除。
+  - 实测：新目录 300 张缩略图，事件从 300 个降到 36 批（每批最多 11 张，批次间隔 ≥ 262ms）；每批 1 次查询，原来每张图 1 次 30 列 JOIN。
+  - 测试：`thumbnail_service::tests::event_batches_merge_ids_within_window`、`images_tests::thumbnail_updates_and_count_use_narrow_queries`。
 
 ### P2-5 · `probe_image` 单次读取
 - **层**：后端
@@ -380,3 +389,5 @@
 | 2026-07-02 | P2-1 | 去重 exact/visual 分组 insert 包进单事务批量提交 | 待提交 |
 | 2026-07-02 | P2-6 | 画廊列表查询用 `IMAGE_SELECT_LIST`（ocr_text 置 NULL），不读无界全文 | 待提交 |
 | 2026-10-23 | P1-5 | 扫描期刷新：停在顶部只重拉头部一段，往下翻了只查数量并提示"有 N 张新照片"（docs/11 R1-5） | perf(R1-5) |
+| 2026-10-23 | P2-4 | 缩略图完成事件每 250ms 合成一批 `thumbnails:updated`，只带窄字段（docs/11 R5） | perf(R5) |
+| 2026-10-23 | P0-3 | 剩余部分：进度类事件改为共享订阅，页脚 / 设置页 / AI 视图自己订阅，App 不再随之重渲染（docs/11 R5） | perf(R5) |
