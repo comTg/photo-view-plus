@@ -526,7 +526,7 @@ fn flush_scan_batch(
     // 事务提交后才入队缩略图，避免任务读到尚未提交的行。
     let mut to_thumb: Vec<(i64, PathBuf, String, Option<i64>)> = Vec::with_capacity(batch.len());
 
-    let tx = conn.transaction()?;
+    let tx = begin_write(conn)?;
     for prepared in batch.drain(..) {
         match images_repo::upsert_scanned_image(&tx, &prepared.image, now) {
             Ok(outcome) => {
@@ -580,6 +580,16 @@ fn flush_scan_batch(
     Ok(())
 }
 
+/// 扫描批量写库的事务：一开始就拿写锁（IMMEDIATE）。
+///
+/// 默认的 DEFERRED 事务里，upsert 先查已有记录（读）再写。读和第一次写之间如果别的连接提交过写入
+/// （缩略图生成随时在写），WAL 模式下这次写会立即报 database is locked（SQLITE_BUSY_SNAPSHOT，
+/// 不受 busy_timeout 约束），之后整批都写不进去，扫描却照常报"完成"。IMMEDIATE 在开头按 busy_timeout
+/// 排队拿写锁，拿到后别的连接要等它提交。
+fn begin_write(conn: &mut rusqlite::Connection) -> rusqlite::Result<rusqlite::Transaction<'_>> {
+    conn.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)
+}
+
 fn is_supported_image(path: &Path) -> bool {
     path.extension()
         .map(|ext| {
@@ -627,7 +637,7 @@ fn mark_missing_deleted(
     let mut removed = 0;
     // states 仅含扫描开始时未删除的行；本次扫描没访问到的即为磁盘上已消失。
     // 一并放进单个事务批量标记删除，避免逐行 autocommit 写放大。
-    let tx = conn.transaction()?;
+    let tx = begin_write(conn)?;
     for rel_path in states.keys() {
         if !visited.contains(rel_path) {
             images_repo::mark_deleted(&tx, root_id, rel_path, now)?;
@@ -888,6 +898,45 @@ mod tests {
         assert_eq!(conflicts.len(), 2);
         assert_eq!(conflicts[0].parent, "");
         assert_eq!(conflicts[1].parent, "PD2324");
+    }
+
+    #[test]
+    fn batch_transaction_takes_the_write_lock_up_front() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.sqlite");
+        let pool = crate::db::open(&path).expect("db");
+        let mut batch = pool.get().expect("conn");
+        let other = rusqlite::Connection::open(&path).expect("other");
+        other
+            .busy_timeout(std::time::Duration::ZERO)
+            .expect("busy timeout");
+        let insert_root = |conn: &rusqlite::Connection, path: &str| {
+            conn.execute(
+                "INSERT INTO roots(path, type, created_at) VALUES (?1, 'local', 0)",
+                [path],
+            )
+        };
+        let read = |conn: &rusqlite::Connection| {
+            conn.query_row("SELECT count(*) FROM images", [], |row| {
+                row.get::<_, i64>(0)
+            })
+        };
+
+        // 原来的 DEFERRED：先读，别的连接（缩略图生成）提交一次写入，再写就立即失败。
+        {
+            let tx = batch.transaction().expect("deferred");
+            read(&tx).expect("read");
+            insert_root(&other, "a").expect("other connection writes");
+            let error = insert_root(&tx, "b").expect_err("stale snapshot");
+            assert!(error.to_string().contains("locked"), "{error}");
+        }
+
+        // IMMEDIATE：开头就拿到写锁，别的连接这时写不进来（实际运行时按 busy_timeout 等），整批写入不受影响。
+        let tx = begin_write(&mut batch).expect("immediate");
+        read(&tx).expect("read");
+        assert!(insert_root(&other, "c").is_err());
+        insert_root(&tx, "d").expect("write");
+        tx.commit().expect("commit");
     }
 
     #[test]

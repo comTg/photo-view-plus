@@ -73,6 +73,7 @@
   - 改动文件：[scan_service.rs](../src-tauri/src/services/scan_service.rs)。将 `scan_one_file` 拆为 `prepare_scan_file`（探测/构造记录，**无 DB 访问**，事务外调用）+ `flush_scan_batch`（单事务批量 upsert，提交后再入队缩略图）。`SCAN_BATCH_SIZE=500`。`mark_missing_deleted` 也改为单事务批量。
   - **关键设计**：探测（读图头 + 解 EXIF，磁盘 I/O）刻意留在事务外累积，事务只包内存→WAL 写入，避免长时间持有 WAL 写锁拖住并发的缩略图 worker（撞 `busy_timeout=5s`）。取消扫描时先 flush 已探测批次再暂停，不丢工作。
   - 缩略图入队时机从「每文件即时」变为「每批提交后」，功能等价（后台任务，微小延迟无感）；`is_network` 判定移到循环外只算一次。
+  - **2026-10-23 修正（docs/11 R6 测量时发现）**：批量事务原来是默认的 DEFERRED，`upsert_scanned_image` 先查已有记录再写。读和第一次写之间如果缩略图线程提交过写入，WAL 模式下写会立即报 `database is locked`（SQLITE_BUSY_SNAPSHOT，不等 busy_timeout），整批 500 条都写不进去，扫描照样报"完成"。实测本地 1,500 张的目录扫完只入库 500 张。改成 IMMEDIATE 事务（开头按 busy_timeout 排队拿写锁），`mark_missing_deleted` 一并改；回归测试 `scan_service::tests::batch_transaction_takes_the_write_lock_up_front` 先复现原来的失败，再验证 IMMEDIATE 下不受影响。
   - 验证：`cargo check` ✓、`cargo clippy --all-targets -- -D warnings` ✓、`cargo test` 除 `thumbnail_tests` 外全绿（`images_tests::upsert_and_query_roundtrip`、`dedup_tests` 等覆盖 upsert/DB 路径）。
   - ⚠️ 收益修正：本项目 WAL + `synchronous=NORMAL` 下 commit **不** per-commit fsync（仅 checkpoint 时同步），故「提速数倍」偏乐观；批处理的实际收益来自减少 WAL 帧churn、事务机制开销与 FTS5 触发器提交次数。真实大库导入耗时前后对比待 `pnpm tauri dev` 实机补测。
   - ⚠️ 遗留：`cargo test` 的 `thumbnail_tests` 报 `STATUS_ENTRYPOINT_NOT_FOUND (0xc0000139)`，经 `git stash` 回退到改动前代码复现同样错误 → 确认为**改动前就存在的原生 DLL 加载环境问题**，与本次无关（建议单独排查，疑似 webp/heif 编解码 DLL 或测试残留 DLL 版本不匹配）。
